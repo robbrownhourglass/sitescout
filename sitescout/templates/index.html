@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Site Scout — Ireland</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root{
+    --ink:#1b2a24; --paper:#f6f4ee; --card:#ffffff; --line:#e2ddd0;
+    --moss:#2f5d4f; --moss-dark:#1f4237; --amber:#c07a2b; --rust:#a4472d;
+    --muted:#6b7570; --ok:#2f5d4f; --warn:#c07a2b; --bad:#a4472d;
+  }
+  *{box-sizing:border-box;}
+  html, body{ height:100%; margin:0; }
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height:1.45;
+  }
+
+  /* ---- App shell: a full-viewport flex column (topbar + map), with the
+     landing hero as an absolutely-positioned overlay on top of it. The
+     search bar itself is a single DOM node that gets physically moved
+     from the hero into the topbar on first search (see enterResultsMode). */
+  #app{ position:relative; height:100vh; overflow:hidden; display:flex; flex-direction:column; }
+
+  #landingHero{
+    position:absolute; inset:0; z-index:50; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:18px; background:var(--paper);
+    padding:24px; text-align:center; transition: opacity .35s ease, transform .35s ease;
+  }
+  #landingHero.leaving{ opacity:0; transform:translateY(-30px); pointer-events:none; }
+  #landingHero h1{ margin:0; font-size:34px; letter-spacing:-0.01em; }
+  #landingHero .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
+  #landingHero .hero-examples{ display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+
+  .spinner{
+    width:15px; height:15px; border:2px solid rgba(0,0,0,.15); border-top-color:var(--moss);
+    border-radius:50%; display:inline-block; animation:spin .7s linear infinite; vertical-align:-2px; flex:none;
+  }
+  .spinner.on-dark{ border-color:rgba(255,255,255,.35); border-top-color:#fff; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+
+  .hero-status{
+    display:none; align-items:center; gap:8px; font-size:13px; color:var(--muted); min-height:20px;
+  }
+  .hero-status.err{ color:var(--bad); }
+
+  #picker{ width:min(520px,90vw); }
+  .picker-box{ padding:14px 16px; background:var(--card); border:1px solid var(--line); border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,.08); }
+  .picker-box .picker-title{ font-size:12.5px; color:var(--muted); margin-bottom:8px; }
+  .picker-box button.opt{
+    display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; border:1px solid var(--line);
+    border-radius:6px; background:var(--paper); cursor:pointer; font-size:13.5px; color:var(--ink);
+  }
+  .picker-box button.opt:hover{ border-color:var(--moss); background:#eaf0ec; }
+  .picker-box button.opt .tag{ float:right; font-size:11px; color:var(--muted); }
+
+  .search-bar{ display:flex; gap:8px; width:min(620px,90vw); }
+  .search-bar input[type=text]{
+    flex:1; min-width:0; padding:11px 14px; border:1px solid var(--line); border-radius:8px;
+    font-size:14px; background:var(--card); color:var(--ink);
+  }
+  .search-bar input[type=text]:focus{ outline:2px solid var(--moss); outline-offset:1px; }
+  .search-bar button{
+    padding:11px 18px; border:none; border-radius:8px; background:var(--moss); color:#fff;
+    font-size:14px; font-weight:600; cursor:pointer; white-space:nowrap;
+  }
+  .search-bar button:hover{ background:var(--moss-dark); }
+  button.ghost{
+    background:transparent; color:var(--moss); border:1px solid var(--moss); border-radius:8px;
+    padding:8px 14px; font-size:13px; cursor:pointer;
+  }
+  button.ghost:hover{ background:#eaf0ec; }
+
+  #topbar{
+    flex:none; height:64px; display:flex; align-items:center; gap:16px; padding:0 20px;
+    border-bottom:1px solid var(--line); background:var(--card);
+    opacity:0; transform:translateY(-10px); transition: opacity .3s ease, transform .3s ease;
+  }
+  #topbar.visible{ opacity:1; transform:translateY(0); }
+  #topbar h1{ margin:0; font-size:16px; font-weight:700; white-space:nowrap; flex:none; }
+  #searchBarSlot{ flex:none; }
+  #searchBarSlot .search-bar{ width:420px; max-width:40vw; }
+  #topbarStatus{
+    flex:1; min-width:0; text-align:right; font-size:12.5px; color:var(--muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  #topbarStatus.err{ color:var(--bad); }
+
+  #mapWrap{ flex:1; position:relative; opacity:0; transition: opacity .3s ease; min-height:0; }
+  #mapWrap.visible{ opacity:1; }
+  #map{ position:absolute; inset:0; }
+
+  #tileStrip{
+    position:absolute; top:0; right:0; bottom:0; width:64px; z-index:1000;
+    background:var(--card); border-left:1px solid var(--line);
+    display:flex; flex-direction:column; align-items:center; padding:14px 0; gap:10px; overflow-y:auto;
+  }
+  .tile-btn{
+    width:44px; height:44px; flex:none; border-radius:10px; border:1px solid var(--line); background:var(--paper);
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer; color:var(--ink); position:relative; padding:0;
+  }
+  .tile-btn:hover{ border-color:var(--moss); }
+  .tile-btn.active{ border-color:var(--moss); background:#eaf0ec; }
+  .tile-btn svg{ width:22px; height:22px; }
+  .tile-dot{ width:7px; height:7px; border-radius:50%; background:var(--muted); position:absolute; top:4px; right:4px; }
+  .tile-dot.ok{ background:var(--ok); }
+  .tile-dot.warn{ background:var(--warn); }
+  .tile-dot.bad{ background:var(--bad); }
+  .tile-strip-divider{ width:32px; height:1px; background:var(--line); margin:4px 0; flex:none; }
+
+  #detailPanel{
+    position:absolute; top:0; right:64px; bottom:0; width:400px; max-width:88vw;
+    background:var(--card); border-left:1px solid var(--line); box-shadow:-8px 0 20px rgba(0,0,0,.12);
+    transform:translateX(100%); transition: transform .25s ease; z-index:999; overflow-y:auto; padding:22px 20px;
+  }
+  #detailPanel.open{ transform:translateX(0); }
+  .detail-close{
+    position:absolute; top:12px; right:14px; border:none; background:none; font-size:22px; line-height:1;
+    cursor:pointer; color:var(--muted); padding:4px;
+  }
+  .detail-close:hover{ color:var(--ink); }
+
+  /* Card content, now used inside #detailPanel rather than a grid of boxes */
+  .card{ display:flex; flex-direction:column; gap:10px; padding-right:20px; }
+  .card h3{ margin:0; font-size:15px; display:flex; align-items:center; gap:8px; }
+  .card h3 .dot{ width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none; }
+  .card h3 .dot.ok{ background:var(--ok); }
+  .card h3 .dot.warn{ background:var(--warn); }
+  .card h3 .dot.bad{ background:var(--bad); }
+  .card .body{ font-size:13.5px; color:var(--ink); }
+  .card .body .muted{ color:var(--muted); }
+  .card ul{ margin:4px 0 0; padding-left:18px; }
+  .card li{ margin-bottom:3px; }
+  .badge{
+    display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    padding:2px 8px; border-radius:999px; background:#eaf0ec; color:var(--moss-dark);
+  }
+  .badge.live{ background:#eaf0ec; color:var(--moss-dark); }
+  .badge.manual{ background:#fbeee0; color:var(--amber); }
+  .badge.link{ background:#f1eee4; color:var(--muted); }
+  .card .src{ padding-top:10px; border-top:1px dashed var(--line); font-size:12px; }
+  .card .src a{ color:var(--moss); text-decoration:none; }
+  .card .src a:hover{ text-decoration:underline; }
+  .request-btn{
+    display:inline-block; margin-top:4px; font-size:12.5px; padding:6px 10px; border-radius:6px;
+    background:var(--paper); border:1px solid var(--line); color:var(--ink); text-decoration:none;
+  }
+  .request-btn:hover{ border-color:var(--moss); color:var(--moss-dark); }
+
+  .info-card h3{ margin:0 0 4px; font-size:15px; }
+  .info-card h4{ color:var(--ink); font-size:13px; margin:16px 0 6px; }
+  .info-card p{ font-size:13px; color:var(--ink); }
+  .info-card ol{ padding-left:18px; margin:0; font-size:12.5px; color:var(--muted); }
+  .info-card li{ margin-bottom:5px; }
+  .info-card a{ color:var(--moss); }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <div id="landingHero">
+    <h1>Site Scout — Ireland</h1>
+    <p class="tagline">Enter an Eircode or address for a site. This pulls together geology &amp; subsoil, water table &amp; flood risk, archaeology &amp; heritage, protected structures, property boundary, planning applications, and utilities — from Ireland's public data sources.</p>
+    <div id="searchBar" class="search-bar">
+      <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
+      <button id="scoutBtn">Scout site</button>
+    </div>
+    <div class="hero-examples">
+      <button class="ghost" id="exampleEircodeBtn">Try Eircode example</button>
+      <button class="ghost" id="exampleBtn">Try Trim Castle example</button>
+    </div>
+    <div id="heroStatus" class="hero-status">
+      <span id="heroSpinner" class="spinner" style="display:none"></span>
+      <span id="heroStatusText"></span>
+    </div>
+    <div id="picker"></div>
+  </div>
+
+  <header id="topbar">
+    <h1>Site Scout</h1>
+    <div id="searchBarSlot"></div>
+    <div id="topbarStatus"></div>
+  </header>
+
+  <main id="mapWrap">
+    <div id="map"></div>
+    <nav id="tileStrip"></nav>
+    <aside id="detailPanel">
+      <button id="detailClose" class="detail-close" aria-label="Close">×</button>
+      <div id="detailContent"></div>
+    </aside>
+  </main>
+
+</div>
+
+<script>
+const statusEl = document.getElementById('topbarStatus');
+const heroStatusEl = document.getElementById('heroStatus');
+const heroStatusTextEl = document.getElementById('heroStatusText');
+const heroSpinnerEl = document.getElementById('heroSpinner');
+const pickerEl = document.getElementById('picker');
+const landingHeroEl = document.getElementById('landingHero');
+const topbarEl = document.getElementById('topbar');
+const searchBarSlotEl = document.getElementById('searchBarSlot');
+const searchBarEl = document.getElementById('searchBar');
+const addressInputEl = document.getElementById('addressInput');
+const scoutBtnEl = document.getElementById('scoutBtn');
+const scoutBtnLabel = scoutBtnEl.textContent;
+const mapWrapEl = document.getElementById('mapWrap');
+const tileStripEl = document.getElementById('tileStrip');
+const detailPanelEl = document.getElementById('detailPanel');
+const detailContentEl = document.getElementById('detailContent');
+
+let map, marker;
+let baseLayers = {};      // built once, on first map init — "Street" / "Satellite"
+let overlayLayers = {};   // toggle label -> L.layerGroup, for the map's layer control
+let layerControl = null;
+let tileButtons = {};     // category key -> tile <button>, for highlighting the active one
+let activeTileKey = null;
+let resultsModeEntered = false;
+
+const CATEGORY_COLORS = {
+  boundary: '#a4472d',
+  archaeology: '#6b3fa0',
+  smrZone: '#a4472d',
+  niah: '#c07a2b',
+  planning: '#2f5d4f',
+  floodHigh: '#b3261e',
+  floodMedium: '#e08e00',
+  floodLow: '#4a90d9',
+};
+
+// Small self-contained line-icon set for the tile strip — one glyph per
+// category, no icon font/CDN dependency. All share the same stroke style
+// except utilities' lightning bolt, which reads more clearly filled solid.
+const ICON_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"';
+const TILE_ICONS = {
+  // irregular boundary outline + a map pin centred inside it
+  boundary: `<svg ${ICON_ATTRS}>
+      <path d="M4 8 6 4h9l5 3-2 10-8 3-6-2Z"/>
+      <path d="M12 10.4c-1.1 0-2 .9-2 2 0 1.6 2 3.7 2 3.7s2-2.1 2-3.7c0-1.1-.9-2-2-2Z"/>
+      <circle cx="12" cy="12.4" r=".55" fill="currentColor" stroke="none"/>
+    </svg>`,
+  // a rock mound with a pickaxe leaning across it
+  geology: `<svg ${ICON_ATTRS}>
+      <path d="M4 18c0-2.4 1.7-4.3 3.8-4.8.5-1.9 2.2-3.3 4.1-2.9 1.9.5 3 2.5 2.6 4.4 1.6.3 2.9 1.7 2.9 3.3H4Z"/>
+      <path d="M7.5 8.5l6.5 6.5"/>
+      <path d="M13.3 6.8l1.9-1.9 1.7 1.7-1.9 1.9"/>
+    </svg>`,
+  // water droplet
+  water: `<svg ${ICON_ATTRS}>
+      <path d="M12 3.5S6 11 6 15c0 3.3 2.7 6 6 6s6-2.7 6-6c0-4-6-11.5-6-11.5Z"/>
+    </svg>`,
+  // standing stones + lintel (a dolmen/portal tomb — apt for Irish SMR data)
+  archaeology: `<svg ${ICON_ATTRS}>
+      <path d="M6 20V9l1.5-4h1L10 9v11"/>
+      <path d="M14 20V9l1.5-4h1L18 9v11"/>
+      <path d="M5 9h14"/>
+      <path d="M4 20h16"/>
+    </svg>`,
+  // castle: crenellated top, body, arched doorway
+  niah: `<svg ${ICON_ATTRS}>
+      <path d="M5 10V6h2.3v2H9V6h2.3v2H13V6h2.3v2H17V6h2v4"/>
+      <path d="M6 10v10h12V10"/>
+      <path d="M10 20v-4a2 2 0 014 0v4"/>
+    </svg>`,
+  // a small pile of documents, folded-corner + text lines
+  planning: `<svg ${ICON_ATTRS}>
+      <path d="M6 7h7l3 3v11H6Z" opacity=".45" transform="translate(-1,-1)"/>
+      <path d="M7 5h7l3 3v13H7Z"/>
+      <path d="M14 5v3h3"/>
+      <path d="M9.5 12h6"/>
+      <path d="M9.5 15h6"/>
+      <path d="M9.5 18h4"/>
+    </svg>`,
+  // lightning bolt, filled solid for a bolder read at this size
+  utilities: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M13 2 5 14h5l-1 8 9-13h-6l1-7Z"/>
+    </svg>`,
+  // info: circled "i"
+  info: `<svg ${ICON_ATTRS}>
+      <circle cx="12" cy="12" r="8.5"/>
+      <line x1="12" y1="11" x2="12" y2="16"/>
+      <circle cx="12" cy="8" r=".6" fill="currentColor" stroke="none"/>
+    </svg>`,
+};
+
+// Status text is shown in two places depending on how far along we are:
+// heroStatus (still on the landing page, mid-resolve or mid-error) and
+// topbarStatus (once we've transitioned to results mode). Both get updated
+// together — whichever one is actually visible is a matter of which mode
+// we're in, not something this function needs to know about.
+function setStatus(msg, isErr){
+  statusEl.textContent = msg || '';
+  statusEl.className = isErr ? 'err' : '';
+  heroStatusTextEl.textContent = msg || '';
+  heroStatusEl.style.display = msg ? 'flex' : 'none';
+  heroStatusEl.className = 'hero-status' + (isErr ? ' err' : '');
+}
+
+// Disables the search input/button and swaps the button label for a
+// spinner while a request is in flight — works no matter which slot
+// #scoutBtn currently lives in (hero or topbar), since it's the same node.
+function setLoading(isLoading){
+  scoutBtnEl.disabled = isLoading;
+  addressInputEl.disabled = isLoading;
+  scoutBtnEl.innerHTML = isLoading ? '<span class="spinner on-dark"></span>' : scoutBtnLabel;
+  heroSpinnerEl.style.display = isLoading ? 'inline-block' : 'none';
+}
+
+function clearPicker(){ pickerEl.innerHTML = ''; }
+
+function showPicker(title, options, onChoose){
+  const list = options.map((o, i) =>
+    `<button class="opt" data-i="${i}">${o.value}${o.suffix ? `<span class="tag">${o.suffix}</span>` : ''}</button>`
+  ).join('');
+  pickerEl.innerHTML = `<div class="picker-box"><div class="picker-title">${title}</div>${list}</div>`;
+  pickerEl.querySelectorAll('button.opt').forEach(btn => {
+    btn.addEventListener('click', () => onChoose(options[parseInt(btn.dataset.i, 10)]));
+  });
+}
+
+// ---- Landing -> results transition. Only called once we already have a
+// fully-resolved report and the map has been positioned/populated (see
+// finalizeSearch below) — so the map is never revealed at its default
+// Ireland-wide view, only already zoomed to the right place. The search
+// bar is a single DOM node (#searchBar) physically moved from the hero
+// into the topbar slot here — no duplicated input to keep in sync, and
+// its event listeners survive the reparenting untouched.
+function enterResultsMode(){
+  if(resultsModeEntered) return;
+  resultsModeEntered = true;
+  searchBarSlotEl.appendChild(searchBarEl);
+  landingHeroEl.classList.add('leaving');
+  topbarEl.classList.add('visible');
+  mapWrapEl.classList.add('visible');
+  setTimeout(() => { landingHeroEl.style.display = 'none'; }, 400);
+}
+
+// The map is created lazily (first successful search) but its container
+// has real dimensions from page load — #mapWrap is opacity:0 while on the
+// landing page, not display:none, so it's already laid out at full size
+// by the time Leaflet measures it. No invalidateSize() dance needed.
+function ensureMap(){
+  if(map) return;
+  map = L.map('map').setView([53.35, -8.0], 7); // placeholder view, never actually shown (see above)
+  const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+  }).addTo(map);
+  const satelliteLayer = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Tiles © Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community', maxZoom: 19 }
+  );
+  baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
+}
+
+window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
+
+// Everything below talks only to this app's own Flask backend — never
+// directly to Autoaddress/Google/ArcGIS. Those calls (and their retry/
+// fallback logic) live server-side in the sitescout package; see CLAUDE.md
+// for why the old client-side approach (ireland-site-scout-demo.html) was
+// abandoned.
+async function postJSON(url, body){
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || data.status === 'error'){
+    throw new Error(data.message || ('Request failed (' + res.status + ')'));
+  }
+  return data;
+}
+
+// Drives the Autoaddress disambiguation loop: keeps calling /api/scout(/choose)
+// and, whenever the backend comes back with status "choose", shows a picker
+// and recurses on the option the user clicks — the browser-side equivalent
+// of the CLI's input() prompt in autoaddress.py. We stay on the landing
+// page (spinner + status text, no map) through this whole loop — the map
+// only ever appears once fully resolved, see finalizeSearch().
+function runScout(query){
+  setLoading(true);
+  setStatus('Resolving "' + query + '" via Autoaddress…');
+  clearPicker();
+
+  postJSON('/api/scout', { query })
+    .then(data => handleScoutResponse(query, data))
+    .catch(err => { setLoading(false); setStatus(err.message, true); });
+}
+
+function handleScoutResponse(query, data){
+  if(data.status === 'choose'){
+    setLoading(false);
+    setStatus('Multiple matches for "' + query + '" — pick one below.');
+    showPicker('Multiple matches — pick the address:', data.options, (choice) => {
+      clearPicker();
+      setLoading(true);
+      setStatus('Resolving "' + choice.value + '"…');
+      postJSON('/api/scout/choose', { query, href: choice.href })
+        .then(next => handleScoutResponse(query, next))
+        .catch(err => { setLoading(false); setStatus(err.message, true); });
+    });
+    return;
+  }
+  finalizeSearch(data.report);
+}
+
+const VULN_WARN_CODES = new Set(['X', 'E']);
+
+// ---- Map layers: every category we find becomes its own toggleable
+// overlay (L.control.layers), built fresh from report.sections on each
+// search. Rings/GeoJSON coordinates are all [lon, lat] on the wire
+// (ArcGIS with outSR=4326, or GeoJSON from the OPW WMS reprojection in
+// wms.py) — Leaflet wants [lat, lon], hence the swap below.
+
+function ringsToLatLngs(rings){
+  return rings.map(ring => ring.map(([lng, lat]) => [lat, lng]));
+}
+
+// A GeoJSON geometry (Polygon or MultiPolygon) -> an array of ring-sets,
+// each directly usable as an L.polygon() argument.
+function geometryToRingSets(geometry){
+  if(!geometry) return [];
+  if(geometry.type === 'Polygon') return [ringsToLatLngs(geometry.coordinates)];
+  if(geometry.type === 'MultiPolygon') return geometry.coordinates.map(poly => ringsToLatLngs(poly));
+  return [];
+}
+
+function clearOverlayLayers(){
+  if(layerControl){ map.removeControl(layerControl); layerControl = null; }
+  Object.values(overlayLayers).forEach(g => map.removeLayer(g));
+  overlayLayers = {};
+}
+
+// Adds `group` to the map and the layer-control list under `label`, unless
+// it's empty (nothing found for that category) — no point offering a
+// toggle for a layer with nothing in it.
+function addOverlay(label, group){
+  if(!group.getLayers().length) return;
+  overlayLayers[label] = group;
+  group.addTo(map);
+}
+
+function buildBoundaryLayer(b){
+  const group = L.layerGroup();
+  if(b && b.found && b.polygon_rings_itm_wgs84){
+    ringsToLatLngs(b.polygon_rings_itm_wgs84).forEach(ring => {
+      L.polygon(ring, { color: CATEGORY_COLORS.boundary, weight: 2, fillOpacity: 0.08 })
+        .bindPopup(`<strong>${b.tenure} parcel</strong><br>${b.county} · ${b.area_hectares} ha`)
+        .addTo(group);
+    });
+  }
+  return group;
+}
+
+function buildArchaeologyLayer(a){
+  const group = L.layerGroup();
+  (a && a.monuments || []).forEach(m => {
+    if(m.lat == null || m.lon == null) return;
+    L.circleMarker([m.lat, m.lon], { radius: 6, color: CATEGORY_COLORS.archaeology, weight: 2, fillOpacity: 0.7 })
+      .bindPopup(`<strong>${m.class || 'Monument'}</strong><br>${m.smr_ref || ''}`)
+      .addTo(group);
+  });
+  return group;
+}
+
+// Draws every SMR Zone found within the search radius as a shaded area —
+// matching the National Monuments Service's own viewer, which shades all
+// zones in view rather than just the one (if any) containing the exact
+// search point. That one, if there is one, is drawn a bit bolder.
+function buildSmrZoneLayer(z){
+  const group = L.layerGroup();
+  (z && z.zones || []).forEach(zone => {
+    if(!zone.polygon_rings_wgs84) return;
+    ringsToLatLngs(zone.polygon_rings_wgs84).forEach(ring => {
+      L.polygon(ring, {
+        color: CATEGORY_COLORS.smrZone,
+        weight: zone.contains_site ? 2.5 : 1.2,
+        fillOpacity: zone.contains_site ? 0.32 : 0.18,
+      })
+        .bindPopup(
+          `<strong>SMR Zone ${zone.zone_id}</strong><br>~${zone.area_hectares} ha` +
+          (zone.contains_site ? '<br>Contains this site — notification required before ground disturbance' : '')
+        )
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
+function buildNiahLayer(n){
+  const group = L.layerGroup();
+  (n && n.structures || []).forEach(st => {
+    if(st.lat == null || st.lon == null) return;
+    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.niah, weight: 2, fillOpacity: 0.7 })
+      .bindPopup(`<strong>${st.name || st.address || 'Structure'}</strong><br>${st.rating || ''} · reg. ${st.reg_no || ''}`)
+      .addTo(group);
+  });
+  return group;
+}
+
+function buildPlanningLayer(p){
+  const group = L.layerGroup();
+  (p && p.applications || []).forEach(app => {
+    if(app.lat == null || app.lon == null) return;
+    const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+    L.circleMarker([app.lat, app.lon], { radius: 6, color: CATEGORY_COLORS.planning, weight: 2, fillOpacity: 0.7 })
+      .bindPopup(`<strong>${app.application_number}</strong><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
+      .addTo(group);
+  });
+  return group;
+}
+
+function buildFloodLayer(f){
+  const group = L.layerGroup();
+  (f && f.features || []).forEach(feat => {
+    const color = feat.band === 'High' ? CATEGORY_COLORS.floodHigh
+      : feat.band === 'Medium' ? CATEGORY_COLORS.floodMedium
+      : CATEGORY_COLORS.floodLow;
+    geometryToRingSets(feat.geometry).forEach(ringSet => {
+      L.polygon(ringSet, { color, weight: 1, fillOpacity: 0.15 })
+        .bindPopup(`<strong>${feat.label}</strong><br>Band: ${feat.band}`)
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
+// ---- Right-hand tile strip + slide-in detail panel. One tile per
+// category found; clicking a tile opens (or, if already open, closes) a
+// panel with that category's full detail — the "card" content is the same
+// DOM nodes the *Card() functions below already build.
+
+function statusFromCardNode(node){
+  const dot = node.querySelector('.dot');
+  return dot ? dot.className.replace('dot', '').trim() : '';
+}
+
+function buildTileStrip(categories){
+  tileStripEl.innerHTML = '';
+  tileButtons = {};
+
+  categories.forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'tile-btn';
+    btn.type = 'button';
+    btn.title = cat.title;
+    btn.innerHTML = `${TILE_ICONS[cat.key] || ''}<span class="tile-dot ${statusFromCardNode(cat.node)}"></span>`;
+    btn.addEventListener('click', () => toggleDetail(cat));
+    tileButtons[cat.key] = btn;
+    tileStripEl.appendChild(btn);
+  });
+
+  const divider = document.createElement('div');
+  divider.className = 'tile-strip-divider';
+  tileStripEl.appendChild(divider);
+
+  const infoCat = { key: 'info', title: 'Sources & methodology', node: buildInfoCard() };
+  const infoBtn = document.createElement('button');
+  infoBtn.className = 'tile-btn';
+  infoBtn.type = 'button';
+  infoBtn.title = infoCat.title;
+  infoBtn.innerHTML = TILE_ICONS.info;
+  infoBtn.addEventListener('click', () => toggleDetail(infoCat));
+  tileButtons.info = infoBtn;
+  tileStripEl.appendChild(infoBtn);
+
+  // Keep the panel open across searches if the same category is still open
+  if(activeTileKey && activeTileKey !== 'info'){
+    const match = categories.find(c => c.key === activeTileKey);
+    if(match) openDetail(match); else closeDetail();
+  }
+}
+
+function toggleDetail(cat){
+  if(activeTileKey === cat.key){ closeDetail(); return; }
+  openDetail(cat);
+}
+
+function openDetail(cat){
+  activeTileKey = cat.key;
+  detailContentEl.innerHTML = '';
+  detailContentEl.appendChild(cat.node);
+  detailPanelEl.classList.add('open');
+  Object.values(tileButtons).forEach(b => b.classList.remove('active'));
+  if(tileButtons[cat.key]) tileButtons[cat.key].classList.add('active');
+}
+
+function closeDetail(){
+  activeTileKey = null;
+  detailPanelEl.classList.remove('open');
+  Object.values(tileButtons).forEach(b => b.classList.remove('active'));
+}
+
+document.getElementById('detailClose').addEventListener('click', closeDetail);
+
+// Fully prepares the map (position, marker, layers, tiles) BEFORE calling
+// enterResultsMode() to reveal it — so the map is only ever shown already
+// zoomed to the right place, never a default Ireland-wide view that then
+// visibly jumps. This is the one function that runs once we have a
+// complete report (as opposed to a "choose" disambiguation step).
+function finalizeSearch(report){
+  const loc = report.location;
+
+  ensureMap();
+  map.setView([loc.lat, loc.lon], 15);
+  if(marker) map.removeLayer(marker);
+  marker = L.marker([loc.lat, loc.lon]).addTo(map)
+    .bindPopup(loc.label + (loc.precise ? '' : '<br><em>Approximate — not exact building</em>'))
+    .openPopup();
+
+  const s = report.sections;
+
+  clearOverlayLayers();
+  addOverlay('Property boundary', buildBoundaryLayer(s.boundary));
+  addOverlay('Archaeology (SMR)', buildArchaeologyLayer(s.archaeology));
+  addOverlay('SMR Zone', buildSmrZoneLayer(s.smr_zone));
+  addOverlay('Protected structures (NIAH)', buildNiahLayer(s.niah));
+  addOverlay('Planning applications', buildPlanningLayer(s.planning_applications));
+  addOverlay('Flood extent (OPW)', buildFloodLayer(s.flood_risk));
+  layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
+
+  buildTileStrip([
+    { key: 'boundary', title: 'Property boundary', node: boundaryCard(s.boundary) },
+    { key: 'geology', title: 'Geology & subsoil', node: geologyCard(s.geology) },
+    { key: 'water', title: 'Water table & flood risk', node: waterCard(s.groundwater, s.flood_risk) },
+    { key: 'archaeology', title: 'Archaeology & heritage', node: archaeologyCard(s.archaeology, s.smr_zone) },
+    { key: 'niah', title: 'Protected structures (NIAH)', node: niahCard(s.niah) },
+    { key: 'planning', title: 'Planning context', node: planningCard(s.planning, s.planning_applications) },
+    { key: 'utilities', title: 'Utilities', node: utilitiesCard(s.utilities) },
+  ]);
+
+  setLoading(false);
+  setStatus('Found: ' + loc.label + (report.eircode ? ' (' + report.eircode + ')' : '') + ' — via ' + loc.source);
+  enterResultsMode();
+}
+
+function card(title, dotClass, badgeText, badgeCls, bodyHtml, srcHtml){
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.innerHTML = `
+    <h3><span class="dot ${dotClass}"></span><span>${title}</span><span class="badge ${badgeCls}" style="margin-left:auto">${badgeText}</span></h3>
+    <div class="body">${bodyHtml}</div>
+    <div class="src">${srcHtml || ''}</div>`;
+  return div;
+}
+
+function boundaryCard(b){
+  if(!b){
+    return card('Property boundary (cadastral)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  if(!b.found){
+    return card('Property boundary (cadastral)', 'warn', 'Not found', 'manual',
+      `<div class="muted">No registered freehold or leasehold parcel found at this exact point. ${b.note || ''}</div>`,
+      'Check directly: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a> (folio &amp; filed plan search)');
+  }
+  const html = `
+    <div><strong>${b.tenure} parcel found</strong> (${b.county})</div>
+    <div style="margin-top:6px">Approx. area: ${b.area_hectares} ha (${b.area_acres} acres)</div>`;
+  return card('Property boundary (cadastral)', 'ok', 'Live', 'live', html,
+    'Source: <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels (' + b.tenure + ')');
+}
+
+function geologyCard(g){
+  if(!g){
+    return card('Geology & subsoil', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const html = `
+    <div><strong>Subsoil / sediment:</strong> ${g.subsoil_type || '<span class="muted">no data at this exact point</span>'}</div>
+    <div style="margin-top:6px"><strong>Bedrock unit:</strong> ${g.bedrock_unit || '<span class="muted">no bedrock polygon returned at this exact point</span>'}${g.bedrock_description ? ` <span class="muted">(${g.bedrock_description})</span>` : ''}</div>`;
+  return card('Geology & subsoil', 'ok', 'Live', 'live', html,
+    'Source: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Bedrock.aspx" target="_blank">GSI Bedrock &amp; Quaternary geology</a>');
+}
+
+function waterCard(w, flood){
+  if(!w){
+    return card('Water table & flood risk', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  let html = `<div><strong>Groundwater vulnerability:</strong> ${w.vulnerability_category || '<span class="muted">no data at this exact point</span>'}</div>`;
+  let floodIsHigh = false;
+  if(flood){
+    const fBand = flood.fluvial_probability, cBand = flood.coastal_probability;
+    floodIsHigh = fBand === 'High' || cBand === 'High';
+    html += `<div style="margin-top:6px"><strong>Fluvial (river) flood risk:</strong> ${fBand || '<span class="muted">not mapped at this point</span>'}</div>`;
+    html += `<div style="margin-top:6px"><strong>Coastal flood risk:</strong> ${cBand || '<span class="muted">not mapped at this point</span>'}</div>`;
+  }
+  const dot = (VULN_WARN_CODES.has(w.vulnerability_code) || floodIsHigh) ? 'warn' : (w.vulnerability_code ? 'ok' : 'warn');
+  return card('Water table & flood risk', dot, 'Live', 'live', html,
+    'Sources: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Groundwater.aspx" target="_blank">GSI Groundwater</a> · <a href="https://www.floodinfo.ie" target="_blank">OPW floodinfo.ie</a>');
+}
+
+function archaeologyCard(a, zone){
+  if(!a){
+    return card('Archaeology & heritage', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  let html;
+  if(a.monument_count){
+    const countLabel = a.monument_count + (a.more_exist ? '+' : '');
+    html = `<div><strong>${countLabel} recorded monument(s) within 2km</strong> (Sites &amp; Monuments Record)</div><ul>` +
+      a.monuments.slice(0, 6).map(m => `<li>${m.class || 'Monument'} <span class="muted">(${m.smr_ref})</span></li>`).join('') + '</ul>';
+  } else {
+    html = '<div>No recorded monuments within 2km in the SMR.</div>';
+  }
+  if(zone && zone.in_zone){
+    html += `<div style="margin-top:6px"><strong>Within SMR Zone ${zone.zone_id}</strong> <span class="muted">(~${zone.area_hectares} ha) — notification required before ground disturbance.</span></div>`;
+  } else if(zone){
+    html += `<div style="margin-top:6px" class="muted">Not within a mapped SMR Zone.</div>`;
+  }
+  return card('Archaeology & heritage', (zone && zone.in_zone) || a.monument_count ? 'warn' : 'ok', 'Live + links', 'live', html,
+    'Sources: National Monuments Service SMR &amp; SMR Zones · <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a>');
+}
+
+function niahCard(n){
+  if(!n){
+    return card('Protected structures (NIAH)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  let html;
+  if(n.structure_count){
+    const countLabel = n.structure_count + (n.more_exist ? '+' : '');
+    html = `<div><strong>${countLabel} NIAH structure(s) within 500m</strong></div><ul>` +
+      n.structures.slice(0, 6).map(st => `<li>${st.name || st.address || 'Structure'} <span class="muted">(${st.rating}, reg. ${st.reg_no})</span></li>`).join('') + '</ul>';
+  } else {
+    html = '<div>No NIAH-listed structures within 500m.</div>';
+  }
+  return card('Protected structures (NIAH)', n.structure_count ? 'warn' : 'ok', 'Live', 'live', html,
+    'Source: <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>, buildingsofireland.ie');
+}
+
+function mailto(to, subject, body){
+  return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+function utilitiesCard(u){
+  if(!u){
+    return card('Utilities (power / water / sewage)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const html = `
+    <div class="muted">Electricity and water/sewage asset maps are not published as open data (security-sensitive) — they're obtained on request. Pre-drafted for this site:</div>
+    <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+      <a class="request-btn" href="${mailto(u.electricity.to, u.electricity.subject, u.electricity.body)}">✉ Draft ESB Networks cable map request</a>
+      <a class="request-btn" href="${mailto(u.water_wastewater.to, u.water_wastewater.subject, u.water_wastewater.body)}">✉ Draft Uisce Éireann asset map request</a>
+    </div>`;
+  return card('Utilities (power / water / sewage)', 'warn', 'Request-based', 'manual', html,
+    `Sources: ESB Networks Dial Before You Dig (${u.electricity.to}) · Uisce Éireann (${u.water_wastewater.to})`);
+}
+
+function planningCard(p, apps){
+  if(!p){
+    return card('Planning context', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  let html = '';
+  if(apps && apps.application_count){
+    const countLabel = apps.application_count + (apps.more_exist ? '+' : '');
+    html += `<div><strong>${countLabel} planning application(s) within 300m</strong></div><ul>` +
+      apps.applications.slice(0, 5).map(app => {
+        const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+        const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
+        return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
+      }).join('') + '</ul>';
+  } else if(apps){
+    html += '<div>No planning applications found within 300m.</div>';
+  }
+  return card('Planning context', (apps && apps.application_count) ? 'warn' : 'ok', apps ? 'Live + links' : 'Links', 'live', html,
+    `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.epa_radon_risk_map}" target="_blank">EPA radon map</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
+}
+
+function buildInfoCard(){
+  const div = document.createElement('div');
+  div.className = 'info-card';
+  div.innerHTML = `
+    <h3>Sources &amp; methodology</h3>
+    <p><strong>How this works:</strong> an Eircode or address is resolved to a full postal address via the Autoaddress API, then geocoded to coordinates, then several categories are queried against live Irish public data services where an open API exists. Where no open API exists (utility asset maps), a data-request email is drafted instead. All of this runs server-side in the Python <code>sitescout</code> package — this page only ever talks to this app's own <code>/api/scout</code> endpoint, never to Autoaddress/Google/ArcGIS directly.</p>
+    <p><strong>On coordinate precision (tested, not assumed):</strong> Eircodes are precise to individual buildings — a terrace of ten houses with the same street address can have ten different Eircodes. We tested whether Google's Geocoding API could resolve that precision by requesting three genuinely different Eircodes for three different units in the same building block (D09 V2R3, D09 FY51, D09 HW84 — Dublin Airport Business Park). All three came back with the <strong>identical coordinate</strong> and Google's own <code>location_type: APPROXIMATE</code> / type <code>postal_code</code>. The only sources that actually store one coordinate per Eircode are the licensed Eircode Address Database (ECAD) and Autoaddress's gated <code>GetData</code> endpoint. Neither is wired in here, so pins are <strong>area-level approximations</strong>. See <code>CLAUDE.md</code> for the full writeup.</p>
+    <h4>Sources used in this flow</h4>
+    <ol>
+      <li>Eircode / address resolution — <a href="https://docs.autoaddress.com" target="_blank">Autoaddress</a> Search &amp; Lookup API</li>
+      <li>Geocoding — Google Maps Geocoding REST API (raw Eircode first, then resolved address), falls back to OpenStreetMap Nominatim</li>
+      <li>Property boundary — <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels; legal folio &amp; filed plan via <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a></li>
+      <li>Bedrock &amp; subsoil geology — <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a></li>
+      <li>Groundwater vulnerability — GSI Groundwater Vulnerability map</li>
+      <li>Flood risk — OPW CFRAM predictive flood-extent maps, live via <a href="https://www.floodinfo.ie" target="_blank">floodinfo.ie</a>'s own GeoServer</li>
+      <li>Archaeology — National Monuments Service Sites &amp; Monuments Record (SMR)</li>
+      <li>SMR Zones — archaeological notification zones, from the National Monuments Service's Historic Environment Viewer</li>
+      <li>Protected structures — <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>; also see <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a></li>
+      <li>Electricity infrastructure — ESB Networks Dial Before You Dig (request-based)</li>
+      <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests</li>
+      <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>; zoning itself stays a link-out</li>
+      <li>Radon risk — <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA Radon Risk Map</a> (link-out)</li>
+    </ol>
+    <h4>Limitations &amp; caveats</h4>
+    <ul style="padding-left:18px;margin:0;font-size:12.5px;color:var(--muted)">
+      <li>This is a demo — coordinates are area/postcode-level approximations, not exact per-building locations, so every result on this page inherits that imprecision.</li>
+      <li>Property boundary is Tailte Éireann's mapped extent of a registered title, not a legally guaranteed boundary; unregistered titles won't appear. Legal folio &amp; filed plan: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a>.</li>
+      <li>Flood risk is indicative only (current-climate CFRAM scenario) — not a substitute for a site-specific Flood Risk Assessment; "not mapped" doesn't mean "safe."</li>
+      <li>NIAH rating is an architectural heritage assessment, not statutory protection in itself — check the local authority's Record of Protected Structures (RPS).</li>
+      <li>Zoning designation isn't covered by any dataset queried here — check myplan.ie directly.</li>
+    </ul>`;
+  return div;
+}
+
+document.getElementById('scoutBtn').addEventListener('click', () => {
+  const q = addressInputEl.value.trim();
+  if(q) runScout(q);
+});
+addressInputEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') document.getElementById('scoutBtn').click(); });
+document.getElementById('exampleEircodeBtn').addEventListener('click', () => {
+  addressInputEl.value = 'R32 E4F8';
+  runScout('R32 E4F8');
+});
+document.getElementById('exampleBtn').addEventListener('click', () => {
+  addressInputEl.value = 'Trim Castle, Trim, Co. Meath';
+  runScout('Trim Castle, Trim, Co. Meath');
+});
+</script>
+
+</body>
+</html>

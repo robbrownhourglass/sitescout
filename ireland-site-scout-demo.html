@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Site Scout — Ireland Demo</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root{
+    --ink:#1b2a24; --paper:#f6f4ee; --card:#ffffff; --line:#e2ddd0;
+    --moss:#2f5d4f; --moss-dark:#1f4237; --amber:#c07a2b; --rust:#a4472d;
+    --muted:#6b7570; --ok:#2f5d4f; --warn:#c07a2b; --bad:#a4472d;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height:1.45;
+  }
+  header{
+    padding:28px 32px 20px; border-bottom:1px solid var(--line); background:var(--card);
+  }
+  header h1{ margin:0 0 4px; font-size:22px; letter-spacing:-0.01em; }
+  header p{ margin:0; color:var(--muted); font-size:14px; max-width:640px; }
+  .search{
+    display:flex; gap:8px; padding:20px 32px; background:var(--card); border-bottom:1px solid var(--line);
+    flex-wrap:wrap; align-items:center;
+  }
+  .search input[type=text]{
+    flex:1; min-width:260px; padding:10px 14px; border:1px solid var(--line); border-radius:8px;
+    font-size:14px; background:var(--paper); color:var(--ink);
+  }
+  .search input[type=text]:focus{ outline:2px solid var(--moss); outline-offset:1px; }
+  .search button{
+    padding:10px 18px; border:none; border-radius:8px; background:var(--moss); color:#fff;
+    font-size:14px; font-weight:600; cursor:pointer;
+  }
+  .search button:hover{ background:var(--moss-dark); }
+  .search button.ghost{ background:transparent; color:var(--moss); border:1px solid var(--moss); }
+  .search button.ghost:hover{ background:#eaf0ec; }
+  .status{ padding:0 32px; font-size:13px; color:var(--muted); min-height:20px; }
+  .status.err{ color:var(--bad); }
+  main{ padding:20px 32px 48px; max-width:1180px; margin:0 auto; }
+  #map{ height:320px; border-radius:10px; border:1px solid var(--line); margin-bottom:20px; display:none; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(300px,1fr)); gap:16px; }
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px;
+    display:flex; flex-direction:column; gap:8px;
+  }
+  .card h3{ margin:0; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .card h3 .dot{ width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none; }
+  .card h3 .dot.ok{ background:var(--ok); }
+  .card h3 .dot.warn{ background:var(--warn); }
+  .card h3 .dot.bad{ background:var(--bad); }
+  .card .body{ font-size:13.5px; color:var(--ink); min-height:20px; }
+  .card .body .muted{ color:var(--muted); }
+  .card ul{ margin:4px 0 0; padding-left:18px; }
+  .card li{ margin-bottom:3px; }
+  .badge{
+    display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    padding:2px 8px; border-radius:999px; background:#eaf0ec; color:var(--moss-dark);
+  }
+  .badge.live{ background:#eaf0ec; color:var(--moss-dark); }
+  .badge.manual{ background:#fbeee0; color:var(--amber); }
+  .badge.link{ background:#f1eee4; color:var(--muted); }
+  .card .src{ margin-top:auto; padding-top:8px; border-top:1px dashed var(--line); font-size:12px; }
+  .card .src a{ color:var(--moss); text-decoration:none; }
+  .card .src a:hover{ text-decoration:underline; }
+  .request-btn{
+    display:inline-block; margin-top:4px; font-size:12.5px; padding:6px 10px; border-radius:6px;
+    background:var(--paper); border:1px solid var(--line); color:var(--ink); text-decoration:none;
+  }
+  .request-btn:hover{ border-color:var(--moss); color:var(--moss-dark); }
+  .skeleton{ opacity:.5; }
+  footer{ padding:24px 32px 40px; color:var(--muted); font-size:12px; max-width:1180px; margin:0 auto; }
+  footer h4{ color:var(--ink); font-size:13px; margin:18px 0 6px; }
+  footer ol{ padding-left:18px; margin:0; }
+  footer li{ margin-bottom:3px; }
+  .example-link{ background:none; border:none; color:var(--moss); text-decoration:underline; cursor:pointer; font-size:13px; padding:0; }
+  .picker{ margin:0 32px 4px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:10px; }
+  .picker .picker-title{ font-size:12.5px; color:var(--muted); margin-bottom:8px; }
+  .picker button.opt{
+    display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; border:1px solid var(--line);
+    border-radius:6px; background:var(--paper); cursor:pointer; font-size:13.5px; color:var(--ink);
+  }
+  .picker button.opt:hover{ border-color:var(--moss); background:#eaf0ec; }
+  .picker button.opt .tag{ float:right; font-size:11px; color:var(--muted); }
+  .precision-notice{
+    margin:0 32px 4px; padding:10px 14px; background:#fbeee0; border:1px solid #e8cda6; border-radius:8px;
+    font-size:12.5px; color:#7a4a12;
+  }
+  .precision-notice strong{ color:#5c3608; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Site Scout — Ireland (demo)</h1>
+  <p>Enter an Eircode or address for a site. This pulls together the same categories a planner, PM, or architect would gather at the scouting stage — geology &amp; subsoil, water table, archaeology &amp; heritage, utilities, and planning context — from Ireland's public data sources.</p>
+</header>
+
+<div class="search">
+  <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
+  <button id="scoutBtn">Scout site</button>
+  <button class="ghost" id="exampleEircodeBtn">Try Eircode example</button>
+  <button class="ghost" id="exampleBtn">Try Trim Castle example</button>
+</div>
+<div class="status" id="status"></div>
+<div id="picker"></div>
+<div id="precisionNotice" class="precision-notice" style="display:none"></div>
+
+<main>
+  <div id="map"></div>
+  <div class="grid" id="results"></div>
+</main>
+
+<footer>
+  <p><strong>How this demo works:</strong> an Eircode or address is resolved to a full postal address via the Autoaddress API, then that address is geocoded to coordinates, then six categories are queried in parallel against live Irish public data services where an open API exists. Where no open API exists (utility asset maps), the demo prepares a data-request instead of a live layer — this mirrors how a planner would actually obtain that information today.</p>
+  <p><strong>On coordinate precision (tested, not assumed):</strong> Eircodes are precise to individual buildings — a terrace of ten houses with the same street address can have ten different Eircodes. We tested whether Google's Geocoding API could resolve that precision by requesting three genuinely different Eircodes for three different units in the same building block (D09 V2R3, D09 FY51, D09 HW84 — Dublin Airport Business Park). All three came back with the <strong>identical coordinate</strong> (53.4073652, -6.2381539) and Google's own <code>location_type: APPROXIMATE</code> / type <code>postal_code</code> — confirming Google geocodes an Eircode as a postcode area, not a unique building, the same fundamental limitation as OpenStreetMap Nominatim. The only sources that actually store one coordinate per Eircode are the licensed Eircode Address Database (ECAD) and Autoaddress's <code>GetData</code>/<code>ie_location</code> endpoint (gated to backend servers with an allow-listed IP — confirmed with a direct 401 test). Neither is available to this browser-only demo, so pins here are <strong>area-level approximations</strong>, flagged as such in the UI after every search.</p>
+  <h4>Sources used in this flow</h4>
+  <ol>
+    <li>Eircode / address resolution — <a href="https://docs.autoaddress.com" target="_blank">Autoaddress</a> Search &amp; Lookup API (text address + Eircode, no coordinates)</li>
+    <li>Geocoding (Eircode → coordinates) — Google Maps JavaScript API <code>Geocoder</code>, called with the raw Eircode first; falls back to Google on resolved address text, then OpenStreetMap Nominatim</li>
+    <li>Property boundary — <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels (Freehold/Leasehold); legal folio &amp; filed plan via <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a></li>
+    <li>Bedrock &amp; subsoil geology — <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a>, geodata.gov.ie ArcGIS services</li>
+    <li>Groundwater vulnerability &amp; levels — GSI Groundwater Vulnerability map; <a href="https://gwlevel.ie" target="_blank">gwlevel.ie</a>; <a href="https://www.epa.ie" target="_blank">EPA</a> groundwater bodies</li>
+    <li>Flood risk — <a href="https://www.floodinfo.ie" target="_blank">OPW Flood Maps (floodinfo.ie)</a></li>
+    <li>Archaeology — National Monuments Service Sites &amp; Monuments Record (SMR), Historic Environment Viewer</li>
+    <li>Protected structures / architectural heritage — <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>, <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a></li>
+    <li>Electricity infrastructure — ESB Networks Dial Before You Dig (request-based, dig@esb.ie)</li>
+    <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests (datarequests@water.ie)</li>
+    <li>Zoning &amp; planning history — <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a></li>
+    <li>Radon risk — <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA Radon Risk Map</a></li>
+  </ol>
+</footer>
+
+<script>
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const mapEl = document.getElementById('map');
+const pickerEl = document.getElementById('picker');
+let map, marker, parcelLayer;
+
+// Temporary public test key, supplied for this demo only.
+// In production, exchange this for a short-lived token via /3.0/createtoken
+// (called from your backend) rather than shipping the key to the client.
+const AUTOADDRESS_KEY = 'pub_8fac4965-f336-4556-987c-fe8556edeb75';
+
+// Temporary Google Maps API key, supplied for this demo only.
+// This key currently only has the Maps JavaScript API enabled (not the
+// server-side Geocoding REST API), so we use the client-side
+// google.maps.Geocoder class rather than calling the REST endpoint directly.
+const GOOGLE_MAPS_KEY = 'AIzaSyBrxuvsYe_LAACJ-Y_1MDuBt2OFDVVbL6c';
+
+// Wraps a promise so it can never hang the app forever — rejects after `ms`
+// with a clear message if the underlying promise never settles. This matters
+// specifically for the Google Maps JS loader: when it's blocked (e.g. by a
+// RefererNotAllowedMapError on a file:// page, an ad-blocker, or offline),
+// Google's script often neither calls our callback nor fires script.onerror —
+// it just silently never resolves, which without this would hang "geocoding…"
+// forever instead of falling back to Nominatim.
+function withTimeout(promise, ms, message){
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+  ]);
+}
+
+let googleMapsLoadPromise = null;
+function loadGoogleMaps(){
+  if(googleMapsLoadPromise) return googleMapsLoadPromise;
+  const rawPromise = new Promise((resolve, reject) => {
+    const cbName = '__gmapsReady_' + Date.now();
+    window[cbName] = () => { resolve(window.google); delete window[cbName]; };
+    // If Google's own JS reports an auth/load error (e.g. RefererNotAllowedMapError),
+    // it calls this global hook instead of throwing — without it we'd never know.
+    window.gm_authFailure = () => reject(new Error('Google Maps auth failure (gm_authFailure) — likely a referrer/origin restriction on the API key, common when opening this file directly instead of via http://'));
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&callback=${cbName}&loading=async`;
+    script.async = true;
+    script.onerror = () => reject(new Error('Failed to load Google Maps JS (network/script error)'));
+    document.head.appendChild(script);
+  });
+  googleMapsLoadPromise = withTimeout(rawPromise, 8000, 'Google Maps script load timed out after 8s (likely blocked — e.g. a referrer/origin restriction when opening this file directly, an ad-blocker, or no network)');
+  // Don't cache a timed-out/failed load — let the next attempt retry from scratch.
+  googleMapsLoadPromise.catch(() => { googleMapsLoadPromise = null; });
+  return googleMapsLoadPromise;
+}
+
+// Geocodes using the raw Eircode/address text directly via Google's
+// client-side Geocoder — this is the key architectural fix: we do NOT
+// feed it Autoaddress's flattened multi-unit address text when a specific
+// Eircode is available, so distinct units at the same street address can
+// still resolve to distinct points.
+async function geocodeGoogle(query){
+  const google = await loadGoogleMaps();
+  if(!google || !google.maps || !google.maps.Geocoder) throw new Error('Google Maps failed to initialise');
+  const geocoder = new google.maps.Geocoder();
+  // Callback form (not the promise wrapper) so we get Google's literal status
+  // string back — matches exactly what worked over plain REST (region bias
+  // only, no hard componentRestrictions, which was zeroing out results here).
+  const { results, status } = await withTimeout(new Promise((resolve) => {
+    geocoder.geocode({ address: query, region: 'ie' }, (results, status) => {
+      resolve({ results, status });
+    });
+  }), 8000, 'Google geocode() call timed out after 8s (no callback fired)');
+  if(status !== 'OK' || !results || !results.length){
+    throw new Error('Google status: ' + status);
+  }
+  const r = results[0];
+  return {
+    lat: r.geometry.location.lat(),
+    lon: r.geometry.location.lng(),
+    label: r.formatted_address,
+    locationType: r.geometry.location_type,
+    // Confirmed empirically: Google geocodes Eircodes as postal codes, not unique
+    // buildings — location_type is "APPROXIMATE" even for a correct-looking result,
+    // and distinct Eircodes sharing a small area can collapse to one point.
+    precise: r.geometry.location_type === 'ROOFTOP'
+  };
+}
+
+function setStatus(msg, isErr){
+  statusEl.textContent = msg || '';
+  statusEl.className = 'status' + (isErr ? ' err' : '');
+}
+
+function clearPicker(){ pickerEl.innerHTML = ''; }
+
+function showPicker(title, options, onChoose){
+  const list = options.map((o, i) =>
+    `<button class="opt" data-i="${i}">${o.title || o.value}${o.suffix ? `<span class="tag">${o.suffix}</span>` : ''}</button>`
+  ).join('');
+  pickerEl.innerHTML = `<div class="picker"><div class="picker-title">${title}</div>${list}</div>`;
+  pickerEl.querySelectorAll('button.opt').forEach(btn => {
+    btn.addEventListener('click', () => onChoose(options[parseInt(btn.dataset.i, 10)]));
+  });
+}
+
+// Fetches an Autoaddress HATEOAS link (search/drilldown/lookup all share this shape)
+// and either resolves to a finished address, or shows a picker and recurses.
+function autoaddressFollow(href){
+  return fetch(href).then(res => {
+    if(!res.ok) throw new Error('Autoaddress request failed (' + res.status + ')');
+    return res.json();
+  }).then(data => {
+    if(data.type === 'lookup' && data.address){
+      clearPicker();
+      const a = data.address;
+      const lineVals = (a.lines || []).map(l => l.value).filter(Boolean);
+      const parts = [...lineVals, a.city && a.city.value, a.region && a.region.value, a.postcode && a.postcode.value].filter(Boolean);
+      return { addressText: parts.join(', '), eircode: a.postcode && a.postcode.value };
+    }
+    if(data.options && data.options.length){
+      if(data.options.length === 1 && data.options[0].link && data.options[0].link.rel === 'lookup'){
+        return autoaddressFollow(data.options[0].link.href);
+      }
+      return new Promise((resolve, reject) => {
+        showPicker('Multiple matches — pick the address:', data.options.map(o => ({
+          value: o.value, title: o.title || o.value, suffix: o.suffix, href: o.link && o.link.href
+        })), (choice) => {
+          if(!choice.href){ reject(new Error('No link on selected option')); return; }
+          autoaddressFollow(choice.href).then(resolve).catch(reject);
+        });
+      });
+    }
+    throw new Error('Unexpected Autoaddress response');
+  });
+}
+
+async function resolveWithAutoaddress(query){
+  const url = `https://api.autoaddress.com/3.0/search?address=${encodeURIComponent(query)}&key=${AUTOADDRESS_KEY}&limit=8`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('Autoaddress search failed (' + res.status + ')');
+  const data = await res.json();
+  if(!data.options || !data.options.length) throw new Error('No Autoaddress match');
+  if(data.options.length === 1 && data.options[0].link && data.options[0].link.rel === 'lookup'){
+    return autoaddressFollow(data.options[0].link.href);
+  }
+  return new Promise((resolve, reject) => {
+    showPicker('Multiple matches — pick the address:', data.options.map(o => ({
+      value: o.value, title: o.title || o.value, suffix: o.suffix, href: o.link && o.link.href
+    })), (choice) => {
+      if(!choice.href){ reject(new Error('No link on selected option')); return; }
+      autoaddressFollow(choice.href).then(resolve).catch(reject);
+    });
+  });
+}
+
+function cardShell(title, dotClass, badge){
+  return `<div class="card"><h3><span class="dot ${dotClass}"></span>${title} <span class="badge ${badge.cls}" style="margin-left:auto">${badge.text}</span></h3><div class="body">Loading…</div></div>`;
+}
+
+function makeCard(id, title){
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.id = id;
+  div.innerHTML = `<h3><span class="dot" id="${id}-dot"></span><span>${title}</span><span class="badge" id="${id}-badge" style="margin-left:auto"></span></h3><div class="body skeleton" id="${id}-body">Loading…</div><div class="src" id="${id}-src"></div>`;
+  return div;
+}
+
+function fillCard(id, {dot, badgeText, badgeCls, bodyHtml, srcHtml}){
+  document.getElementById(id+'-dot').className = 'dot ' + dot;
+  const b = document.getElementById(id+'-badge');
+  b.textContent = badgeText; b.className = 'badge ' + badgeCls;
+  const body = document.getElementById(id+'-body');
+  body.className = 'body';
+  body.innerHTML = bodyHtml;
+  document.getElementById(id+'-src').innerHTML = srcHtml || '';
+}
+
+async function geocode(query){
+  const url = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=ie&limit=1&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('Geocoding request failed');
+  const data = await res.json();
+  if(!data.length) throw new Error('No match found for that address in Ireland');
+  return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), label: data[0].display_name };
+}
+
+async function arcgisPointQuery(baseUrl, lon, lat, outFields, distanceMeters, returnGeom){
+  const params = new URLSearchParams({
+    geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects', outFields, f: 'json'
+  });
+  if(distanceMeters){ params.set('distance', distanceMeters); params.set('units', 'esriSRUnit_Meter'); params.set('resultRecordCount', '10'); }
+  if(returnGeom){ params.set('returnGeometry', 'true'); params.set('outSR', '4326'); } else { params.set('returnGeometry', 'false'); }
+  const res = await fetch(`${baseUrl}?${params.toString()}`);
+  if(!res.ok) throw new Error('Query failed');
+  const data = await res.json();
+  if(data.error) throw new Error(data.error.message || 'Service error');
+  return data.features || [];
+}
+
+function esbMailto(lat, lon, label){
+  const subject = encodeURIComponent('Dial Before You Dig - cable map request');
+  const body = encodeURIComponent(`Hi,\n\nPlease could you send the underground electricity cable maps for the following site:\n\nAddress: ${label}\nCoordinates: ${lat.toFixed(6)}, ${lon.toFixed(6)}\n\nThanks.`);
+  return `mailto:dig@esb.ie?subject=${subject}&body=${body}`;
+}
+function waterMailto(lat, lon, label){
+  const subject = encodeURIComponent('Water & wastewater asset map request');
+  const body = encodeURIComponent(`Hi,\n\nPlease could you send high-level maps of known water and wastewater assets near the following site:\n\nAddress: ${label}\nCoordinates: ${lat.toFixed(6)}, ${lon.toFixed(6)}\n\nThanks.`);
+  return `mailto:datarequests@water.ie?subject=${subject}&body=${body}`;
+}
+
+const VULN_LABELS = { X:'Extreme (rock near surface / karst)', E:'Extreme', H:'High', M:'Moderate', L:'Low' };
+
+async function runScout(query){
+  setStatus('Resolving "' + query + '" via Autoaddress…');
+  resultsEl.innerHTML = '';
+  mapEl.style.display = 'none';
+  clearPicker();
+
+  let addressToGeocode = query;
+  let eircode = null;
+  try{
+    const resolved = await resolveWithAutoaddress(query);
+    addressToGeocode = resolved.addressText;
+    eircode = resolved.eircode;
+    setStatus('Resolved to: ' + addressToGeocode + (eircode ? ' (' + eircode + ')' : '') + ' — geocoding…');
+  }catch(e){
+    setStatus('Autoaddress could not resolve that (' + e.message + ') — trying direct geocoding of "' + query + '"…');
+  }
+
+  // Precision order: raw Eircode via Google (best — keeps the unique identifier
+  // intact) → full resolved address via Google → resolved address via Nominatim
+  // (last resort, address-text only, can't distinguish units at one address).
+  const attempts = [];
+  if(eircode) attempts.push({ fn: () => geocodeGoogle(eircode), via: 'Google (raw Eircode)' });
+  attempts.push({ fn: () => geocodeGoogle(addressToGeocode), via: 'Google (resolved address)' });
+  attempts.push({ fn: () => geocode(addressToGeocode), via: 'Nominatim (resolved address, less precise)' });
+
+  let loc, usedVia;
+  const failures = [];
+  for(const attempt of attempts){
+    try{
+      loc = await attempt.fn();
+      usedVia = attempt.via;
+      break;
+    }catch(e){
+      const msg = (e && (e.message || e.toString())) || 'Unknown error';
+      failures.push(attempt.via + ': ' + msg);
+      console.error('[geocode attempt failed]', attempt.via, e);
+    }
+  }
+  if(failures.length){
+    console.warn('[geocode attempts before success/failure]', failures);
+  }
+  if(!loc){
+    setStatus('Could not geocode "' + addressToGeocode + '" via Google or Nominatim. Try a fuller address, or "Place, County".', true);
+    const precisionEl = document.getElementById('precisionNotice');
+    precisionEl.style.display = 'block';
+    precisionEl.innerHTML = `<strong>⚠ All geocoding attempts failed.</strong><ul style="margin:4px 0 0 18px;padding:0">${failures.map(f => `<li>${f}</li>`).join('')}</ul>`;
+    return;
+  }
+  setStatus('Found: ' + loc.label + (eircode ? ' (' + eircode + ')' : '') + ' — via ' + usedVia);
+
+  const precisionEl = document.getElementById('precisionNotice');
+  precisionEl.style.display = 'block';
+  const failureHtml = failures.length
+    ? `<div style="margin-top:6px"><strong>Attempts before this one failed:</strong><ul style="margin:4px 0 0 18px;padding:0">${failures.map(f => `<li>${f}</li>`).join('')}</ul></div>`
+    : '';
+  precisionEl.innerHTML = `<strong>⚠ Approximate location.</strong> This pin is a postcode/area-level estimate (via ${usedVia}), not the exact building. We confirmed neither Google nor OpenStreetMap resolve Eircodes to true per-building coordinates — that precision only exists in the licensed Eircode Address Database (ECAD) or via gated backend access to Autoaddress's GetData endpoint. Treat everything below as indicative of the area, not this specific property.${failureHtml}`;
+
+  mapEl.style.display = 'block';
+  if(!map){
+    map = L.map('map').setView([loc.lat, loc.lon], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
+  } else {
+    map.setView([loc.lat, loc.lon], 15);
+  }
+  if(marker) map.removeLayer(marker);
+  marker = L.marker([loc.lat, loc.lon]).addTo(map).bindPopup(loc.label + '<br><em>Approximate — not exact building</em>').openPopup();
+
+  const ids = ['boundary','geology','water','archaeology','utilities','planning'];
+  const titles = { boundary:'Property boundary (cadastral)', geology:'Geology & subsoil', water:'Water table & flood risk', archaeology:'Archaeology & heritage', utilities:'Utilities (power / water / sewage)', planning:'Planning context' };
+  ids.forEach(id => resultsEl.appendChild(makeCard(id, titles[id])));
+
+  if(parcelLayer){ map.removeLayer(parcelLayer); parcelLayer = null; }
+
+  // Property boundary — Tailte Éireann cadastral parcels (freehold, fallback to leasehold) — live
+  (async () => {
+    try{
+      const freehold = await arcgisPointQuery('https://services-eu1.arcgis.com/FH5XCsx8rYXqnjF5/arcgis/rest/services/Cadastral_Parcels_Freehold/FeatureServer/12/query', loc.lon, loc.lat, '*', null, true);
+      let feats = freehold, tenure = 'Freehold';
+      if(!feats.length){
+        feats = await arcgisPointQuery('https://services-eu1.arcgis.com/FH5XCsx8rYXqnjF5/arcgis/rest/services/Cadastral_Parcels_Leasehold/FeatureServer/13/query', loc.lon, loc.lat, '*', null, true);
+        tenure = 'Leasehold';
+      }
+      if(feats.length){
+        const p = feats[0];
+        const areaM2 = p.attributes.Shape__Area;
+        const areaHa = (areaM2 / 10000).toFixed(3);
+        const areaAcres = (areaM2 / 4046.86).toFixed(3);
+        if(p.geometry && p.geometry.rings){
+          const latlngs = p.geometry.rings.map(ring => ring.map(([lng, lat]) => [lat, lng]));
+          parcelLayer = L.polygon(latlngs, { color: '#a4472d', weight: 2, fillOpacity: 0.08 }).addTo(map);
+        }
+        const html = `
+          <div><strong>Registered parcel found</strong> (${tenure}, ${p.attributes.COUNTY_NAM})</div>
+          <div style="margin-top:6px">Approx. area: ${areaHa} ha (${areaAcres} acres)</div>
+          <div style="margin-top:6px" class="muted">This is Tailte Éireann's mapped extent of a registered title — <strong>not a legally guaranteed boundary</strong>. It also only covers land that's registered with the Land Registry; older or unregistered titles won't appear here.</div>`;
+        fillCard('boundary', {
+          dot:'ok', badgeText:'Live', badgeCls:'live',
+          bodyHtml: html,
+          srcHtml: 'Source: <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels (' + tenure + ') · for the legal folio &amp; filed plan see <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a>'
+        });
+      } else {
+        fillCard('boundary', {
+          dot:'warn', badgeText:'Not found', badgeCls:'manual',
+          bodyHtml: '<div class="muted">No registered freehold or leasehold parcel found at this exact point — the title may be unregistered, or the point falls just outside a mapped parcel.</div>',
+          srcHtml: 'Check directly: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a> (folio &amp; filed plan search)'
+        });
+      }
+    }catch(e){
+      fillCard('boundary', { dot:'bad', badgeText:'Error', badgeCls:'manual', bodyHtml:'Could not reach Tailte Éireann cadastral service: '+e.message, srcHtml:'Source: <a href="https://tailte.ie" target="_blank">Tailte Éireann</a>' });
+    }
+  })();
+
+  // Geology & subsoil — GSI bedrock + quaternary sediments (live)
+  (async () => {
+    try{
+      const [bedrock, sediment] = await Promise.all([
+        arcgisPointQuery('https://gsi.geodata.gov.ie/server/rest/services/Bedrock/IE_GSI_Bedrock_Geology_Datasets_100K_IE26_ITM/MapServer/3/query', loc.lon, loc.lat, '*'),
+        arcgisPointQuery('https://gsi.geodata.gov.ie/server/rest/services/Quaternary/IE_GSI_Quaternary_Sediments_50K_IE26_ITM/MapServer/0/query', loc.lon, loc.lat, '*')
+      ]);
+      const b = bedrock[0] && bedrock[0].attributes;
+      const s = sediment[0] && sediment[0].attributes;
+      let html = '';
+      html += `<div><strong>Subsoil / sediment:</strong> ${s ? s.LEGENDDESC : '<span class="muted">no data at this exact point</span>'}</div>`;
+      html += `<div style="margin-top:6px"><strong>Bedrock unit:</strong> ${b ? (b.UNIT_NAME || b.DESCRIPT || JSON.stringify(b)) + (b.DESCRIPT ? ` <span class="muted">(${b.DESCRIPT})</span>` : '') : '<span class="muted">no bedrock polygon returned at this exact point — see GSI map viewer</span>'}</div>`;
+      fillCard('geology', {
+        dot:'ok', badgeText:'Live', badgeCls:'live',
+        bodyHtml: html,
+        srcHtml: 'Source: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Bedrock.aspx" target="_blank">GSI Bedrock &amp; Quaternary geology</a>'
+      });
+    }catch(e){
+      fillCard('geology', { dot:'bad', badgeText:'Error', badgeCls:'manual', bodyHtml:'Could not reach GSI geology service: '+e.message, srcHtml:'Source: <a href="https://www.gsi.ie" target="_blank">gsi.ie</a>' });
+    }
+  })();
+
+  // Water table & flood risk — GSI groundwater vulnerability (live) + floodinfo link-out
+  (async () => {
+    try{
+      const vuln = await arcgisPointQuery('https://gsi.geodata.gov.ie/server/rest/services/Groundwater/IE_GSI_Groundwater_Vulnerability_40K_IE26_ITM/MapServer/0/query', loc.lon, loc.lat, '*');
+      const v = vuln[0] && vuln[0].attributes;
+      const cat = v ? (VULN_LABELS[v.VUL_CAT] || v.VUL_DESC) : null;
+      let html = `<div><strong>Groundwater vulnerability:</strong> ${cat ? cat : '<span class="muted">no data at this exact point</span>'}</div>`;
+      html += `<div style="margin-top:6px" class="muted">Flood risk (fluvial / coastal / groundwater) and historic groundwater levels require a map lookup — see sources below.</div>`;
+      fillCard('water', {
+        dot: cat ? (v.VUL_CAT==='X'||v.VUL_CAT==='E' ? 'warn' : 'ok') : 'warn',
+        badgeText:'Live + links', badgeCls:'live',
+        bodyHtml: html,
+        srcHtml: 'Sources: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Groundwater.aspx" target="_blank">GSI Groundwater</a> · <a href="https://gwlevel.ie" target="_blank">gwlevel.ie</a> · <a href="https://www.floodinfo.ie" target="_blank">OPW floodinfo.ie</a>'
+      });
+    }catch(e){
+      fillCard('water', { dot:'bad', badgeText:'Error', badgeCls:'manual', bodyHtml:'Could not reach GSI groundwater service: '+e.message, srcHtml:'Source: <a href="https://www.gsi.ie" target="_blank">gsi.ie</a>' });
+    }
+  })();
+
+  // Archaeology & heritage — NMS SMR within 2km (live) + NIAH link-out
+  (async () => {
+    try{
+      const feats = await arcgisPointQuery('https://services-eu1.arcgis.com/HyjXgkV6KGMSF3jt/arcgis/rest/services/SMROpenData/FeatureServer/0/query', loc.lon, loc.lat, 'SMRS,MONUMENT_CLASS,COUNTY', 2000);
+      let html;
+      if(feats.length){
+        html = `<div><strong>${feats.length}${feats.length>=10?'+':''} recorded monument(s) within 2km</strong> (Sites &amp; Monuments Record)</div><ul>` +
+          feats.slice(0,6).map(f => `<li>${f.attributes.MONUMENT_CLASS || 'Monument'} <span class="muted">(${f.attributes.SMRS})</span></li>`).join('') + '</ul>';
+      } else {
+        html = '<div>No recorded monuments within 2km in the SMR.</div>';
+      }
+      html += `<div style="margin-top:6px" class="muted">Protected structures (NIAH / local authority RPS) need a separate check — see link below.</div>`;
+      fillCard('archaeology', {
+        dot: feats.length ? 'warn' : 'ok', badgeText:'Live + links', badgeCls:'live',
+        bodyHtml: html,
+        srcHtml: 'Sources: National Monuments Service SMR · <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a> · <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a>'
+      });
+    }catch(e){
+      fillCard('archaeology', { dot:'bad', badgeText:'Error', badgeCls:'manual', bodyHtml:'Could not reach SMR service: '+e.message, srcHtml:'Source: National Monuments Service' });
+    }
+  })();
+
+  // Utilities — no open API; generate data-request drafts
+  (async () => {
+    const html = `
+      <div class="muted">Electricity and water/sewage asset maps are not published as open data (security-sensitive) — they're obtained on request. This demo pre-drafts both requests for this site:</div>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+        <a class="request-btn" href="${esbMailto(loc.lat, loc.lon, loc.label)}">✉ Draft ESB Networks cable map request</a>
+        <a class="request-btn" href="${waterMailto(loc.lat, loc.lon, loc.label)}">✉ Draft Uisce Éireann asset map request</a>
+      </div>`;
+    fillCard('utilities', {
+      dot:'warn', badgeText:'Request-based', badgeCls:'manual',
+      bodyHtml: html,
+      srcHtml: 'Sources: ESB Networks Dial Before You Dig (dig@esb.ie) · Uisce Éireann (datarequests@water.ie)'
+    });
+  })();
+
+  // Planning context — link-outs (MyPlan.ie, radon)
+  (async () => {
+    const html = `<div class="muted">Zoning, planning application history, and radon risk are best checked directly on the map viewers below for this location.</div>`;
+    fillCard('planning', {
+      dot:'ok', badgeText:'Links', badgeCls:'link',
+      bodyHtml: html,
+      srcHtml: '<a href="https://www.myplan.ie" target="_blank">MyPlan.ie zoning &amp; applications</a> · <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA radon map</a>'
+    });
+  })();
+}
+
+document.getElementById('scoutBtn').addEventListener('click', () => {
+  const q = document.getElementById('addressInput').value.trim();
+  if(q) runScout(q);
+});
+document.getElementById('addressInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') document.getElementById('scoutBtn').click(); });
+document.getElementById('exampleEircodeBtn').addEventListener('click', () => {
+  document.getElementById('addressInput').value = 'R32 E4F8';
+  runScout('R32 E4F8');
+});
+document.getElementById('exampleBtn').addEventListener('click', () => {
+  document.getElementById('addressInput').value = 'Trim Castle, Trim, Co. Meath';
+  runScout('Trim Castle, Trim, Co. Meath');
+});
+
+// auto-run the default example on load
+runScout(document.getElementById('addressInput').value);
+</script>
+
+</body>
+</html>
