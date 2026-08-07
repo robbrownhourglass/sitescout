@@ -34,7 +34,6 @@
   #landingHero.leaving{ opacity:0; transform:translateY(-30px); pointer-events:none; }
   #landingHero h1{ margin:0; font-size:34px; letter-spacing:-0.01em; }
   #landingHero .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
-  #landingHero .hero-examples{ display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
 
   .spinner{
     width:15px; height:15px; border:2px solid rgba(0,0,0,.15); border-top-color:var(--moss);
@@ -170,10 +169,6 @@
     <div id="searchBar" class="search-bar">
       <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
       <button id="scoutBtn">Scout site</button>
-    </div>
-    <div class="hero-examples">
-      <button class="ghost" id="exampleEircodeBtn">Try Eircode example</button>
-      <button class="ghost" id="exampleBtn">Try Trim Castle example</button>
     </div>
     <div id="heroStatus" class="hero-status">
       <span id="heroSpinner" class="spinner" style="display:none"></span>
@@ -614,7 +609,7 @@ function finalizeSearch(report){
   map.setView([loc.lat, loc.lon], 15);
   if(marker) map.removeLayer(marker);
   marker = L.marker([loc.lat, loc.lon]).addTo(map)
-    .bindPopup(loc.label + (loc.precise ? '' : '<br><em>Approximate — not exact building</em>'))
+    .bindPopup(loc.label)
     .openPopup();
 
   const s = report.sections;
@@ -811,14 +806,6 @@ document.getElementById('scoutBtn').addEventListener('click', () => {
   if(q) runScout(q);
 });
 addressInputEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') document.getElementById('scoutBtn').click(); });
-document.getElementById('exampleEircodeBtn').addEventListener('click', () => {
-  addressInputEl.value = 'R32 E4F8';
-  runScout('R32 E4F8');
-});
-document.getElementById('exampleBtn').addEventListener('click', () => {
-  addressInputEl.value = 'Trim Castle, Trim, Co. Meath';
-  runScout('Trim Castle, Trim, Co. Meath');
-});
 </script>
 
 </body>
