@@ -87,6 +87,21 @@ and never commit `.env` (it's gitignored).
   Enable). This is a *different* product from "Maps JavaScript API" — the
   browser-demo phase burned real time on this exact confusion (see below).
 
+## Deployment (Railway)
+
+Deployed via `Procfile` + `requirements.txt` (gunicorn included) — see
+README.md's "Deploy (Railway)" section for the actual steps. Two things
+that only matter for the deployed path, not local dev:
+
+- `webapp.py`'s `if __name__ == "__main__": app.run(debug=True, ...)` block
+  is dev-only — gunicorn imports the module-level `app` object directly and
+  never executes that block, so `debug=True` (which would be a real
+  security issue if it ran in production — Werkzeug's debugger allows
+  arbitrary code execution from an error page) never applies on Railway.
+- Railway injects `$PORT`; the Procfile binds to it
+  (`--bind 0.0.0.0:$PORT`). Don't hardcode a port anywhere in the gunicorn
+  start command.
+
 ## The Eircode coordinate-precision saga (important — read before "fixing" this again)
 
 This was the single biggest source of confusion across the whole project.
