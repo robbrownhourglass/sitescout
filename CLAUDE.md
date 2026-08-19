@@ -192,7 +192,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | SMR Zones | National Monuments Service `SMRZone` `FeatureServer`, same ArcGIS org as SMR above | `heritage.py` |
 | Protected structures (NIAH) | `NIAHBuildings` `FeatureServer`, same ArcGIS org as SMR above | `heritage.py` |
 | Property boundary | Tailte Éireann `Cadastral_Parcels_Freehold` (layer 12) / `Cadastral_Parcels_Leasehold` (layer 13) | `cadastral.py` |
-| Planning applications | National Planning Application Database `FeatureServer` (`IrishPlanningApplications_FVLayer`) | `planning.py` |
+| Planning applications | National Planning Application Database `FeatureServer` (`IrishPlanningApplications_FVLayer`) — 500m radius search plus a bonus exact-Eircode match via `arcgis.attribute_query()` | `planning.py` |
 | Flood risk (fluvial/coastal) | OPW CFRAM predictive flood-extent maps, GeoServer WMS `GetFeatureInfo` on floodinfo.ie's own server | `planning.py` + `wms.py` |
 | Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
@@ -239,6 +239,23 @@ app, rather than the documented-but-dead endpoints:
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
 re-researching what else might be integrable.
+
+**A silent-failure gotcha, found twice already — check for it whenever a
+new ArcGIS layer is wired in:** every URL passed to `arcgis.py`'s
+`point_query`/`point_query_full`/`attribute_query` must end in `/query`.
+Hit the bare layer URL (e.g. `.../FeatureServer/0`) instead, and ArcGIS
+doesn't error — it silently returns the layer's own metadata/schema JSON,
+which has no `features` key, so `.get("features", [])` quietly becomes an
+empty list. That reads exactly like a legitimate "nothing found here"
+result, especially at rural test sites where zero real results is
+genuinely plausible — which is exactly how `planning.py`'s
+`PLANNING_APPLICATIONS_URL` went unnoticed missing `/query` for this
+project's entire history until a routine audit caught it (see git log).
+`ecology.py` had the same bug in an earlier draft, caught before it ever
+shipped. When adding a new source: construct the URL, then actually query
+it with a broad filter (`where=1=1` or a known-good point) and confirm a
+real `features` array comes back — don't just check for a 200 and no
+Python exception.
 
 Not yet wired in / unresolved:
 
