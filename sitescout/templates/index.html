@@ -230,6 +230,7 @@ const CATEGORY_COLORS = {
   floodMedium: '#e08e00',
   floodLow: '#4a90d9',
   ecology: '#3f8f29',
+  rpsAca: '#1f6f78',
 };
 
 // Small self-contained line-icon set for the tile strip — one glyph per
@@ -283,6 +284,10 @@ const TILE_ICONS = {
   ecology: `<svg ${ICON_ATTRS}>
       <path d="M6 19c-1-7 3-13 12-14 1 8-3 13-12 14Z"/>
       <path d="M6.5 18.5C9 15 11 11.5 12.5 7"/>
+    </svg>`,
+  // a shield — statutory protection (RPS/ACA), distinct from NIAH's castle
+  rpsAca: `<svg ${ICON_ATTRS}>
+      <path d="M12 3.5 18.5 6v5.5c0 4.5-3 7.5-6.5 8.9-3.5-1.4-6.5-4.4-6.5-8.9V6Z"/>
     </svg>`,
   // info: circled "i"
   info: `<svg ${ICON_ATTRS}>
@@ -559,6 +564,37 @@ function buildEcologyLayer(e){
   return group;
 }
 
+function buildRpsLayer(r){
+  const group = L.layerGroup();
+  const structures = (r && r.covered && r.rps && r.rps.available) ? r.rps.structures : [];
+  structures.forEach(st => {
+    if(st.lat == null || st.lon == null) return;
+    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.rpsAca, weight: 2, fillOpacity: 0.7 })
+      .bindPopup(`<strong>${st.address || st.description || 'Protected structure'}</strong><br>RPS ref: ${st.ref || 'n/a'}`)
+      .addTo(group);
+  });
+  return group;
+}
+
+function buildAcaLayer(r){
+  const group = L.layerGroup();
+  const areas = (r && r.covered && r.aca && r.aca.available) ? r.aca.areas : [];
+  areas.forEach(area => {
+    if(!area.polygon_rings_wgs84) return;
+    ringsToLatLngs(area.polygon_rings_wgs84).forEach(ring => {
+      L.polygon(ring, {
+        color: CATEGORY_COLORS.rpsAca,
+        weight: area.contains_site ? 2.5 : 1.2,
+        fillOpacity: area.contains_site ? 0.28 : 0.14,
+        dashArray: '4 3',
+      })
+        .bindPopup(`<strong>${area.name || 'Conservation area'}</strong>` + (area.contains_site ? '<br>Contains this site' : ''))
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
 // panel with that category's full detail — the "card" content is the same
@@ -652,6 +688,8 @@ function finalizeSearch(report){
   addOverlay('Planning applications', buildPlanningLayer(s.planning_applications));
   addOverlay('Flood extent (OPW)', buildFloodLayer(s.flood_risk));
   addOverlay('Ecology (NPWS)', buildEcologyLayer(s.ecology));
+  addOverlay('Protected structures (RPS)', buildRpsLayer(s.rps_aca));
+  addOverlay('Conservation areas (ACA)', buildAcaLayer(s.rps_aca));
   layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
 
   buildTileStrip([
@@ -661,6 +699,7 @@ function finalizeSearch(report){
     { key: 'archaeology', title: 'Archaeology & heritage', node: archaeologyCard(s.archaeology, s.smr_zone) },
     { key: 'niah', title: 'Protected structures (NIAH)', node: niahCard(s.niah) },
     { key: 'ecology', title: 'Ecology & nature conservation', node: ecologyCard(s.ecology) },
+    { key: 'rpsAca', title: 'RPS & ACA', node: rpsAcaCard(s.rps_aca) },
     { key: 'planning', title: 'Planning context', node: planningCard(s.planning, s.planning_applications) },
     { key: 'utilities', title: 'Utilities', node: utilitiesCard(s.utilities) },
   ]);
@@ -781,6 +820,37 @@ function ecologyCard(e){
     'Source: <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC/SPA/NHA/pNHA)');
 }
 
+function rpsAcaCard(r){
+  if(!r){
+    return card('RPS & ACA', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  if(!r.covered){
+    return card('RPS & ACA', 'ok', 'Not covered', 'link', `<div class="muted">${r.note}</div>`, '');
+  }
+  let html = `<div class="muted">Local authority: <strong>${r.authority}</strong></div>`;
+  if(r.rps.available){
+    const countLabel = r.rps.structure_count + (r.rps.more_exist ? '+' : '');
+    html += `<div style="margin-top:8px"><strong>${countLabel} RPS structure(s) within 500m</strong></div>`;
+    if(r.rps.structure_count){
+      html += '<ul>' + r.rps.structures.slice(0, 6).map(st =>
+        `<li>${st.address || st.description || 'Structure'} <span class="muted">(${st.ref || 'n/a'})</span></li>`
+      ).join('') + '</ul>';
+    }
+  } else {
+    html += '<div style="margin-top:8px" class="muted">RPS: no live source for this local authority yet.</div>';
+  }
+  if(r.aca.available){
+    html += r.aca.in_aca
+      ? `<div style="margin-top:8px"><strong>Within ACA:</strong> ${r.aca.current.name}</div>`
+      : `<div style="margin-top:8px" class="muted">Not within an ACA (${r.aca.area_count} mapped nearby).</div>`;
+  } else {
+    html += '<div style="margin-top:8px" class="muted">ACA: no live source for this local authority yet.</div>';
+  }
+  const dot = (r.aca.available && r.aca.in_aca) || (r.rps.available && r.rps.structure_count) ? 'warn' : 'ok';
+  return card('RPS & ACA', dot, 'Live', 'live', html,
+    `Source: ${r.authority} Development Plan &middot; NIAH is a separate section, not the same as RPS`);
+}
+
 function mailto(to, subject, body){
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
@@ -842,15 +912,17 @@ function buildInfoCard(){
       <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>; zoning itself stays a link-out</li>
       <li>Radon risk — <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA Radon Risk Map</a> (link-out)</li>
       <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
+      <li>RPS &amp; ACA (statutory protected structures / conservation areas) — live for South Dublin, Wicklow, Fingal (ACA only), and Cork City (RPS only) so far; each of Ireland's 31 local authorities publishes its own, most as plan text/PDF rather than a queryable service. Local authority resolved via Tailte Éireann's own administrative boundaries.</li>
     </ol>
     <h4>Limitations &amp; caveats</h4>
     <ul style="padding-left:18px;margin:0;font-size:12.5px;color:var(--muted)">
       <li>This is a demo — coordinates are area/postcode-level approximations, not exact per-building locations, so every result on this page inherits that imprecision.</li>
       <li>Property boundary is Tailte Éireann's mapped extent of a registered title, not a legally guaranteed boundary; unregistered titles won't appear. Legal folio &amp; filed plan: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a>.</li>
       <li>Flood risk is indicative only (current-climate CFRAM scenario) — not a substitute for a site-specific Flood Risk Assessment; "not mapped" doesn't mean "safe."</li>
-      <li>NIAH rating is an architectural heritage assessment, not statutory protection in itself — check the local authority's Record of Protected Structures (RPS).</li>
+      <li>NIAH rating is an architectural heritage assessment, not statutory protection in itself — RPS (a separate section) is the actual legal protection; a structure can be on either, both, or neither.</li>
       <li>Zoning designation isn't covered by any dataset queried here — check myplan.ie directly.</li>
       <li>Ecology: "not within" a designated area (2km search radius) doesn't mean Appropriate Assessment screening is off the table — it isn't strictly bounded by the designation's own boundary. Get a professional ecological assessment for anything borderline.</li>
+      <li>RPS &amp; ACA only cover 4 of 31 local authorities so far — everywhere else, the report says so rather than guessing.</li>
     </ul>`;
   return div;
 }

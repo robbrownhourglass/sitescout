@@ -115,6 +115,31 @@ def print_report(report: dict) -> None:
                     print(f"  ⚠ Within {v['type_label']}: {v['site_name']} ({v['site_code']})")
         print(f"  {e['caveat']}")
 
+    if "rps_aca" in s:
+        r = s["rps_aca"]
+        print("\n-- RPS & ACA (statutory protected structures / conservation areas) --")
+        if not r["covered"]:
+            print(f"  {r['note']}")
+        else:
+            print(f"  Local authority: {r['authority']}")
+            rp = r["rps"]
+            if rp.get("available"):
+                count_label = f"{rp['structure_count']}{'+' if rp.get('more_exist') else ''}"
+                print(f"  RPS: {count_label} protected structure(s) within 500m")
+                for st in rp["structures"][:6]:
+                    print(f"    - {st.get('address') or st.get('description')} ({st.get('ref')})")
+            else:
+                print("  RPS: no live source for this local authority yet")
+            ac = r["aca"]
+            if ac.get("available"):
+                if ac["in_aca"]:
+                    print(f"  ACA: within {ac['current']['name']}")
+                else:
+                    print(f"  ACA: not within one ({ac['area_count']} mapped nearby)")
+            else:
+                print("  ACA: no live source for this local authority yet")
+            print(f"  {r['note']}")
+
     if "utilities" in s:
         u = s["utilities"]
         print("\n-- Utilities (request-based, no open API) --")
@@ -235,6 +260,32 @@ def _to_markdown(report: dict) -> str:
                 if v:
                     lines.append(f"- Within {v['type_label']}: {v['site_name']} ({v['site_code']})")
         lines.append(f"> {e['caveat']}")
+        lines.append("")
+
+    if "rps_aca" in s:
+        r = s["rps_aca"]
+        lines.append("## RPS & ACA (statutory protected structures / conservation areas)")
+        if not r["covered"]:
+            lines.append(r["note"])
+        else:
+            lines.append(f"Local authority: {r['authority']}")
+            rp = r["rps"]
+            if rp.get("available"):
+                count_label = f"{rp['structure_count']}{'+' if rp.get('more_exist') else ''}"
+                lines.append(f"- RPS: {count_label} protected structure(s) within 500m")
+                for st in rp["structures"][:6]:
+                    lines.append(f"  - {st.get('address') or st.get('description')} ({st.get('ref')})")
+            else:
+                lines.append("- RPS: no live source for this local authority yet")
+            ac = r["aca"]
+            if ac.get("available"):
+                if ac["in_aca"]:
+                    lines.append(f"- ACA: within {ac['current']['name']}")
+                else:
+                    lines.append(f"- ACA: not within one ({ac['area_count']} mapped nearby)")
+            else:
+                lines.append("- ACA: no live source for this local authority yet")
+            lines.append(f"> {r['note']}")
         lines.append("")
 
     if "utilities" in s:
