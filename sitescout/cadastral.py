@@ -9,6 +9,8 @@ folio + filed plan from landdirect.ie. Only registered titles appear here.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from .arcgis import point_query
 
@@ -64,3 +66,42 @@ def get_boundary(lat: float, lon: float) -> dict:
             "plan see https://www.landdirect.ie"
         ),
     }
+
+
+def get_boundaries_for_points(points: list[tuple[float, float]], max_workers: int = 10) -> dict[tuple[float, float], Optional[dict]]:
+    """Looks up the cadastral parcel at each of `points` — used to draw a
+    property boundary for every planning application found nearby, not
+    just the searched site itself. Runs concurrently (one call can mean
+    dozens of points, one per planning application within the search
+    radius) since `get_boundary()` is up to two sequential HTTP requests
+    on its own (freehold, falling back to leasehold); doing that serially
+    for 25+ points would make a single site-scout request noticeably
+    slower. Dedupes identical points first — multiple planning
+    applications often share the same site.
+
+    Returns a dict keyed by the exact (lat, lon) tuple passed in, so
+    callers can map results back onto whatever they're enriching; a
+    failed/not-found lookup maps to None or `{"found": False, ...}"`
+    (never raises — one bad point shouldn't sink the whole batch).
+    """
+    unique_points = list({p for p in points if p[0] is not None and p[1] is not None})
+    if not unique_points:
+        return {}
+
+    log.info("Looking up cadastral boundaries for %d point(s)…", len(unique_points))
+
+    def _lookup(pt: tuple[float, float]):
+        lat, lon = pt
+        try:
+            return pt, get_boundary(lat, lon)
+        except Exception as exc:
+            log.warning("-> boundary lookup failed for (%.6f, %.6f): %s", lat, lon, exc)
+            return pt, None
+
+    results: dict[tuple[float, float], Optional[dict]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for pt, boundary in executor.map(_lookup, unique_points):
+            results[pt] = boundary
+    found_count = sum(1 for b in results.values() if b and b.get("found"))
+    log.info("-> %d/%d point(s) had a mapped parcel", found_count, len(unique_points))
+    return results

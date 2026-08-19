@@ -547,6 +547,30 @@ function buildPlanningLayer(p){
   return group;
 }
 
+// The property boundary for every planning application found nearby (not
+// just the searched site itself) — pipeline.py looks these up concurrently
+// and attaches them as app.boundary. Most applications won't have one
+// (unregistered title, or the point falls just outside a mapped parcel —
+// same caveats as the main "Property boundary" card), so this only draws
+// where one was actually found.
+function buildPlanningBoundariesLayer(p){
+  const group = L.layerGroup();
+  const allApps = [
+    ...((p && p.applications) || []),
+    ...((p && p.site_match && p.site_match.applications) || []),
+  ];
+  allApps.forEach(app => {
+    const b = app.boundary;
+    if(!b || !b.found || !b.polygon_rings_itm_wgs84) return;
+    ringsToLatLngs(b.polygon_rings_itm_wgs84).forEach(ring => {
+      L.polygon(ring, { color: CATEGORY_COLORS.planning, weight: 2, fillOpacity: 0.12, pane: 'polygonsPane' })
+        .bindPopup(`<strong>${app.application_number}</strong><br>${b.tenure} parcel, ${b.area_hectares} ha`)
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
 function buildFloodLayer(f){
   const group = L.layerGroup();
   (f && f.features || []).forEach(feat => {
@@ -710,6 +734,7 @@ function finalizeSearch(report){
   addOverlay('SMR Zone', buildSmrZoneLayer(s.smr_zone));
   addOverlay('Protected structures (NIAH)', buildNiahLayer(s.niah));
   addOverlay('Planning applications', buildPlanningLayer(s.planning_applications));
+  addOverlay('Planning application boundaries', buildPlanningBoundariesLayer(s.planning_applications));
   addOverlay('Flood extent (OPW)', buildFloodLayer(s.flood_risk));
   addOverlay('Ecology (NPWS)', buildEcologyLayer(s.ecology));
   addOverlay('Protected structures (RPS)', buildRpsLayer(s.rps_aca));

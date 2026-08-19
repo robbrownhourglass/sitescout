@@ -16,6 +16,26 @@ from . import cadastral, ecology, gsi, heritage, rps, utilities, planning, repor
 log = logging.getLogger("sitescout.pipeline")
 
 
+def _attach_boundaries(planning_applications: dict) -> None:
+    """Mutates `planning_applications` in place, adding a `boundary` key
+    (cadastral.get_boundary()'s shape, or None) to every application in
+    both the radius search and the exact-Eircode match — the property
+    boundary for that specific application's own site, not the searched
+    site. Looked up concurrently (see cadastral.get_boundaries_for_points)
+    since there can be dozens of applications in one report.
+    """
+    all_apps = list(planning_applications.get("applications", []))
+    if planning_applications.get("site_match"):
+        all_apps += planning_applications["site_match"].get("applications", [])
+    points = [(a["lat"], a["lon"]) for a in all_apps if a.get("lat") is not None and a.get("lon") is not None]
+    if not points:
+        return
+    boundaries = cadastral.get_boundaries_for_points(points)
+    for a in all_apps:
+        if a.get("lat") is not None and a.get("lon") is not None:
+            a["boundary"] = boundaries.get((a["lat"], a["lon"]))
+
+
 def run(query: str, resolved, geo) -> dict:
     sections = {}
 
@@ -51,6 +71,7 @@ def run(query: str, resolved, geo) -> dict:
 
     try:
         sections["planning_applications"] = planning.get_planning_applications(geo.lat, geo.lon, resolved.eircode)
+        _attach_boundaries(sections["planning_applications"])
     except Exception as exc:
         log.error("Planning application lookup failed: %s", exc)
 
