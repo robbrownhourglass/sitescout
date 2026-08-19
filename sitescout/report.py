@@ -105,6 +105,16 @@ def print_report(report: dict) -> None:
         print(f"  Coastal: {f['coastal_probability'] or 'not mapped at this point'}")
         print(f"  {f['caveat']}")
 
+    if "ecology" in s:
+        e = s["ecology"]
+        count_label = f"{e['site_count']}{'+' if e.get('more_exist') else ''}"
+        print(f"\n-- Ecology & nature conservation (NPWS; {count_label} designated area(s) within 2km) --")
+        if e["any_within"]:
+            for v in e["within"].values():
+                if v:
+                    print(f"  ⚠ Within {v['type_label']}: {v['site_name']} ({v['site_code']})")
+        print(f"  {e['caveat']}")
+
     if "utilities" in s:
         u = s["utilities"]
         print("\n-- Utilities (request-based, no open API) --")
@@ -214,6 +224,17 @@ def _to_markdown(report: dict) -> str:
         lines.append(f"- Fluvial (river): {f['fluvial_probability'] or 'not mapped at this point'}")
         lines.append(f"- Coastal: {f['coastal_probability'] or 'not mapped at this point'}")
         lines.append(f"> {f['caveat']}")
+        lines.append("")
+
+    if "ecology" in s:
+        e = s["ecology"]
+        count_label = f"{e['site_count']}{'+' if e.get('more_exist') else ''}"
+        lines.append(f"## Ecology & nature conservation (NPWS; {count_label} designated area(s) within 2km)")
+        if e["any_within"]:
+            for v in e["within"].values():
+                if v:
+                    lines.append(f"- Within {v['type_label']}: {v['site_name']} ({v['site_code']})")
+        lines.append(f"> {e['caveat']}")
         lines.append("")
 
     if "utilities" in s:

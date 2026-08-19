@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from . import cadastral, gsi, heritage, utilities, planning, report
+from . import cadastral, ecology, gsi, heritage, utilities, planning, report
 
 log = logging.getLogger("sitescout.pipeline")
 
@@ -58,6 +58,11 @@ def run(query: str, resolved, geo) -> dict:
         sections["flood_risk"] = planning.get_flood_risk(geo.lat, geo.lon)
     except Exception as exc:
         log.error("Flood risk lookup failed: %s", exc)
+
+    try:
+        sections["ecology"] = ecology.get_protected_sites(geo.lat, geo.lon)
+    except Exception as exc:
+        log.error("Ecology (NPWS designated areas) lookup failed: %s", exc)
 
     sections["utilities"] = utilities.draft_requests(geo.lat, geo.lon, geo.label)
     sections["planning"] = planning.get_planning_links(geo.lat, geo.lon)

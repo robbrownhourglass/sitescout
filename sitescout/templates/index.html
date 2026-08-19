@@ -229,6 +229,7 @@ const CATEGORY_COLORS = {
   floodHigh: '#b3261e',
   floodMedium: '#e08e00',
   floodLow: '#4a90d9',
+  ecology: '#3f8f29',
 };
 
 // Small self-contained line-icon set for the tile strip — one glyph per
@@ -277,6 +278,11 @@ const TILE_ICONS = {
   // lightning bolt, filled solid for a bolder read at this size
   utilities: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
       <path d="M13 2 5 14h5l-1 8 9-13h-6l1-7Z"/>
+    </svg>`,
+  // a single leaf with a central vein — nature/ecology designations
+  ecology: `<svg ${ICON_ATTRS}>
+      <path d="M6 19c-1-7 3-13 12-14 1 8-3 13-12 14Z"/>
+      <path d="M6.5 18.5C9 15 11 11.5 12.5 7"/>
     </svg>`,
   // info: circled "i"
   info: `<svg ${ICON_ATTRS}>
@@ -529,6 +535,30 @@ function buildFloodLayer(f){
   return group;
 }
 
+// Draws every NPWS-designated area (SAC/SPA/NHA/pNHA) found within the
+// search radius as a shaded area, same "shade everything nearby, bold the
+// one containing the site" approach as buildSmrZoneLayer.
+function buildEcologyLayer(e){
+  const group = L.layerGroup();
+  (e && e.sites || []).forEach(site => {
+    if(!site.polygon_rings_wgs84) return;
+    ringsToLatLngs(site.polygon_rings_wgs84).forEach(ring => {
+      L.polygon(ring, {
+        color: CATEGORY_COLORS.ecology,
+        weight: site.contains_site ? 2.5 : 1.2,
+        fillOpacity: site.contains_site ? 0.32 : 0.16,
+      })
+        .bindPopup(
+          `<strong>${site.type_label}</strong><br>${site.site_name} (${site.site_code})<br>~${site.area_hectares} ha` +
+          (site.contains_site ? '<br>Contains this site' : '') +
+          (site.url ? `<br><a href="${site.url}" target="_blank">npws.ie</a>` : '')
+        )
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
 // panel with that category's full detail — the "card" content is the same
@@ -621,6 +651,7 @@ function finalizeSearch(report){
   addOverlay('Protected structures (NIAH)', buildNiahLayer(s.niah));
   addOverlay('Planning applications', buildPlanningLayer(s.planning_applications));
   addOverlay('Flood extent (OPW)', buildFloodLayer(s.flood_risk));
+  addOverlay('Ecology (NPWS)', buildEcologyLayer(s.ecology));
   layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
 
   buildTileStrip([
@@ -629,6 +660,7 @@ function finalizeSearch(report){
     { key: 'water', title: 'Water table & flood risk', node: waterCard(s.groundwater, s.flood_risk) },
     { key: 'archaeology', title: 'Archaeology & heritage', node: archaeologyCard(s.archaeology, s.smr_zone) },
     { key: 'niah', title: 'Protected structures (NIAH)', node: niahCard(s.niah) },
+    { key: 'ecology', title: 'Ecology & nature conservation', node: ecologyCard(s.ecology) },
     { key: 'planning', title: 'Planning context', node: planningCard(s.planning, s.planning_applications) },
     { key: 'utilities', title: 'Utilities', node: utilitiesCard(s.utilities) },
   ]);
@@ -729,6 +761,26 @@ function niahCard(n){
     'Source: <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>, buildingsofireland.ie');
 }
 
+function ecologyCard(e){
+  if(!e){
+    return card('Ecology & nature conservation', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const withinList = Object.values(e.within).filter(Boolean);
+  let html;
+  if(withinList.length){
+    html = withinList.map((v, i) => {
+      const aaNote = (v.type === 'sac' || v.type === 'spa') ? ' <span class="muted">— may require Appropriate Assessment</span>' : '';
+      return `<div${i > 0 ? ' style="margin-top:6px"' : ''}><strong>Within ${v.type_label}</strong>${aaNote}<br><span class="muted">${v.site_name} (${v.site_code}), ~${v.area_hectares} ha</span></div>`;
+    }).join('');
+  } else {
+    html = '<div>Not within a mapped SAC, SPA, NHA, or proposed NHA at this point.</div>';
+  }
+  const countLabel = e.site_count + (e.more_exist ? '+' : '');
+  html += `<div style="margin-top:8px" class="muted">${countLabel} designated area(s) mapped within 2km.</div>`;
+  return card('Ecology & nature conservation', e.any_within ? 'warn' : 'ok', 'Live', 'live', html,
+    'Source: <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC/SPA/NHA/pNHA)');
+}
+
 function mailto(to, subject, body){
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
@@ -789,6 +841,7 @@ function buildInfoCard(){
       <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests</li>
       <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>; zoning itself stays a link-out</li>
       <li>Radon risk — <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA Radon Risk Map</a> (link-out)</li>
+      <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
     </ol>
     <h4>Limitations &amp; caveats</h4>
     <ul style="padding-left:18px;margin:0;font-size:12.5px;color:var(--muted)">
@@ -797,6 +850,7 @@ function buildInfoCard(){
       <li>Flood risk is indicative only (current-climate CFRAM scenario) — not a substitute for a site-specific Flood Risk Assessment; "not mapped" doesn't mean "safe."</li>
       <li>NIAH rating is an architectural heritage assessment, not statutory protection in itself — check the local authority's Record of Protected Structures (RPS).</li>
       <li>Zoning designation isn't covered by any dataset queried here — check myplan.ie directly.</li>
+      <li>Ecology: "not within" a designated area (2km search radius) doesn't mean Appropriate Assessment screening is off the table — it isn't strictly bounded by the designation's own boundary. Get a professional ecological assessment for anything borderline.</li>
     </ul>`;
   return div;
 }
