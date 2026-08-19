@@ -50,7 +50,7 @@ def run(query: str, resolved, geo) -> dict:
         log.error("NIAH lookup failed: %s", exc)
 
     try:
-        sections["planning_applications"] = planning.get_planning_applications(geo.lat, geo.lon)
+        sections["planning_applications"] = planning.get_planning_applications(geo.lat, geo.lon, resolved.eircode)
     except Exception as exc:
         log.error("Planning application lookup failed: %s", exc)
 

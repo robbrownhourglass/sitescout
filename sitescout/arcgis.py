@@ -73,3 +73,38 @@ def point_query(
         layer_url, lon, lat, out_fields, distance_m, return_geometry, result_record_count,
     )
     return data.get("features", [])
+
+
+def attribute_query(
+    layer_url: str,
+    where: str,
+    out_fields: str = "*",
+    return_geometry: bool = False,
+    result_record_count: Optional[int] = None,
+) -> list[dict]:
+    """Plain attribute (non-spatial) query — no lon/lat involved at all.
+    Used where a text field can identify a feature more precisely than our
+    (approximate) coordinates can — e.g. an exact Eircode match against
+    planning.py's DevelopmentPostcode field. Confirmed this backend doesn't
+    support SQL functions like REPLACE/UPPER in `where` (tested, got a 400
+    "invalid query parameters") — build any case/format-insensitive match
+    as an explicit `OR` of literal candidate strings instead.
+    """
+    params = {
+        "where": where,
+        "outFields": out_fields,
+        "f": "json",
+        "returnGeometry": "true" if return_geometry else "false",
+    }
+    if return_geometry:
+        params["outSR"] = "4326"
+    if result_record_count:
+        params["resultRecordCount"] = result_record_count
+
+    log.debug("ArcGIS attribute query: %s params=%s", layer_url, params)
+    resp = requests.get(layer_url, params=params, timeout=config.HTTP_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"ArcGIS service error: {data['error'].get('message', data['error'])}")
+    return data.get("features", [])

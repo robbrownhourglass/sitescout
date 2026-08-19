@@ -93,8 +93,13 @@ def print_report(report: dict) -> None:
 
     if "planning_applications" in s:
         p = s["planning_applications"]
+        if p.get("site_match") and p["site_match"]["application_count"]:
+            sm = p["site_match"]
+            print(f"\n-- Planning applications — this Eircode ({sm['application_count']} exact match) --")
+            for app in sm["applications"][:6]:
+                print(f"  - {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
         count_label = f"{p['application_count']}{'+' if p.get('more_exist') else ''}"
-        print(f"\n-- Planning applications ({count_label} within 300m) --")
+        print(f"\n-- Planning applications ({count_label} within {p.get('search_radius_m', 500)}m) --")
         for app in p["applications"][:6]:
             print(f"  - {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
 
@@ -237,8 +242,14 @@ def _to_markdown(report: dict) -> str:
 
     if "planning_applications" in s:
         p = s["planning_applications"]
+        if p.get("site_match") and p["site_match"]["application_count"]:
+            sm = p["site_match"]
+            lines.append(f"## Planning applications — this Eircode ({sm['application_count']} exact match)")
+            for app in sm["applications"][:6]:
+                lines.append(f"- {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
+            lines.append("")
         count_label = f"{p['application_count']}{'+' if p.get('more_exist') else ''}"
-        lines.append(f"## Planning applications ({count_label} within 300m)")
+        lines.append(f"## Planning applications ({count_label} within {p.get('search_radius_m', 500)}m)")
         for app in p["applications"][:6]:
             lines.append(f"- {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
         lines.append("")

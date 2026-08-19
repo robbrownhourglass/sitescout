@@ -534,6 +534,16 @@ function buildPlanningLayer(p){
       .bindPopup(`<strong>${app.application_number}</strong><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
       .addTo(group);
   });
+  // Exact-Eircode matches (this specific site's own history) drawn bigger,
+  // with a white ring, so they stand out from the general radius search.
+  const siteApps = (p && p.site_match && p.site_match.applications) || [];
+  siteApps.forEach(app => {
+    if(app.lat == null || app.lon == null) return;
+    const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+    L.circleMarker([app.lat, app.lon], { radius: 9, color: '#fff', weight: 3, fillColor: CATEGORY_COLORS.planning, fillOpacity: 0.9, pane: 'pointsPane' })
+      .bindPopup(`<strong>${app.application_number}</strong> <span class="muted">(exact Eircode match)</span><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
+      .addTo(group);
+  });
   return group;
 }
 
@@ -888,16 +898,26 @@ function planningCard(p, apps){
     return card('Planning context', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   let html = '';
+  const siteMatch = apps && apps.site_match;
+  if(siteMatch && siteMatch.application_count){
+    html += `<div><strong>${siteMatch.application_count} application(s) — this Eircode (exact match)</strong></div><ul>` +
+      siteMatch.applications.slice(0, 5).map(app => {
+        const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+        const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
+        return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
+      }).join('') + '</ul>';
+  }
+  const radiusM = (apps && apps.search_radius_m) || 500;
   if(apps && apps.application_count){
     const countLabel = apps.application_count + (apps.more_exist ? '+' : '');
-    html += `<div><strong>${countLabel} planning application(s) within 300m</strong></div><ul>` +
+    html += `<div${siteMatch && siteMatch.application_count ? ' style="margin-top:10px"' : ''}><strong>${countLabel} planning application(s) within ${radiusM}m</strong></div><ul>` +
       apps.applications.slice(0, 5).map(app => {
         const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
         const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
         return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
       }).join('') + '</ul>';
   } else if(apps){
-    html += '<div>No planning applications found within 300m.</div>';
+    html += `<div>No planning applications found within ${radiusM}m.</div>`;
   }
   return card('Planning context', (apps && apps.application_count) ? 'warn' : 'ok', apps ? 'Live + links' : 'Links', 'live', html,
     `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.epa_radon_risk_map}" target="_blank">EPA radon map</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
@@ -923,7 +943,7 @@ function buildInfoCard(){
       <li>Protected structures — <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>; also see <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a></li>
       <li>Electricity infrastructure — ESB Networks Dial Before You Dig (request-based)</li>
       <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests</li>
-      <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>; zoning itself stays a link-out</li>
+      <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>: a 500m radius search plus a bonus exact-Eircode match (only works when an application's own record has that field populated — true for ~0.6% nationally); zoning itself stays a link-out</li>
       <li>Radon risk — <a href="https://www.epa.ie/environment-and-you/radon/radon-map/" target="_blank">EPA Radon Risk Map</a> (link-out)</li>
       <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
       <li>RPS &amp; ACA (statutory protected structures / conservation areas) — live for South Dublin, Wicklow, Fingal (ACA only), and Cork City (RPS only) so far; each of Ireland's 31 local authorities publishes its own, most as plan text/PDF rather than a queryable service. Local authority resolved via Tailte Éireann's own administrative boundaries.</li>

@@ -23,22 +23,50 @@ zoning maps, no single national layer was found. That stays a link-out.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
+from typing import Optional
 
 from . import wms
-from .arcgis import point_query_full
+from .arcgis import attribute_query, point_query_full
 
 log = logging.getLogger("sitescout.planning")
 
 PLANNING_APPLICATIONS_URL = (
     "https://services.arcgis.com/NzlPQPKn5QF9v2US/arcgis/rest/services/"
-    "IrishPlanningApplications_FVLayer/FeatureServer/0"
+    "IrishPlanningApplications_FVLayer/FeatureServer/0/query"
 )
-PLANNING_APPLICATIONS_SEARCH_RADIUS_M = 300
+PLANNING_APPLICATIONS_SEARCH_RADIUS_M = 500
 PLANNING_APPLICATIONS_OUT_FIELDS = (
     "ApplicationNumber,DevelopmentDescription,DevelopmentAddress,ApplicationStatus,"
     "Decision,ReceivedDate,DecisionDate,AppealStatus,AppealDecision"
 )
+
+# For the exact-Eircode match (get_planning_applications' `site_match`).
+# Confirmed live: only ~2,528 of ~390,773 records nationally (0.6%) have
+# DevelopmentPostcode populated at all, and it's inconsistently formatted
+# where it is (spaced "D24 VE22", unspaced "D24VE22", and at least one
+# garbage value that was just "14") — so this is a bonus confirmation on
+# top of the radius search below, never the primary source.
+EIRCODE_PATTERN = re.compile(r"^[A-Z0-9]{3} ?[A-Z0-9]{4}$")
+
+
+def _eircode_where_clause(field: str, eircode: str) -> Optional[str]:
+    """Builds a `WHERE field = 'X' OR field = 'Y'` clause matching both the
+    spaced and unspaced form of an Eircode. Returns None if `eircode`
+    doesn't look like a real one — defensive, since this becomes a raw SQL
+    WHERE clause (this backend doesn't support parameter binding, and
+    doesn't support SQL functions like REPLACE/UPPER either — tested, got
+    a 400 "invalid query parameters" — hence building literal OR candidates
+    instead of normalising server-side).
+    """
+    normalised = (eircode or "").strip().upper()
+    if not EIRCODE_PATTERN.match(normalised):
+        return None
+    unspaced = normalised.replace(" ", "")
+    spaced = f"{unspaced[:3]} {unspaced[3:]}"
+    escape = lambda s: s.replace("'", "''")
+    return f"{field} = '{escape(spaced)}' OR {field} = '{escape(unspaced)}'"
 
 # OPW's CFRAM predictive flood-extent layers, current climate scenario only
 # (future-scenario and depth-grid layers exist too — see floodmap.js on
@@ -77,7 +105,46 @@ def _epoch_ms_to_date(value) -> str | None:
         return None
 
 
-def get_planning_applications(lat: float, lon: float) -> dict:
+def _extract_application(attrs: dict, geom: dict) -> dict:
+    return {
+        "application_number": attrs.get("ApplicationNumber"),
+        "description": attrs.get("DevelopmentDescription"),
+        "address": attrs.get("DevelopmentAddress"),
+        "status": attrs.get("ApplicationStatus"),
+        "decision": attrs.get("Decision"),
+        "received_date": _epoch_ms_to_date(attrs.get("ReceivedDate")),
+        "decision_date": _epoch_ms_to_date(attrs.get("DecisionDate")),
+        "appeal_status": attrs.get("AppealStatus"),
+        "appeal_decision": attrs.get("AppealDecision"),
+        "lat": geom.get("y"),
+        "lon": geom.get("x"),
+    }
+
+
+def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = None) -> dict:
+    """Two searches: an exact-Eircode match against this specific site
+    (`site_match`, precise regardless of our coordinate imprecision — but
+    only works when the application record has that field populated, see
+    EIRCODE_PATTERN's docstring above), and a radius search around the
+    geocoded point for everything nearby (the main, complete picture).
+    """
+    site_match = None
+    where = _eircode_where_clause("DevelopmentPostcode", eircode) if eircode else None
+    if where:
+        log.info("Checking for planning applications with an exact Eircode match…")
+        try:
+            feats = attribute_query(
+                PLANNING_APPLICATIONS_URL, where,
+                out_fields=PLANNING_APPLICATIONS_OUT_FIELDS,
+                return_geometry=True,
+                result_record_count=25,
+            )
+            site_applications = [_extract_application(f["attributes"], f.get("geometry") or {}) for f in feats]
+            log.info("-> %d application(s) with exact Eircode match", len(site_applications))
+            site_match = {"application_count": len(site_applications), "applications": site_applications}
+        except Exception as exc:
+            log.warning("-> exact Eircode match query failed: %s", exc)
+
     log.info("Querying National Planning Application Database within %dm…", PLANNING_APPLICATIONS_SEARCH_RADIUS_M)
     data = point_query_full(
         PLANNING_APPLICATIONS_URL, lon, lat,
@@ -88,35 +155,33 @@ def get_planning_applications(lat: float, lon: float) -> dict:
         order_by="ReceivedDate DESC",
     )
     feats = data.get("features", [])
-    applications = []
-    for f in feats:
-        a = f["attributes"]
-        geom = f.get("geometry") or {}
-        applications.append({
-            "application_number": a.get("ApplicationNumber"),
-            "description": a.get("DevelopmentDescription"),
-            "address": a.get("DevelopmentAddress"),
-            "status": a.get("ApplicationStatus"),
-            "decision": a.get("Decision"),
-            "received_date": _epoch_ms_to_date(a.get("ReceivedDate")),
-            "decision_date": _epoch_ms_to_date(a.get("DecisionDate")),
-            "appeal_status": a.get("AppealStatus"),
-            "appeal_decision": a.get("AppealDecision"),
-            "lat": geom.get("y"),
-            "lon": geom.get("x"),
-        })
+    applications = [_extract_application(f["attributes"], f.get("geometry") or {}) for f in feats]
     exceeded = bool(data.get("exceededTransferLimit"))
     log.info(
         "-> %d planning application(s) within %dm%s",
         len(applications), PLANNING_APPLICATIONS_SEARCH_RADIUS_M, " (capped, more exist)" if exceeded else "",
     )
+
+    note = (
+        "Zoning designation isn't in this dataset — check myplan.ie's zoning map directly "
+        "for the relevant local authority's development plan."
+    )
+    if eircode:
+        note += (
+            " Exact-Eircode matching only works when an application's own record has that field "
+            "filled in — most historic records don't (roughly 0.6% nationally are populated), so "
+            "the radius-based list is the complete picture; an Eircode match is a bonus "
+            "confirmation on top of it, not the other way round."
+        )
+
     return {
         "application_count": len(applications),
         "more_exist": exceeded,
         "applications": applications,
+        "search_radius_m": PLANNING_APPLICATIONS_SEARCH_RADIUS_M,
+        "site_match": site_match,
         "source": "National Planning Application Database (myplan.ie)",
-        "note": "Zoning designation isn't in this dataset — check myplan.ie's zoning map directly "
-                "for the relevant local authority's development plan.",
+        "note": note,
     }
 
 
