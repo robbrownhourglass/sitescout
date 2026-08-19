@@ -194,9 +194,10 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Property boundary | Tailte Éireann `Cadastral_Parcels_Freehold` (layer 12) / `Cadastral_Parcels_Leasehold` (layer 13) | `cadastral.py` |
 | Planning applications | National Planning Application Database `FeatureServer` (`IrishPlanningApplications_FVLayer`) | `planning.py` |
 | Flood risk (fluvial/coastal) | OPW CFRAM predictive flood-extent maps, GeoServer WMS `GetFeatureInfo` on floodinfo.ie's own server | `planning.py` + `wms.py` |
+| Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
 
 **How the second batch above (SMR Zones, NIAH, planning applications, flood
-risk) was found** — same "pull the JS apart" technique as the
+risk, ecology) was found** — same "pull the JS apart" technique as the
 finder.eircode.ie writeup in item 5 of the coordinate-precision saga, this
 time against public ArcGIS Online **WebAppViewer** apps and one OpenLayers
 app, rather than the documented-but-dead endpoints:
@@ -227,6 +228,15 @@ app, rather than the documented-but-dead endpoints:
    confirmed GeoServer returns each feature's **full** geometry regardless
    of query bbox size, and that its native SRS (`EPSG:900913`/Web Mercator)
    needs reprojecting to WGS84 for Leaflet — see `wms.py`.
+6. Same technique on npws.ie found the "NPWS Designations Viewer" WebAppViewer
+   (linked from npws.ie/protected-sites), whose web map has all four
+   ecological-designation layers (SAC/SPA/NHA/pNHA) on one `NPWSDesignatedAreas`
+   `FeatureServer` — a single national dataset, unlike RPS/ACA below.
+
+`Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
+working register of further candidate sources (data.gov.ie, local-authority
+RPS/ACA, funding schemes, historical records, etc.) — use it before
+re-researching what else might be integrable.
 
 Not yet wired in / unresolved:
 
@@ -243,6 +253,21 @@ Not yet wired in / unresolved:
   3 coastal probability bands). Future-scenario and depth-grid layers exist
   on the same GeoServer (see `floodmap.js` on floodinfo.ie) but aren't
   queried — would be straightforward to add via `wms.py` if needed.
+- **RPS (Record of Protected Structures) & ACA (Architectural Conservation
+  Areas)** — distinct from NIAH (a heritage *survey*, not statutory
+  protection). Published per-local-authority, not nationally, so this is a
+  bigger project than everything above: 6 of 31 counties have a verified
+  live ArcGIS `FeatureServer` (Cork City, Dún Laoghaire-Rathdown, Fingal
+  [ACA only], Kildare, South Dublin, Wicklow — see the spreadsheet's "GREEN"
+  rows), most others need a developer to find/verify their endpoint, and
+  Meath's data.gov.ie listing has a licensing note that blocks use until
+  resolved. Would need per-authority routing (resolve point → local
+  authority → that authority's source), which the spreadsheet's own "RPS
+  ACA Routing Logic" sheet lays out.
+- Ecological designations (`ecology.py`) only reports the 2km search radius
+  as "nearby" — the real Appropriate Assessment screening distance isn't a
+  fixed radius and can be larger; treat "not within 2km" as a starting
+  point, not a clearance.
 
 ## Known limitations / TODO
 
