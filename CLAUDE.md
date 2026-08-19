@@ -195,6 +195,8 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Planning applications | National Planning Application Database `FeatureServer` (`IrishPlanningApplications_FVLayer`) | `planning.py` |
 | Flood risk (fluvial/coastal) | OPW CFRAM predictive flood-extent maps, GeoServer WMS `GetFeatureInfo` on floodinfo.ie's own server | `planning.py` + `wms.py` |
 | Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
+| Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
+| RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
 
 **How the second batch above (SMR Zones, NIAH, planning applications, flood
 risk, ecology) was found** — same "pull the JS apart" technique as the
@@ -253,17 +255,21 @@ Not yet wired in / unresolved:
   3 coastal probability bands). Future-scenario and depth-grid layers exist
   on the same GeoServer (see `floodmap.js` on floodinfo.ie) but aren't
   queried — would be straightforward to add via `wms.py` if needed.
-- **RPS (Record of Protected Structures) & ACA (Architectural Conservation
-  Areas)** — distinct from NIAH (a heritage *survey*, not statutory
-  protection). Published per-local-authority, not nationally, so this is a
-  bigger project than everything above: 6 of 31 counties have a verified
-  live ArcGIS `FeatureServer` (Cork City, Dún Laoghaire-Rathdown, Fingal
-  [ACA only], Kildare, South Dublin, Wicklow — see the spreadsheet's "GREEN"
-  rows), most others need a developer to find/verify their endpoint, and
-  Meath's data.gov.ie listing has a licensing note that blocks use until
-  resolved. Would need per-authority routing (resolve point → local
-  authority → that authority's source), which the spreadsheet's own "RPS
-  ACA Routing Logic" sheet lays out.
+- **RPS & ACA — done, but only for 4 of 31 local authorities**
+  (`rps.py` + `local_authority.py`). The spreadsheet's "GREEN" rows turned
+  out to overstate readiness once actually checked: several are a static
+  GeoJSON *file* download (not a live query endpoint — would need fetch +
+  cache + our own point-in-polygon, e.g. Dún Laoghaire-Rathdown RPS, Cork
+  City ACA) and Kildare is zip/GeoPackage only (would need a new geospatial
+  dependency this app doesn't otherwise have). Only South Dublin (RPS+ACA),
+  Wicklow (RPS+ACA), Fingal (ACA), and Cork City (RPS) had a genuine live
+  ArcGIS `FeatureServer`, confirmed by actually fetching each dataset page
+  and checking what it linked to — don't trust the spreadsheet's status
+  column alone, re-verify before adding a new county. `rps.SOURCES` is the
+  per-authority routing table; add a new entry there (url + field-mapping
+  `extract` lambda) to extend coverage. Meath's data.gov.ie listing also has
+  a licensing note that blocks use until resolved — don't add it without
+  checking that first.
 - Ecological designations (`ecology.py`) only reports the 2km search radius
   as "nearby" — the real Appropriate Assessment screening distance isn't a
   fixed radius and can be larger; treat "not within 2km" as a starting
