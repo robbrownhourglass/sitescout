@@ -364,6 +364,17 @@ function ensureMap(){
     { attribution: 'Tiles © Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community', maxZoom: 19 }
   );
   baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
+
+  // Two custom panes so areas (SMR Zone, ecology, flood extent, ACA) always
+  // sit BELOW point markers (monuments, NIAH, planning apps, RPS), and stay
+  // that way regardless of which layers get toggled on/off via the layer
+  // control — Leaflet's default stacking is "whichever was added to the
+  // map most recently wins", which breaks the moment a user re-toggles a
+  // layer; panes stack by fixed z-index instead, independent of add order.
+  map.createPane('polygonsPane');
+  map.getPane('polygonsPane').style.zIndex = 410;
+  map.createPane('pointsPane');
+  map.getPane('pointsPane').style.zIndex = 620;
 }
 
 window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
@@ -459,7 +470,7 @@ function buildBoundaryLayer(b){
   const group = L.layerGroup();
   if(b && b.found && b.polygon_rings_itm_wgs84){
     ringsToLatLngs(b.polygon_rings_itm_wgs84).forEach(ring => {
-      L.polygon(ring, { color: CATEGORY_COLORS.boundary, weight: 2, fillOpacity: 0.08 })
+      L.polygon(ring, { color: CATEGORY_COLORS.boundary, weight: 2, fillOpacity: 0.08, pane: 'polygonsPane' })
         .bindPopup(`<strong>${b.tenure} parcel</strong><br>${b.county} · ${b.area_hectares} ha`)
         .addTo(group);
     });
@@ -471,7 +482,7 @@ function buildArchaeologyLayer(a){
   const group = L.layerGroup();
   (a && a.monuments || []).forEach(m => {
     if(m.lat == null || m.lon == null) return;
-    L.circleMarker([m.lat, m.lon], { radius: 6, color: CATEGORY_COLORS.archaeology, weight: 2, fillOpacity: 0.7 })
+    L.circleMarker([m.lat, m.lon], { radius: 6, color: CATEGORY_COLORS.archaeology, weight: 2, fillOpacity: 0.7, pane: 'pointsPane' })
       .bindPopup(`<strong>${m.class || 'Monument'}</strong><br>${m.smr_ref || ''}`)
       .addTo(group);
   });
@@ -491,6 +502,7 @@ function buildSmrZoneLayer(z){
         color: CATEGORY_COLORS.smrZone,
         weight: zone.contains_site ? 2.5 : 1.2,
         fillOpacity: zone.contains_site ? 0.32 : 0.18,
+        pane: 'polygonsPane',
       })
         .bindPopup(
           `<strong>SMR Zone ${zone.zone_id}</strong><br>~${zone.area_hectares} ha` +
@@ -506,7 +518,7 @@ function buildNiahLayer(n){
   const group = L.layerGroup();
   (n && n.structures || []).forEach(st => {
     if(st.lat == null || st.lon == null) return;
-    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.niah, weight: 2, fillOpacity: 0.7 })
+    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.niah, weight: 2, fillOpacity: 0.7, pane: 'pointsPane' })
       .bindPopup(`<strong>${st.name || st.address || 'Structure'}</strong><br>${st.rating || ''} · reg. ${st.reg_no || ''}`)
       .addTo(group);
   });
@@ -518,7 +530,7 @@ function buildPlanningLayer(p){
   (p && p.applications || []).forEach(app => {
     if(app.lat == null || app.lon == null) return;
     const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
-    L.circleMarker([app.lat, app.lon], { radius: 6, color: CATEGORY_COLORS.planning, weight: 2, fillOpacity: 0.7 })
+    L.circleMarker([app.lat, app.lon], { radius: 6, color: CATEGORY_COLORS.planning, weight: 2, fillOpacity: 0.7, pane: 'pointsPane' })
       .bindPopup(`<strong>${app.application_number}</strong><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
       .addTo(group);
   });
@@ -532,7 +544,7 @@ function buildFloodLayer(f){
       : feat.band === 'Medium' ? CATEGORY_COLORS.floodMedium
       : CATEGORY_COLORS.floodLow;
     geometryToRingSets(feat.geometry).forEach(ringSet => {
-      L.polygon(ringSet, { color, weight: 1, fillOpacity: 0.15 })
+      L.polygon(ringSet, { color, weight: 1, fillOpacity: 0.15, pane: 'polygonsPane' })
         .bindPopup(`<strong>${feat.label}</strong><br>Band: ${feat.band}`)
         .addTo(group);
     });
@@ -552,6 +564,7 @@ function buildEcologyLayer(e){
         color: CATEGORY_COLORS.ecology,
         weight: site.contains_site ? 2.5 : 1.2,
         fillOpacity: site.contains_site ? 0.32 : 0.16,
+        pane: 'polygonsPane',
       })
         .bindPopup(
           `<strong>${site.type_label}</strong><br>${site.site_name} (${site.site_code})<br>~${site.area_hectares} ha` +
@@ -569,7 +582,7 @@ function buildRpsLayer(r){
   const structures = (r && r.covered && r.rps && r.rps.available) ? r.rps.structures : [];
   structures.forEach(st => {
     if(st.lat == null || st.lon == null) return;
-    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.rpsAca, weight: 2, fillOpacity: 0.7 })
+    L.circleMarker([st.lat, st.lon], { radius: 6, color: CATEGORY_COLORS.rpsAca, weight: 2, fillOpacity: 0.7, pane: 'pointsPane' })
       .bindPopup(`<strong>${st.address || st.description || 'Protected structure'}</strong><br>RPS ref: ${st.ref || 'n/a'}`)
       .addTo(group);
   });
@@ -587,6 +600,7 @@ function buildAcaLayer(r){
         weight: area.contains_site ? 2.5 : 1.2,
         fillOpacity: area.contains_site ? 0.28 : 0.14,
         dashArray: '4 3',
+        pane: 'polygonsPane',
       })
         .bindPopup(`<strong>${area.name || 'Conservation area'}</strong>` + (area.contains_site ? '<br>Contains this site' : ''))
         .addTo(group);
