@@ -53,6 +53,9 @@ sitescout/
   heritage.py               archaeology (SMR), SMR Zones (notification zones), NIAH (protected
                              structures) — all National Monuments Service ArcGIS layers
   ecology.py                NPWS designated areas (SAC/SPA/NHA/pNHA) — one national dataset
+  epa.py                    environmental hazards (EPA): radon risk, closed landfills, licensed
+                             IPPC/IED facilities — all off EPA's own GeoServer via WFS, not
+                             ArcGIS/WMS like everything else (see verified-sources table)
   local_authority.py        resolves a point to its city/county council (Tailte Éireann boundaries)
   rps.py                    RPS/ACA (statutory protected structures/conservation areas) —
                              per-local-authority, only 4 of 31 wired in so far; see rps.SOURCES
@@ -63,7 +66,8 @@ sitescout/
   utilities.py              drafts ESB/Uisce Éireann data-request emails (no open API exists)
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
-                             CFRAM via wms.py), live; zoning + radon stay link-outs
+                             CFRAM via wms.py), live; zoning stays a link-out (radon moved to
+                             epa.py — see below, it's live now too, don't re-add it here)
   pipeline.py               shared section logic: SECTION_SPECS / run_section() runs one named
                              section at a time (used by the web UI's per-section endpoint);
                              run() runs all of them via a ThreadPoolExecutor for the CLI's
@@ -230,6 +234,17 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
 | RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
 | Environmental hazards (radon, closed landfills, licensed IPPC/IED facilities) | EPA's own GeoServer (`gis.epa.ie/geoserver`), queried via WFS `GetFeature` (not WMS `GetFeatureInfo` like `wms.py`) | `epa.py` |
+
+Radon risk zones are drawn as a real map overlay (dashed, low-opacity
+polygon), not just a text readout — but the raw polygons are large enough
+(one tested at ~48km x 36km, 5,597 boundary points) that `epa.py`
+simplifies before sending to the browser: `_simplify_ring()` decimates to
+at most 400 points, and `_polygon_ring_sets(..., simplify=True)` also
+drops interior holes, keeping only the largest ring per part. Tipperary
+Landfill coords: 5,597 → 416 points. This is a real (disclosed) shape
+simplification, not full accuracy — good for "roughly where does this zone
+end" at site-scouting zoom levels, not a survey-grade boundary. Closed
+landfills and IPPC facilities are small enough not to need this.
 
 **How the second batch above (SMR Zones, NIAH, planning applications, flood
 risk, ecology) was found** — same "pull the JS apart" technique as the
