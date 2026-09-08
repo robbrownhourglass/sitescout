@@ -54,8 +54,13 @@ sitescout/
                              structures) — all National Monuments Service ArcGIS layers
   ecology.py                NPWS designated areas (SAC/SPA/NHA/pNHA) — one national dataset
   epa.py                    environmental hazards (EPA): radon risk, closed landfills, licensed
-                             IPPC/IED facilities — all off EPA's own GeoServer via WFS, not
-                             ArcGIS/WMS like everything else (see verified-sources table)
+                             IPPC/IED facilities, historic/abandoned mine sites — all off EPA's
+                             own GeoServer via WFS, not ArcGIS/WMS like everything else (see
+                             verified-sources table)
+  geohazards.py             landslide susceptibility, bedrock/sand-gravel aquifer classification,
+                             karst features, and groundwater source protection areas — all off
+                             the same GSI ArcGIS server gsi.py already uses, just further-out
+                             service folders (Geohazards, more of Groundwater) on that same server
   local_authority.py        resolves a point to its city/county council (Tailte Éireann boundaries)
   rps.py                    RPS/ACA (statutory protected structures/conservation areas) —
                              per-local-authority, only 4 of 31 wired in so far; see rps.SOURCES
@@ -233,7 +238,11 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
 | RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
-| Environmental hazards (radon, closed landfills, licensed IPPC/IED facilities) | EPA's own GeoServer (`gis.epa.ie/geoserver`), queried via WFS `GetFeature` (not WMS `GetFeatureInfo` like `wms.py`) | `epa.py` |
+| Environmental hazards (radon, closed landfills, licensed IPPC/IED facilities, historic mine sites) | EPA's own GeoServer (`gis.epa.ie/geoserver`), queried via WFS `GetFeature` (not WMS `GetFeatureInfo` like `wms.py`) | `epa.py` |
+| Landslide susceptibility | GSI `IE_GSI_Landslide_Susceptibility_Classification_50K_IE26_ITM` (national coverage, point-in-polygon) | `geohazards.py` |
+| Aquifer classification (bedrock + sand/gravel) | GSI `IE_GSI_Aquifer_Datasets_IE26_ITM` (layer 2 = bedrock aquifer, national coverage; layer 0 = sand/gravel, only some areas) | `geohazards.py` |
+| Karst features (springs, caves, turloughs, swallow holes) | GSI `IE_GSI_Karst_Datasets_40K_IE32_ITM` (layer 0) — radius search; text list only, see note below on why there's no map overlay | `geohazards.py` |
+| Groundwater source protection (public water supply + group water scheme) | GSI `IE_GSI_Group_Water_Scheme_Public_Water_Supply_Source_Protection_Areas_20K_IE26_ITM` (layer 0 = SPAs, layer 1 = zones of contribution) | `geohazards.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
 polygon), not just a text readout — but the raw polygons are large enough
@@ -288,17 +297,42 @@ app, rather than the documented-but-dead endpoints:
    paths, confirming the base URL is `gis.epa.ie/geoserver`. Its
    `GetCapabilities` lists a huge national environmental dataset (air
    quality, bathing water, mines, WFD water body status, etc.) — `epa.py`
-   only uses three layers so far (radon, closed landfills, licensed IPPC
-   facilities), found by reading the layer names off that capabilities
-   list. Used its WFS `GetFeature` (not WMS `GetFeatureInfo`) since it
-   returns real vector features directly in WGS84 with `srsName=EPSG:4326`
-   — but the `bbox` filter param needs an explicit CRS suffix
-   (`bbox=minx,miny,maxx,maxy,EPSG:4326`) or GeoServer silently interprets
-   the numbers in the layer's native storage CRS (Irish Transverse
-   Mercator) instead, and the query just returns zero features — no error,
-   reads exactly like "nothing nearby." Confirmed by testing against a
-   real landfill's own centroid and still getting zero results until the
-   suffix was added.
+   uses four layers so far (radon, closed landfills, licensed IPPC
+   facilities, historic/abandoned mine sites — `MINES_SiteLocation` +
+   `MINES_SiteBoundaries`), found by reading the layer names off that
+   capabilities list. Used its WFS `GetFeature` (not WMS `GetFeatureInfo`)
+   since it returns real vector features directly in WGS84 with
+   `srsName=EPSG:4326` — but the `bbox` filter param needs an explicit CRS
+   suffix (`bbox=minx,miny,maxx,maxy,EPSG:4326`) or GeoServer silently
+   interprets the numbers in the layer's native storage CRS (Irish
+   Transverse Mercator) instead, and the query just returns zero features
+   — no error, reads exactly like "nothing nearby." Confirmed by testing
+   against a real landfill's own centroid and still getting zero results
+   until the suffix was added. WFD water body status (river/lake/coastal
+   ecological status) is a large, still-unused category on this same
+   capabilities list — a candidate for a future integration.
+8. `geohazards.py`'s four layers (landslide susceptibility, aquifer
+   classification, karst features, groundwater source protection areas)
+   needed none of the above reverse-engineering — gsi.geodata.gov.ie's own
+   ArcGIS REST catalogue lists every service folder directly at
+   `GET .../server/rest/services?f=json`, no WebAppViewer needed. That
+   listing surfaced two folders gsi.py wasn't already using (`Geohazards`,
+   plus more of `Groundwater` than just vulnerability) — each service's own
+   `?f=json` then lists its layers and field schemas directly. Landslide
+   susceptibility classes and aquifer categories were confirmed against the
+   layers' full value domains via an ArcGIS `returnDistinctValues=true`
+   query (not assumed from a legend). **Karst features have no map overlay
+   even though `geohazards.py` reports them** — confirmed the
+   `IE_GSI_Karst_Datasets_40K_IE32_ITM` layer never returns geometry via
+   its query endpoint (`returnGeometry=true`, a plain `where=1=1`, and
+   `f=geojson` all still came back with `geometry: null`), despite its own
+   schema advertising `esriGeometryPoint`. The raw `X_ITM`/`Y_ITM`
+   attribute fields do carry real coordinates, but they're Irish Transverse
+   Mercator (EPSG:2157) — this app has no geospatial/reprojection library,
+   and hand-rolling that transform without a verified reference would risk
+   silently wrong pins, so karst features are reported as a text list only
+   (type + name), not drawn as points. Don't "fix" this by adding lat/lon
+   fields back without also adding and testing a real ITM→WGS84 transform.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
