@@ -403,13 +403,23 @@ function enterResultsMode(){
 // by the time Leaflet measures it. No invalidateSize() dance needed.
 function ensureMap(){
   if(map) return;
-  map = L.map('map').setView([53.35, -8.0], 7); // placeholder view, never actually shown (see above)
+  // maxZoom:21 on the map itself — otherwise Leaflet caps the whole map at
+  // the lowest maxZoom of any active layer, which was 18 by default on the
+  // street layer (the exact zoom the plot picker already used, leaving no
+  // room to zoom in further). maxNativeZoom on each layer keeps real tile
+  // requests bounded to what each server actually serves; anything past
+  // that just scales the last real tile up (a bit soft, but zoomable)
+  // rather than requesting tiles that don't exist.
+  map = L.map('map', { maxZoom: 21 }).setView([53.35, -8.0], 7); // placeholder view, never actually shown (see above)
   const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors',
+    attribution: '© OpenStreetMap contributors', maxZoom: 21, maxNativeZoom: 19,
   }).addTo(map);
   const satelliteLayer = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { attribution: 'Tiles © Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community', maxZoom: 19 }
+    {
+      attribution: 'Tiles © Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+      maxZoom: 21, maxNativeZoom: 19,
+    }
   );
   baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
 
@@ -979,8 +989,9 @@ function confirmPlotSelection(){
 
   // Zoom back out from plot-picking detail to see the wider 2km-radius
   // context (SMR zones, ecology designations, etc.) that the other
-  // sections cover.
-  if(currentLoc) map.setView([currentLoc.lat, currentLoc.lon], 15);
+  // sections cover. flyTo (not setView) so this reads as one smooth,
+  // animated zoom-out rather than an instant jump.
+  if(currentLoc) map.flyTo([currentLoc.lat, currentLoc.lon], 15, { duration: 1 });
 }
 
 confirmPlotBtnEl.addEventListener('click', confirmPlotSelection);
@@ -998,7 +1009,11 @@ function startPlotConfirmation(data){
 
   ensureMap();
   clearOverlayLayers();
-  map.setView([loc.lat, loc.lon], 18);
+  // flyTo, not setView — smoothly animates in rather than jumping straight
+  // to the target, including on a repeat search from a different part of
+  // the map (the first-ever search plays out during the fade-in from the
+  // landing page, so it isn't visible then, but every search after is).
+  map.flyTo([loc.lat, loc.lon], 19, { duration: 1.2 });
   if(marker) map.removeLayer(marker);
   marker = L.marker([loc.lat, loc.lon]).addTo(map).bindPopup(loc.label).openPopup();
 
