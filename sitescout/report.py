@@ -11,25 +11,33 @@ from pathlib import Path
 log = logging.getLogger("sitescout.report")
 
 
+def location_dict(geo) -> dict:
+    """The "location" shape used everywhere a geocode result gets shown —
+    the full report, and the web UI's lightweight `/api/scout` response
+    (which returns before any section data exists, see webapp.py).
+    """
+    return {
+        "lat": geo.lat,
+        "lon": geo.lon,
+        "label": geo.label,
+        "source": geo.source,
+        "precise": geo.precise,
+        "location_type": geo.location_type,
+        "warning": (
+            None if geo.precise else
+            "APPROXIMATE — this is an area/postcode-level estimate, not the "
+            "exact building. See geocode.py docstring / CLAUDE.md."
+        ),
+    }
+
+
 def build_report(query: str, resolved, geo, sections: dict) -> dict:
     return {
         "query": query,
         "resolved_address": resolved.address_text,
         "eircode": resolved.eircode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "location": {
-            "lat": geo.lat,
-            "lon": geo.lon,
-            "label": geo.label,
-            "source": geo.source,
-            "precise": geo.precise,
-            "location_type": geo.location_type,
-            "warning": (
-                None if geo.precise else
-                "APPROXIMATE — this is an area/postcode-level estimate, not the "
-                "exact building. See geocode.py docstring / CLAUDE.md."
-            ),
-        },
+        "location": location_dict(geo),
         "sections": sections,
     }
 

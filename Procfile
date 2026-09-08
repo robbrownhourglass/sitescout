@@ -1,1 +1,1 @@
-web: gunicorn sitescout.webapp:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 90
+web: gunicorn sitescout.webapp:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 2 --threads 8 --timeout 90

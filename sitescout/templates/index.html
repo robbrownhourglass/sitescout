@@ -110,7 +110,21 @@
   .tile-dot.ok{ background:var(--ok); }
   .tile-dot.warn{ background:var(--warn); }
   .tile-dot.bad{ background:var(--bad); }
+  .tile-dot.pending{ background:var(--line); animation:tile-pulse 1.4s ease-in-out infinite; }
+  @keyframes tile-pulse{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
   .tile-strip-divider{ width:32px; height:1px; background:var(--line); margin:4px 0; flex:none; }
+
+  #plotPicker{
+    flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
+    margin:10px 20px 0; padding:10px 16px; background:#eaf0ec; border:1px solid var(--moss);
+    border-radius:8px; font-size:12.5px; color:var(--moss-dark);
+  }
+  #plotPicker .plot-picker-text strong{ color:var(--ink); }
+  #plotPicker button{
+    flex:none; padding:8px 16px; border:none; border-radius:8px; background:var(--moss); color:#fff;
+    font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;
+  }
+  #plotPicker button:hover{ background:var(--moss-dark); }
 
   #detailPanel{
     position:absolute; top:0; right:64px; bottom:0; width:400px; max-width:88vw;
@@ -131,6 +145,7 @@
   .card h3 .dot.ok{ background:var(--ok); }
   .card h3 .dot.warn{ background:var(--warn); }
   .card h3 .dot.bad{ background:var(--bad); }
+  .card h3 .dot.pending{ background:var(--line); animation:tile-pulse 1.4s ease-in-out infinite; }
   .card .body{ font-size:13.5px; color:var(--ink); }
   .card .body .muted{ color:var(--muted); }
   .card ul{ margin:4px 0 0; padding-left:18px; }
@@ -183,6 +198,11 @@
     <div id="topbarStatus"></div>
   </header>
 
+  <div id="plotPicker" style="display:none">
+    <div class="plot-picker-text">Select every plot that makes up this site — click a plot on the map to add or remove it. <strong>The highlighted plot</strong> is where your search landed.</div>
+    <button id="confirmPlotBtn" type="button">Confirm</button>
+  </div>
+
   <main id="mapWrap">
     <div id="map"></div>
     <nav id="tileStrip"></nav>
@@ -211,6 +231,8 @@ const mapWrapEl = document.getElementById('mapWrap');
 const tileStripEl = document.getElementById('tileStrip');
 const detailPanelEl = document.getElementById('detailPanel');
 const detailContentEl = document.getElementById('detailContent');
+const plotPickerEl = document.getElementById('plotPicker');
+const confirmPlotBtnEl = document.getElementById('confirmPlotBtn');
 
 let map, marker;
 let baseLayers = {};      // built once, on first map init — "Street" / "Satellite"
@@ -219,6 +241,25 @@ let layerControl = null;
 let tileButtons = {};     // category key -> tile <button>, for highlighting the active one
 let activeTileKey = null;
 let resultsModeEntered = false;
+
+// ---- Plot-confirmation + progressive-loading state. One property is
+// often several registered cadastral parcels (a house plus a separate
+// laneway/shed parcel, say) — the plot picker lets the user select/merge
+// whichever ones actually make up the site before "Property boundary" is
+// considered final. Every OTHER section is fetched in the background in
+// parallel, starting the moment the point resolves (see
+// fetchSectionsInBackground), so most of the real data is already in by
+// the time the user's done picking.
+let searchGeneration = 0;  // bumped per search; guards against a stale background fetch from a previous search overwriting the current one
+let currentLoc = null;
+let currentEircode = null;
+let allParcels = [];
+let selectedParcelIds = new Set();
+let pickerLayerGroup = null;
+let pickerPolygonsByParcelId = {};
+let plotConfirmed = false;
+let sectionData = {};      // section name -> its data, once fetched
+let sectionErrored = {};   // section name -> true, if its fetch failed
 
 const CATEGORY_COLORS = {
   boundary: '#a4472d',
@@ -332,13 +373,13 @@ function showPicker(title, options, onChoose){
   });
 }
 
-// ---- Landing -> results transition. Only called once we already have a
-// fully-resolved report and the map has been positioned/populated (see
-// finalizeSearch below) — so the map is never revealed at its default
-// Ireland-wide view, only already zoomed to the right place. The search
-// bar is a single DOM node (#searchBar) physically moved from the hero
-// into the topbar slot here — no duplicated input to keep in sync, and
-// its event listeners survive the reparenting untouched.
+// ---- Landing -> results transition. Only called once the point has
+// resolved and the map has been positioned/populated with the plot picker
+// (see startPlotConfirmation below) — so the map is never revealed at its
+// default Ireland-wide view, only already zoomed to the right place. The
+// search bar is a single DOM node (#searchBar) physically moved from the
+// hero into the topbar slot here — no duplicated input to keep in sync,
+// and its event listeners survive the reparenting untouched.
 function enterResultsMode(){
   if(resultsModeEntered) return;
   resultsModeEntered = true;
@@ -375,6 +416,11 @@ function ensureMap(){
   map.getPane('polygonsPane').style.zIndex = 410;
   map.createPane('pointsPane');
   map.getPane('pointsPane').style.zIndex = 620;
+  // The plot picker's own parcels sit above both — they need to stay
+  // clickable during the picker stage even after other layers (SMR Zone,
+  // ecology, etc.) have already loaded in the background.
+  map.createPane('pickerPane');
+  map.getPane('pickerPane').style.zIndex = 900;
 }
 
 window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
@@ -402,7 +448,7 @@ async function postJSON(url, body){
 // and recurses on the option the user clicks — the browser-side equivalent
 // of the CLI's input() prompt in autoaddress.py. We stay on the landing
 // page (spinner + status text, no map) through this whole loop — the map
-// only ever appears once fully resolved, see finalizeSearch().
+// only ever appears once the point has resolved, see startPlotConfirmation().
 function runScout(query){
   setLoading(true);
   setStatus('Resolving "' + query + '" via Autoaddress…');
@@ -427,7 +473,7 @@ function handleScoutResponse(query, data){
     });
     return;
   }
-  finalizeSearch(data.report);
+  startPlotConfirmation(data);
 }
 
 const VULN_WARN_CODES = new Set(['X', 'E']);
@@ -451,30 +497,46 @@ function geometryToRingSets(geometry){
   return [];
 }
 
+// Resets the map's overlays for a fresh search, and — unlike before —
+// immediately recreates an (empty) layer control rather than leaving it
+// null until the first section arrives, so the base-layer switcher
+// (Street/Satellite) is available right away during plot-picking, not
+// just once background data starts coming in.
 function clearOverlayLayers(){
-  if(layerControl){ map.removeControl(layerControl); layerControl = null; }
+  if(layerControl){ map.removeControl(layerControl); }
   Object.values(overlayLayers).forEach(g => map.removeLayer(g));
   overlayLayers = {};
+  layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
 }
 
 // Adds `group` to the map and the layer-control list under `label`, unless
 // it's empty (nothing found for that category) — no point offering a
-// toggle for a layer with nothing in it.
+// toggle for a layer with nothing in it. Sections now arrive one at a time
+// in the background rather than all at once, so this adds to the existing
+// control incrementally (L.Control.Layers.addOverlay) instead of the
+// control being built fresh at the end like before.
 function addOverlay(label, group){
   if(!group.getLayers().length) return;
   overlayLayers[label] = group;
   group.addTo(map);
+  layerControl.addOverlay(group, label);
 }
 
+// `b` comes from the confirmed plot selection (cadastral.summarise_selected_parcels()'s
+// shape, built client-side in confirmPlotSelection()) — a LIST of ring-sets,
+// one per selected parcel, not the single ring-set a bare point query would
+// give. Drawing one polygon per parcel is "join into one" for map purposes;
+// no true geometric union (would need a geometry library this app doesn't
+// otherwise depend on).
 function buildBoundaryLayer(b){
   const group = L.layerGroup();
-  if(b && b.found && b.polygon_rings_itm_wgs84){
-    ringsToLatLngs(b.polygon_rings_itm_wgs84).forEach(ring => {
-      L.polygon(ring, { color: CATEGORY_COLORS.boundary, weight: 2, fillOpacity: 0.08, pane: 'polygonsPane' })
-        .bindPopup(`<strong>${b.tenure} parcel</strong><br>${b.county} · ${b.area_hectares} ha`)
+  (b && b.found && b.polygon_ring_sets_wgs84 || []).forEach(ringSet => {
+    ringsToLatLngs(ringSet).forEach(ring => {
+      L.polygon(ring, { color: CATEGORY_COLORS.boundary, weight: 2, fillOpacity: 0.1, pane: 'polygonsPane' })
+        .bindPopup(`<strong>${b.tenure} parcel${b.parcel_count > 1 ? ' (merged)' : ''}</strong><br>${b.county} · ${b.area_hectares} ha`)
         .addTo(group);
     });
-  }
+  });
   return group;
 }
 
@@ -653,18 +715,26 @@ function statusFromCardNode(node){
   return dot ? dot.className.replace('dot', '').trim() : '';
 }
 
-function buildTileStrip(categories){
+const INFO_SPEC = { key: 'info', title: 'Sources & methodology', deps: [], build: () => buildInfoCard() };
+
+// Builds every tile button ONCE per search, all showing a pending (grey,
+// pulsing) dot — unlike the old one-shot buildTileStrip(), this doesn't
+// get rebuilt as data arrives; refreshTile() below just patches one tile's
+// dot (and, if it's open, the detail panel) at a time as each section's
+// background fetch resolves. That's what makes the sidebar progressively
+// tick over instead of popping in all at once.
+function buildTileStripSkeleton(){
   tileStripEl.innerHTML = '';
   tileButtons = {};
 
-  categories.forEach(cat => {
+  TILE_SPECS.forEach(spec => {
     const btn = document.createElement('button');
     btn.className = 'tile-btn';
     btn.type = 'button';
-    btn.title = cat.title;
-    btn.innerHTML = `${TILE_ICONS[cat.key] || ''}<span class="tile-dot ${statusFromCardNode(cat.node)}"></span>`;
-    btn.addEventListener('click', () => toggleDetail(cat));
-    tileButtons[cat.key] = btn;
+    btn.title = spec.title;
+    btn.innerHTML = `${TILE_ICONS[spec.key] || ''}<span class="tile-dot pending"></span>`;
+    btn.addEventListener('click', () => toggleDetail(spec));
+    tileButtons[spec.key] = btn;
     tileStripEl.appendChild(btn);
   });
 
@@ -672,35 +742,43 @@ function buildTileStrip(categories){
   divider.className = 'tile-strip-divider';
   tileStripEl.appendChild(divider);
 
-  const infoCat = { key: 'info', title: 'Sources & methodology', node: buildInfoCard() };
   const infoBtn = document.createElement('button');
   infoBtn.className = 'tile-btn';
   infoBtn.type = 'button';
-  infoBtn.title = infoCat.title;
-  infoBtn.innerHTML = TILE_ICONS.info;
-  infoBtn.addEventListener('click', () => toggleDetail(infoCat));
+  infoBtn.title = INFO_SPEC.title;
+  infoBtn.innerHTML = `${TILE_ICONS.info}<span class="tile-dot ok"></span>`;
+  infoBtn.addEventListener('click', () => toggleDetail(INFO_SPEC));
   tileButtons.info = infoBtn;
   tileStripEl.appendChild(infoBtn);
+}
 
-  // Keep the panel open across searches if the same category is still open
-  if(activeTileKey && activeTileKey !== 'info'){
-    const match = categories.find(c => c.key === activeTileKey);
-    if(match) openDetail(match); else closeDetail();
+// Patches one tile's dot to reflect its current state: still pending, or
+// (once every dependency has settled) the real ok/warn/bad read off the
+// card it would render — reusing the same *Card() functions the detail
+// panel itself uses, so the dot and the panel can never disagree.
+function refreshTile(spec){
+  const btn = tileButtons[spec.key];
+  if(!btn) return;
+  const dot = btn.querySelector('.tile-dot');
+  if(!isSpecReady(spec)){
+    dot.className = 'tile-dot pending';
+    return;
   }
+  dot.className = 'tile-dot ' + (statusFromCardNode(spec.build()) || 'ok');
 }
 
-function toggleDetail(cat){
-  if(activeTileKey === cat.key){ closeDetail(); return; }
-  openDetail(cat);
+function toggleDetail(spec){
+  if(activeTileKey === spec.key){ closeDetail(); return; }
+  openDetail(spec);
 }
 
-function openDetail(cat){
-  activeTileKey = cat.key;
+function openDetail(spec){
+  activeTileKey = spec.key;
   detailContentEl.innerHTML = '';
-  detailContentEl.appendChild(cat.node);
+  detailContentEl.appendChild(isSpecReady(spec) ? spec.build() : buildLoadingCard(spec.title));
   detailPanelEl.classList.add('open');
   Object.values(tileButtons).forEach(b => b.classList.remove('active'));
-  if(tileButtons[cat.key]) tileButtons[cat.key].classList.add('active');
+  if(tileButtons[spec.key]) tileButtons[spec.key].classList.add('active');
 }
 
 function closeDetail(){
@@ -711,51 +789,228 @@ function closeDetail(){
 
 document.getElementById('detailClose').addEventListener('click', closeDetail);
 
-// Fully prepares the map (position, marker, layers, tiles) BEFORE calling
-// enterResultsMode() to reveal it — so the map is only ever shown already
-// zoomed to the right place, never a default Ireland-wide view that then
-// visibly jumps. This is the one function that runs once we have a
-// complete report (as opposed to a "choose" disambiguation step).
-function finalizeSearch(report){
-  const loc = report.location;
+// ---- Tile specs: one entry per sidebar tile. `deps` lists which
+// background section(s) (see SECTION_OVERLAY_BUILDERS / fetchSectionsInBackground)
+// a tile needs before it can render its real content — most need one,
+// a few (water, archaeology, planning) combine two sections that arrive
+// independently. `boundary` is special: it has no backend section at all
+// in this flow — its content comes from whatever the user confirms in the
+// plot picker, so it's "ready" once plotConfirmed is true rather than once
+// some set of fetches has landed. See isSpecReady().
+const TILE_SPECS = [
+  { key: 'boundary', title: 'Property boundary', deps: [], build: () => boundaryCard(sectionData.boundary) },
+  { key: 'geology', title: 'Geology & subsoil', deps: ['geology'], build: () => geologyCard(sectionData.geology) },
+  { key: 'water', title: 'Water table & flood risk', deps: ['groundwater', 'flood_risk'], build: () => waterCard(sectionData.groundwater, sectionData.flood_risk) },
+  { key: 'archaeology', title: 'Archaeology & heritage', deps: ['archaeology', 'smr_zone'], build: () => archaeologyCard(sectionData.archaeology, sectionData.smr_zone) },
+  { key: 'niah', title: 'Protected structures (NIAH)', deps: ['niah'], build: () => niahCard(sectionData.niah) },
+  { key: 'ecology', title: 'Ecology & nature conservation', deps: ['ecology'], build: () => ecologyCard(sectionData.ecology) },
+  { key: 'rpsAca', title: 'RPS & ACA', deps: ['rps_aca'], build: () => rpsAcaCard(sectionData.rps_aca) },
+  { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
+  { key: 'utilities', title: 'Utilities', deps: ['utilities'], build: () => utilitiesCard(sectionData.utilities) },
+];
+
+// A dependency counts as "settled" once it's either arrived or failed —
+// readiness means "stop showing a spinner", not "succeeded" (a failed
+// section still renders its own Error card via the same *Card() functions
+// used everywhere else, they already handle a null/undefined input).
+function isSpecReady(spec){
+  if(spec.key === 'boundary') return plotConfirmed;
+  return spec.deps.every(d => (d in sectionData) || sectionErrored[d]);
+}
+
+function buildLoadingCard(title){
+  return card(title, 'pending', 'Loading', 'live', '<div class="muted">Still loading…</div>', '');
+}
+
+// Which map overlay(s) a given background section feeds, if any —
+// groundwater/planning/utilities have no spatial layer of their own.
+const SECTION_OVERLAY_BUILDERS = {
+  archaeology: [['Archaeology (SMR)', buildArchaeologyLayer]],
+  smr_zone: [['SMR Zone', buildSmrZoneLayer]],
+  niah: [['Protected structures (NIAH)', buildNiahLayer]],
+  planning_applications: [
+    ['Planning applications', buildPlanningLayer],
+    ['Planning application boundaries', buildPlanningBoundariesLayer],
+  ],
+  flood_risk: [['Flood extent (OPW)', buildFloodLayer]],
+  ecology: [['Ecology (NPWS)', buildEcologyLayer]],
+  rps_aca: [
+    ['Protected structures (RPS)', buildRpsLayer],
+    ['Conservation areas (ACA)', buildAcaLayer],
+  ],
+};
+
+function addSectionOverlays(name, data){
+  (SECTION_OVERLAY_BUILDERS[name] || []).forEach(([label, builder]) => addOverlay(label, builder(data)));
+}
+
+// Fires one request per section name, all in parallel (the browser and
+// gunicorn's threaded/gthread workers both handle the concurrency) — this
+// is what actually hides the pipeline's latency behind however long the
+// user spends on the plot picker, rather than making them wait for one
+// big response. `generation` guards against a stale fetch from a
+// previous search landing after a new one has already started.
+function fetchSectionsInBackground(names, lat, lon, eircode, label, generation){
+  names.forEach(name => {
+    const params = new URLSearchParams({ lat: String(lat), lon: String(lon) });
+    if(eircode) params.set('eircode', eircode);
+    if(label) params.set('label', label);
+    fetch(`/api/scout/section/${encodeURIComponent(name)}?${params}`)
+      .then(res => res.json().catch(() => ({})).then(body => ({ ok: res.ok, body })))
+      .then(({ ok, body }) => {
+        if(generation !== searchGeneration) return;
+        if(ok && body.status === 'ok'){
+          sectionData[name] = body.data;
+        } else {
+          sectionErrored[name] = true;
+          console.error('[section failed]', name, body && body.message);
+        }
+        onSectionArrived(name);
+      })
+      .catch(err => {
+        if(generation !== searchGeneration) return;
+        sectionErrored[name] = true;
+        console.error('[section fetch error]', name, err);
+        onSectionArrived(name);
+      });
+  });
+}
+
+function onSectionArrived(name){
+  addSectionOverlays(name, sectionData[name]);
+  TILE_SPECS.forEach(spec => {
+    if(spec.key !== 'boundary' && spec.deps.includes(name)){
+      refreshTile(spec);
+      if(activeTileKey === spec.key) openDetail(spec); // live-refresh an already-open panel
+    }
+  });
+}
+
+// ---- Plot picker: draws every nearby cadastral parcel as a clickable
+// polygon. The one the search point actually landed in starts selected
+// (highlighted); clicking any parcel toggles it in/out of the selection.
+// "Join into one" is, for reporting purposes, drawing every selected
+// parcel's own outline and summing their areas — see summariseSelectedParcels().
+
+const PICKER_SELECTED_STYLE = { color: '#2f5d4f', weight: 2.5, fillOpacity: 0.35, pane: 'pickerPane' };
+const PICKER_UNSELECTED_STYLE = { color: '#6b7570', weight: 1, fillOpacity: 0.06, pane: 'pickerPane' };
+
+function stylesForParcel(id){
+  return selectedParcelIds.has(id) ? PICKER_SELECTED_STYLE : PICKER_UNSELECTED_STYLE;
+}
+
+function buildParcelPickerLayer(parcels){
+  pickerPolygonsByParcelId = {};
+  const group = L.layerGroup();
+  parcels.forEach(p => {
+    if(!p.polygon_rings_wgs84) return;
+    const polys = ringsToLatLngs(p.polygon_rings_wgs84).map(ring => {
+      const poly = L.polygon(ring, stylesForParcel(p.parcel_id));
+      poly.on('click', (e) => {
+        L.DomEvent.stopPropagation(e);
+        toggleParcelSelection(p.parcel_id);
+      });
+      poly.addTo(group);
+      return poly;
+    });
+    pickerPolygonsByParcelId[p.parcel_id] = polys;
+  });
+  return group;
+}
+
+function toggleParcelSelection(id){
+  if(selectedParcelIds.has(id)) selectedParcelIds.delete(id); else selectedParcelIds.add(id);
+  (pickerPolygonsByParcelId[id] || []).forEach(poly => poly.setStyle(stylesForParcel(id)));
+  updateConfirmButtonLabel();
+}
+
+function updateConfirmButtonLabel(){
+  const n = selectedParcelIds.size;
+  confirmPlotBtnEl.textContent = n === 0 ? 'Confirm (no plot found)' : `Confirm ${n} plot${n > 1 ? 's' : ''}`;
+}
+
+// Client-side equivalent of cadastral.summarise_selected_parcels() — no
+// network round-trip needed, since the picker already has every selected
+// parcel's full geometry/area from the /api/scout response.
+function summariseSelectedParcels(parcels){
+  if(!parcels.length){
+    return {
+      found: false,
+      source: 'Tailte Éireann Cadastral Parcels (Freehold/Leasehold)',
+      note: 'No parcel selected. Title may be unregistered, or the point falls outside a mapped parcel.',
+    };
+  }
+  const areaHa = parcels.reduce((sum, p) => sum + (p.area_hectares || 0), 0);
+  const areaAcres = parcels.reduce((sum, p) => sum + (p.area_acres || 0), 0);
+  const tenures = [...new Set(parcels.map(p => p.tenure))].sort();
+  return {
+    found: true,
+    tenure: tenures.join(' + '),
+    county: parcels[0].county,
+    area_hectares: Math.round(areaHa * 1000) / 1000,
+    area_acres: Math.round(areaAcres * 1000) / 1000,
+    parcel_count: parcels.length,
+    polygon_ring_sets_wgs84: parcels.map(p => p.polygon_rings_wgs84).filter(Boolean),
+    source: 'Tailte Éireann Cadastral Parcels (' + tenures.join(' + ') + ')',
+  };
+}
+
+function confirmPlotSelection(){
+  const selected = allParcels.filter(p => selectedParcelIds.has(p.parcel_id));
+  sectionData.boundary = summariseSelectedParcels(selected);
+  plotConfirmed = true;
+
+  if(pickerLayerGroup){ map.removeLayer(pickerLayerGroup); pickerLayerGroup = null; }
+  plotPickerEl.style.display = 'none';
+
+  addOverlay('Property boundary', buildBoundaryLayer(sectionData.boundary));
+  refreshTile(TILE_SPECS.find(s => s.key === 'boundary'));
+  if(activeTileKey === 'boundary') openDetail(TILE_SPECS.find(s => s.key === 'boundary'));
+
+  // Zoom back out from plot-picking detail to see the wider 2km-radius
+  // context (SMR zones, ecology designations, etc.) that the other
+  // sections cover.
+  if(currentLoc) map.setView([currentLoc.lat, currentLoc.lon], 15);
+}
+
+confirmPlotBtnEl.addEventListener('click', confirmPlotSelection);
+
+// Resolves the point (autoaddress + geocode already done server-side, see
+// /api/scout), shows the plot picker immediately, and starts every other
+// section loading in the background at the same time — the picker step is
+// what hides that latency, rather than the user staring at a blank
+// spinner while ~10 sequential-turned-parallel lookups run.
+function startPlotConfirmation(data){
+  const myGeneration = ++searchGeneration;
+  const loc = data.location;
+  currentLoc = loc;
+  currentEircode = data.eircode;
 
   ensureMap();
-  map.setView([loc.lat, loc.lon], 15);
-  if(marker) map.removeLayer(marker);
-  marker = L.marker([loc.lat, loc.lon]).addTo(map)
-    .bindPopup(loc.label)
-    .openPopup();
-
-  const s = report.sections;
-
   clearOverlayLayers();
-  addOverlay('Property boundary', buildBoundaryLayer(s.boundary));
-  addOverlay('Archaeology (SMR)', buildArchaeologyLayer(s.archaeology));
-  addOverlay('SMR Zone', buildSmrZoneLayer(s.smr_zone));
-  addOverlay('Protected structures (NIAH)', buildNiahLayer(s.niah));
-  addOverlay('Planning applications', buildPlanningLayer(s.planning_applications));
-  addOverlay('Planning application boundaries', buildPlanningBoundariesLayer(s.planning_applications));
-  addOverlay('Flood extent (OPW)', buildFloodLayer(s.flood_risk));
-  addOverlay('Ecology (NPWS)', buildEcologyLayer(s.ecology));
-  addOverlay('Protected structures (RPS)', buildRpsLayer(s.rps_aca));
-  addOverlay('Conservation areas (ACA)', buildAcaLayer(s.rps_aca));
-  layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
+  map.setView([loc.lat, loc.lon], 18);
+  if(marker) map.removeLayer(marker);
+  marker = L.marker([loc.lat, loc.lon]).addTo(map).bindPopup(loc.label).openPopup();
 
-  buildTileStrip([
-    { key: 'boundary', title: 'Property boundary', node: boundaryCard(s.boundary) },
-    { key: 'geology', title: 'Geology & subsoil', node: geologyCard(s.geology) },
-    { key: 'water', title: 'Water table & flood risk', node: waterCard(s.groundwater, s.flood_risk) },
-    { key: 'archaeology', title: 'Archaeology & heritage', node: archaeologyCard(s.archaeology, s.smr_zone) },
-    { key: 'niah', title: 'Protected structures (NIAH)', node: niahCard(s.niah) },
-    { key: 'ecology', title: 'Ecology & nature conservation', node: ecologyCard(s.ecology) },
-    { key: 'rpsAca', title: 'RPS & ACA', node: rpsAcaCard(s.rps_aca) },
-    { key: 'planning', title: 'Planning context', node: planningCard(s.planning, s.planning_applications) },
-    { key: 'utilities', title: 'Utilities', node: utilitiesCard(s.utilities) },
-  ]);
+  sectionData = {};
+  sectionErrored = {};
+  activeTileKey = null;
+  plotConfirmed = false;
+  allParcels = data.parcels || [];
+  selectedParcelIds = new Set(allParcels.filter(p => p.contains_point).map(p => p.parcel_id));
+
+  pickerLayerGroup = buildParcelPickerLayer(allParcels);
+  pickerLayerGroup.addTo(map);
+  plotPickerEl.style.display = 'flex';
+  updateConfirmButtonLabel();
+
+  buildTileStripSkeleton();
 
   setLoading(false);
-  setStatus('Found: ' + loc.label + (report.eircode ? ' (' + report.eircode + ')' : '') + ' — via ' + loc.source);
+  setStatus('Found: ' + loc.label + (data.eircode ? ' (' + data.eircode + ')' : '') + ' — via ' + loc.source);
   enterResultsMode();
+
+  fetchSectionsInBackground(data.section_names, loc.lat, loc.lon, data.eircode, loc.label, myGeneration);
 }
 
 function card(title, dotClass, badgeText, badgeCls, bodyHtml, srcHtml){
@@ -777,8 +1032,9 @@ function boundaryCard(b){
       `<div class="muted">No registered freehold or leasehold parcel found at this exact point. ${b.note || ''}</div>`,
       'Check directly: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a> (folio &amp; filed plan search)');
   }
+  const countNote = b.parcel_count > 1 ? ` <span class="muted">(${b.parcel_count} plots merged)</span>` : '';
   const html = `
-    <div><strong>${b.tenure} parcel found</strong> (${b.county})</div>
+    <div><strong>${b.tenure} parcel confirmed</strong>${countNote} (${b.county})</div>
     <div style="margin-top:6px">Approx. area: ${b.area_hectares} ha (${b.area_acres} acres)</div>`;
   return card('Property boundary (cadastral)', 'ok', 'Live', 'live', html,
     'Source: <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels (' + b.tenure + ')');

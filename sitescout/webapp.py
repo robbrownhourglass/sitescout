@@ -22,6 +22,17 @@ request can't do that, so this app uses the lower-level `autoaddress.search()`
 match, returns the options to the browser (`{"status": "choose", ...}`) for
 the user to pick from — then continues via `/api/scout/choose`. This is the
 server-side equivalent of the old demo's `<div id="picker">` UI.
+
+Note on the two-stage flow: unlike the CLI (which returns one full report
+in a single pipeline.run() call), `/api/scout` here returns quickly with
+just the location and nearby cadastral parcels — the frontend shows a
+plot-confirmation step with that (the user picks/merges whichever
+parcel(s) actually make up the site, since one property is often several
+registered parcels), and fires off `/api/scout/section/<name>` once per
+section in parallel in the background at the same time, so most of the
+real data is already in by the time the user's done picking. Property
+boundary itself isn't one of those sections — it's computed client-side
+from whatever the user confirms (cadastral.summarise_selected_parcels()).
 """
 from __future__ import annotations
 
@@ -29,7 +40,7 @@ import logging
 
 from flask import Flask, jsonify, render_template, request
 
-from . import autoaddress, config, geocode, pipeline
+from . import autoaddress, cadastral, config, geocode, pipeline, report
 
 log = config.setup_logging(verbose=False)
 
@@ -100,8 +111,46 @@ def _run_from_resolved(query: str, resolved: autoaddress.ResolvedAddress):
     except Exception as exc:
         return _error(f"Geocoding failed: {exc}", 502)
 
-    site_report = pipeline.run(query, resolved, geo)
-    return jsonify({"status": "ok", "report": site_report})
+    try:
+        parcels = cadastral.get_nearby_parcels(geo.lat, geo.lon)
+    except Exception as exc:
+        log.error("Nearby parcels lookup failed: %s", exc)
+        parcels = []
+
+    return jsonify({
+        "status": "ok",
+        "query": query,
+        "resolved_address": resolved.address_text,
+        "eircode": resolved.eircode,
+        "location": report.location_dict(geo),
+        "parcels": parcels,
+        "section_names": list(pipeline.SECTION_NAMES),
+    })
+
+
+@app.get("/api/scout/section/<name>")
+def api_scout_section(name: str):
+    """Fetches one section for a point already resolved by /api/scout —
+    called once per name in pipeline.SECTION_NAMES, in parallel, while the
+    user is on the plot-confirmation step (see module docstring).
+    """
+    try:
+        lat = float(request.args["lat"])
+        lon = float(request.args["lon"])
+    except (KeyError, ValueError, TypeError):
+        return _error("lat and lon query params are required", 400)
+    eircode = request.args.get("eircode") or None
+    label = request.args.get("label") or None
+
+    try:
+        data = pipeline.run_section(name, lat, lon, eircode, label)
+    except ValueError as exc:
+        return _error(str(exc), 404)
+    except Exception as exc:
+        log.error("Section '%s' lookup failed: %s", name, exc)
+        return _error(f"{name} lookup failed: {exc}", 502)
+
+    return jsonify({"status": "ok", "section": name, "data": data})
 
 
 def _slim_options(options: list[dict]) -> list[dict]:
@@ -127,4 +176,8 @@ if __name__ == "__main__":
         log.error("AUTOADDRESS_KEY is not set — copy .env.example to .env and fill it in")
     if not config.GOOGLE_MAPS_API_KEY:
         log.warning("GOOGLE_MAPS_API_KEY is not set — geocoding will fall back to Nominatim only")
-    app.run(debug=True, port=5000)
+    # threaded=True matters here, not just for speed: the frontend fires
+    # one request per section in parallel (see module docstring) — without
+    # it Flask's dev server handles them one at a time, defeating the
+    # whole point.
+    app.run(debug=True, port=5000, threaded=True)
