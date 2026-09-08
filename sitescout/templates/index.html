@@ -747,12 +747,27 @@ function buildLandfillsLayer(e){
   return group;
 }
 
-// Radon has no map layer here deliberately — its risk zones are large,
-// often county-scale areas, so drawing the full polygon at site-scouting
-// zoom levels would just be an undifferentiated colour wash across the
-// whole visible map, not a bounded shape meaningful to this specific
-// site (unlike SMR Zones / NPWS designations / ACAs, which are all
-// human-scale). It's still fully reported in the card/CLI text.
+// Radon zones can be enormous (one tested at ~48km x 36km) — epa.py
+// already simplifies the boundary heavily (drops interior holes, decimates
+// points) before this ever reaches the browser, specifically so it's
+// cheap enough to draw. Dashed and very low fill opacity since, unlike
+// SMR Zones/ACAs/ecology designations, this boundary will usually extend
+// well past the visible map — it's context ("which way does the
+// classification change"), not a bounded shape describing this site alone.
+function buildRadonLayer(e){
+  const group = L.layerGroup();
+  const radon = e && e.radon;
+  if(!radon || !radon.found) return group;
+  (radon.polygon_ring_sets_wgs84 || []).forEach(ringSet => {
+    ringsToLatLngs(ringSet).forEach(ring => {
+      L.polygon(ring, { color: CATEGORY_COLORS.epa, weight: 1.5, fillOpacity: 0.06, dashArray: '2 4', pane: 'polygonsPane' })
+        .bindPopup(`<strong>Radon risk</strong><br>${radon.risk_description}` + (radon.more_info_url ? `<br><a href="${radon.more_info_url}" target="_blank">Test your home</a>` : ''))
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
 function buildIppcLayer(e){
   const group = L.layerGroup();
   (e && e.ippc && e.ippc.facilities || []).forEach(fac => {
@@ -902,6 +917,7 @@ const SECTION_OVERLAY_BUILDERS = {
     ['Conservation areas (ACA)', buildAcaLayer],
   ],
   epa: [
+    ['Radon risk zone (EPA)', buildRadonLayer],
     ['Closed landfills (EPA)', buildLandfillsLayer],
     ['Licensed facilities (EPA)', buildIppcLayer],
   ],
@@ -1306,7 +1322,7 @@ function planningCard(p, apps){
     html += `<div>No planning applications found within ${radiusM}m.</div>`;
   }
   return card('Planning context', (apps && apps.application_count) ? 'warn' : 'ok', apps ? 'Live + links' : 'Links', 'live', html,
-    `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.epa_radon_risk_map}" target="_blank">EPA radon map</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
+    `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
 }
 
 function buildInfoCard(){

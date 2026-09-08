@@ -86,13 +86,16 @@ BAND_RANK = {"High": 3, "Medium": 2, "Low": 1}
 
 
 def get_planning_links(lat: float, lon: float) -> dict:
-    log.info("Zoning and radon are link-outs, not live queries — see module docstring")
+    # Radon used to be a link-out here too — it's live now, see epa.py's
+    # get_radon_risk() / the "Environmental hazards (EPA)" section. Left
+    # here as a stray duplicate link once, which was confusing (looked
+    # like radon was still link-out-only when real data existed elsewhere)
+    # — don't re-add it.
+    log.info("Zoning is a link-out, not a live query — see module docstring")
     return {
         "myplan_zoning": "https://www.myplan.ie",
-        "epa_radon_risk_map": "https://www.epa.ie/environment-and-you/radon/radon-map/",
         "opw_flood_maps": "https://www.floodinfo.ie",
-        "note": "Zoning designations and radon risk still need a manual map-viewer check. "
-                "Radon barriers may be a building-regulation requirement depending on risk category.",
+        "note": "Zoning designation still needs a manual map-viewer check.",
     }
 
 

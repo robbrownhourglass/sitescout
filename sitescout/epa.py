@@ -74,19 +74,51 @@ def _wfs_query(type_name: str, lat: float, lon: float, half_m: float, max_featur
     return data
 
 
-def _polygon_ring_sets(geometry: Optional[dict]) -> list:
+def _simplify_ring(ring: list, max_points: int = 400) -> list:
+    """Crude decimation (keep every Nth point), not a real simplification
+    algorithm (Douglas-Peucker etc.) — good enough for "roughly where does
+    this zone end" on a map, not survey-grade precision. Needed because
+    radon risk polygons can be enormous: one tested at ~48km x 36km with
+    5,597 boundary points — sending that whole thing to the browser would
+    be a multi-hundred-KB payload for a shape that, at site-scouting zoom
+    levels, is mostly off-screen anyway.
+    """
+    if len(ring) <= max_points:
+        return ring
+    step = max(1, len(ring) // max_points)
+    simplified = ring[::step]
+    if simplified[-1] != ring[-1]:
+        simplified.append(ring[-1])  # keep the ring closed
+    return simplified
+
+
+def _polygon_ring_sets(geometry: Optional[dict], simplify: bool = False) -> list:
     """A GeoJSON Polygon/MultiPolygon's `coordinates` is already a list of
     ring-sets for MultiPolygon (one per part); wrap a plain Polygon's
     single ring-set in a list too, so callers always get the same shape —
     matching cadastral.py's `polygon_ring_sets_wgs84` convention.
+
+    `simplify=True` (used for radon, whose zones can be enormous — one
+    tested at ~48km x 36km) also drops all but the largest ring per part,
+    on top of _simplify_ring()'s point decimation. Interior rings are
+    usually small holes/exclusions; for a rough "roughly where does this
+    zone end" map layer they're not worth the extra weight, and a single
+    complex part can otherwise carry a dozen+ of them.
     """
     if not geometry:
         return []
     if geometry.get("type") == "MultiPolygon":
-        return geometry.get("coordinates", [])
-    if geometry.get("type") == "Polygon":
-        return [geometry.get("coordinates", [])]
-    return []
+        ring_sets = geometry.get("coordinates", [])
+    elif geometry.get("type") == "Polygon":
+        ring_sets = [geometry.get("coordinates", [])]
+    else:
+        return []
+    if simplify:
+        ring_sets = [
+            [_simplify_ring(max(ring_set, key=len))]
+            for ring_set in ring_sets
+        ]
+    return ring_sets
 
 
 def _first_point(geometry: Optional[dict]) -> tuple:
@@ -117,6 +149,7 @@ def get_radon_risk(lat: float, lon: float) -> dict:
     return {
         "found": True,
         "risk_description": props.get("Risk"),
+        "polygon_ring_sets_wgs84": _polygon_ring_sets(feats[0].get("geometry"), simplify=True),
         "more_info_url": props.get("URL"),
         "source": "EPA Radon Risk Map",
     }
