@@ -153,6 +153,25 @@ def print_report(report: dict) -> None:
                 print("  ACA: no live source for this local authority yet")
             print(f"  {r['note']}")
 
+    if "epa" in s:
+        e = s["epa"]
+        print("\n-- Environmental hazards (EPA) --")
+        radon = e["radon"]
+        if radon.get("found"):
+            print(f"  Radon: {radon['risk_description']}")
+        else:
+            print("  Radon: no classification returned at this point")
+        lf = e["landfills"]
+        lf_count_label = f"{lf['landfill_count']}{'+' if lf.get('more_exist') else ''}"
+        print(f"  Closed landfills: {lf_count_label} within 1km")
+        for site in lf["landfills"][:6]:
+            print(f"    - {site['name']} ({site['operated']})")
+        ippc = e["ippc"]
+        ippc_count_label = f"{ippc['facility_count']}{'+' if ippc.get('more_exist') else ''}"
+        print(f"  Licensed IPPC/IED facilities: {ippc_count_label} within 1km")
+        for fac in ippc["facilities"][:6]:
+            print(f"    - {fac['name']} ({fac['licence_status']})")
+
     if "utilities" in s:
         u = s["utilities"]
         print("\n-- Utilities (request-based, no open API) --")
@@ -305,6 +324,23 @@ def _to_markdown(report: dict) -> str:
             else:
                 lines.append("- ACA: no live source for this local authority yet")
             lines.append(f"> {r['note']}")
+        lines.append("")
+
+    if "epa" in s:
+        e = s["epa"]
+        lines.append("## Environmental hazards (EPA)")
+        radon = e["radon"]
+        lines.append(f"- Radon: {radon['risk_description'] if radon.get('found') else 'no classification returned at this point'}")
+        lf = e["landfills"]
+        lf_count_label = f"{lf['landfill_count']}{'+' if lf.get('more_exist') else ''}"
+        lines.append(f"- Closed landfills: {lf_count_label} within 1km")
+        for site in lf["landfills"][:6]:
+            lines.append(f"  - {site['name']} ({site['operated']})")
+        ippc = e["ippc"]
+        ippc_count_label = f"{ippc['facility_count']}{'+' if ippc.get('more_exist') else ''}"
+        lines.append(f"- Licensed IPPC/IED facilities: {ippc_count_label} within 1km")
+        for fac in ippc["facilities"][:6]:
+            lines.append(f"  - {fac['name']} ({fac['licence_status']})")
         lines.append("")
 
     if "utilities" in s:

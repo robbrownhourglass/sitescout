@@ -28,7 +28,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from . import cadastral, ecology, gsi, heritage, rps, utilities, planning, report
+from . import cadastral, ecology, epa, gsi, heritage, rps, utilities, planning, report
 
 log = logging.getLogger("sitescout.pipeline")
 
@@ -73,6 +73,7 @@ SECTION_SPECS = {
     "flood_risk": lambda lat, lon, eircode, label: planning.get_flood_risk(lat, lon),
     "ecology": lambda lat, lon, eircode, label: ecology.get_protected_sites(lat, lon),
     "rps_aca": lambda lat, lon, eircode, label: rps.get_protected_structures(lat, lon),
+    "epa": lambda lat, lon, eircode, label: epa.get_environmental_hazards(lat, lon),
     "utilities": lambda lat, lon, eircode, label: utilities.draft_requests(lat, lon, label or ""),
     "planning": lambda lat, lon, eircode, label: planning.get_planning_links(lat, lon),
 }
