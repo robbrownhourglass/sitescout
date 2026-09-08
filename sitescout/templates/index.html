@@ -284,6 +284,7 @@ const CATEGORY_COLORS = {
   ecology: '#3f8f29',
   rpsAca: '#1f6f78',
   epa: '#c1440e',
+  geohazards: '#8a6d3b',
 };
 
 // Small self-contained line-icon set for the tile strip — one glyph per
@@ -353,6 +354,13 @@ const TILE_ICONS = {
       <circle cx="12" cy="12" r="8.5"/>
       <line x1="12" y1="11" x2="12" y2="16"/>
       <circle cx="12" cy="8" r=".6" fill="currentColor" stroke="none"/>
+    </svg>`,
+  // a sloped hillside with a crack running through it (landslide) — also
+  // stands in for the aquifer/karst/source-protection findings bundled
+  // into the same section
+  geohazards: `<svg ${ICON_ATTRS}>
+      <path d="M3 18 9 8l3.5 5L15 9l6 9Z"/>
+      <path d="M9 8l1.6 3.6-2 2.4 2.2 1.6-1.8 2.4"/>
     </svg>`,
 };
 
@@ -783,6 +791,61 @@ function buildIppcLayer(e){
   return group;
 }
 
+// Historic mine site boundaries — same list-of-ring-sets convention as
+// landfills (epa.py's polygon_ring_sets_wgs84), since a single named site
+// (e.g. Silvermines, Co. Tipperary) is often several separate mapped
+// workings/boundaries.
+function buildMinesLayer(e){
+  const group = L.layerGroup();
+  (e && e.mines && e.mines.boundaries || []).forEach(b => {
+    (b.polygon_ring_sets_wgs84 || []).forEach(ringSet => {
+      ringsToLatLngs(ringSet).forEach(ring => {
+        L.polygon(ring, { color: CATEGORY_COLORS.epa, weight: 1.5, fillOpacity: 0.18, dashArray: '3 3', pane: 'polygonsPane' })
+          .bindPopup(`<strong>${b.name || 'Historic mine working'}</strong><br>${b.feature_type || ''} ${b.status ? '· ' + b.status : ''}` + (b.area_hectares ? `<br>${b.area_hectares} ha` : ''))
+          .addTo(group);
+      });
+    });
+  });
+  (e && e.mines && e.mines.sites || []).forEach(site => {
+    if(site.lat == null || site.lon == null) return;
+    L.circleMarker([site.lat, site.lon], { radius: 6, color: CATEGORY_COLORS.epa, weight: 2, fillOpacity: 0.7, pane: 'pointsPane' })
+      .bindPopup(`<strong>${site.name}</strong>${site.commodity ? '<br>' + site.commodity : ''}` + (site.more_info_url ? `<br><a href="${site.more_info_url}" target="_blank">More info</a>` : ''))
+      .addTo(group);
+  });
+  return group;
+}
+
+// Karst features (springs, caves, turloughs, swallow holes etc.) have no
+// map overlay — GSI's own layer never returns geometry via its query
+// endpoint (confirmed several ways, see geohazards.py's
+// get_karst_features() docstring), so they're listed in the card as text
+// only, not drawn as points.
+
+// Public water supply source protection areas — same "shade every nearby
+// area, bold the one containing the site" pattern as buildSmrZoneLayer /
+// buildEcologyLayer.
+function buildSourceProtectionLayer(g){
+  const group = L.layerGroup();
+  (g && g.source_protection && g.source_protection.nearby_areas || []).forEach(area => {
+    if(!area.polygon_rings_wgs84) return;
+    ringsToLatLngs(area.polygon_rings_wgs84).forEach(ring => {
+      L.polygon(ring, {
+        color: CATEGORY_COLORS.geohazards,
+        weight: area.contains_site ? 2.5 : 1.2,
+        fillOpacity: area.contains_site ? 0.28 : 0.14,
+        pane: 'polygonsPane',
+      })
+        .bindPopup(
+          `<strong>${area.name || 'Source protection area'}</strong>` +
+          (area.contains_site ? '<br>Contains this site' : '') +
+          (area.report_url ? `<br><a href="${area.report_url}" target="_blank">GSI report (PDF)</a>` : '')
+        )
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
 // panel with that category's full detail — the "card" content is the same
@@ -886,6 +949,7 @@ const TILE_SPECS = [
   { key: 'ecology', title: 'Ecology & nature conservation', deps: ['ecology'], build: () => ecologyCard(sectionData.ecology) },
   { key: 'rpsAca', title: 'RPS & ACA', deps: ['rps_aca'], build: () => rpsAcaCard(sectionData.rps_aca) },
   { key: 'epa', title: 'Environmental hazards (EPA)', deps: ['epa'], build: () => epaCard(sectionData.epa) },
+  { key: 'geohazards', title: 'Geohazards & aquifer', deps: ['geohazards'], build: () => geohazardsCard(sectionData.geohazards) },
   { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
   { key: 'utilities', title: 'Utilities', deps: ['utilities'], build: () => utilitiesCard(sectionData.utilities) },
 ];
@@ -924,6 +988,10 @@ const SECTION_OVERLAY_BUILDERS = {
     ['Radon risk zone (EPA)', buildRadonLayer],
     ['Closed landfills (EPA)', buildLandfillsLayer],
     ['Licensed facilities (EPA)', buildIppcLayer],
+    ['Historic mine sites (EPA)', buildMinesLayer],
+  ],
+  geohazards: [
+    ['Source protection areas (GSI)', buildSourceProtectionLayer],
   ],
 };
 
@@ -1335,8 +1403,10 @@ function epaCard(e){
   const band = radon.found ? radonBand(radon.risk_description) : null;
   const lf = e.landfills;
   const ippc = e.ippc;
+  const mines = e.mines;
   const lfCountLabel = lf.landfill_count + (lf.more_exist ? '+' : '');
   const ippcCountLabel = ippc.facility_count + (ippc.more_exist ? '+' : '');
+  const minesCountLabel = mines.site_count + (mines.more_exist ? '+' : '');
 
   let verdictText, verdictCls;
   if(band){
@@ -1370,12 +1440,80 @@ function epaCard(e){
     ).join('') + '</ul>';
   }
 
-  // Tile dot reflects the worst finding across all three EPA layers, not
+  html += `<div style="margin-top:10px"><strong>${minesCountLabel} historic mine site(s) within ${mines.search_radius_m}m</strong></div>`;
+  if(mines.site_count){
+    html += '<ul>' + mines.sites.slice(0, 6).map(site =>
+      `<li>${site.name} <span class="muted">(${site.commodity || 'commodity unknown'})</span></li>`
+    ).join('') + '</ul>';
+  } else if(mines.boundary_count){
+    html += `<div class="muted">No named site, but ${mines.boundary_count} mapped working(s)/boundary(ies) nearby.</div>`;
+  }
+
+  // Tile dot reflects the worst finding across all four EPA layers, not
   // just landfills/IPPC (a High radon zone with no nearby landfill used to
   // still show a green "ok" dot — this was a real gap, not by design).
-  const dot = verdictCls === 'bad' ? 'bad' : (verdictCls === 'warn' || lf.landfill_count || ippc.facility_count) ? 'warn' : 'ok';
+  const dot = verdictCls === 'bad' ? 'bad' : (verdictCls === 'warn' || lf.landfill_count || ippc.facility_count || mines.site_count || mines.boundary_count) ? 'warn' : 'ok';
   return card('Environmental hazards (EPA)', dot, 'Live', 'live', html,
     'Source: <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA Maps</a>, gis.epa.ie');
+}
+
+function geohazardsCard(g){
+  if(!g){
+    return card('Geohazards & aquifer', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const ls = g.landslide;
+  const aq = g.aquifer;
+  const karst = g.karst;
+  const sp = g.source_protection;
+
+  // Pick the single worst-driving finding for the top-line verdict — same
+  // "one sentence, worst finding first" approach as waterCard — but still
+  // show all four sub-findings below regardless of which one drove it.
+  let verdictText;
+  if(ls.severity === 'bad'){
+    verdictText = `High landslide susceptibility at this point`;
+  } else if(sp.in_source_protection_area){
+    verdictText = `Within a public water supply source protection area (${sp.source_protection_area_name}) — development near a drinking-water catchment`;
+  } else if(sp.in_group_water_scheme_zone){
+    verdictText = `Within a group water scheme zone of contribution (${sp.group_water_scheme_name})`;
+  } else if(aq.severity === 'warn'){
+    verdictText = `Karstified regionally important aquifer — fast, poorly-filtered groundwater flow`;
+  } else if(karst.feature_count){
+    verdictText = `Not within a source protection area, but ${karst.feature_count} karst feature(s) within ${karst.search_radius_m}m`;
+  } else if(ls.severity === 'warn'){
+    verdictText = ls.found ? `${ls.class_description} landslide susceptibility / ground conditions at this point` : 'No landslide susceptibility data at this point';
+  } else {
+    verdictText = 'No elevated geohazard or aquifer sensitivity found at this point';
+  }
+  const verdictCls = [ls.severity, aq.severity, karst.severity, sp.severity].includes('bad') ? 'bad'
+    : [ls.severity, aq.severity, karst.severity, sp.severity].includes('warn') ? 'warn' : 'ok';
+
+  let html = verdict(verdictText, verdictCls);
+
+  html += `<div style="margin-top:10px"><strong>Landslide susceptibility:</strong> ${ls.found ? ls.class_description : '<span class="muted">no data at this exact point</span>'}</div>`;
+
+  html += `<div style="margin-top:10px"><strong>Bedrock aquifer:</strong> ${aq.bedrock_aquifer_description || '<span class="muted">no data at this exact point</span>'}</div>`;
+  if(aq.sand_gravel_aquifer_description){
+    html += `<div style="margin-top:4px"><strong>Sand &amp; gravel aquifer:</strong> ${aq.sand_gravel_aquifer_description}</div>`;
+  }
+
+  html += `<div style="margin-top:10px"><strong>${karst.feature_count} karst feature(s) within ${karst.search_radius_m}m</strong></div>`;
+  if(karst.feature_count){
+    html += '<ul>' + karst.features.slice(0, 6).map(f => `<li>${f.type}${f.name ? ' <span class="muted">(' + f.name + ')</span>' : ''}</li>`).join('') + '</ul>';
+  }
+
+  html += `<div style="margin-top:10px"><strong>Source protection:</strong> `;
+  if(sp.in_source_protection_area){
+    html += `within ${sp.source_protection_area_name}` + (sp.source_protection_area_report_url ? ` <a href="${sp.source_protection_area_report_url}" target="_blank">(report)</a>` : '');
+  } else if(sp.in_group_water_scheme_zone){
+    html += `within group water scheme zone: ${sp.group_water_scheme_name}`;
+  } else {
+    html += `not within one (${sp.nearby_count} mapped within ${sp.search_radius_m}m)`;
+  }
+  html += '</div>';
+
+  return card('Geohazards & aquifer', verdictCls, 'Live', 'live', html,
+    'Source: <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a> — Landslide Susceptibility, Aquifer, Karst &amp; Groundwater Source Protection datasets');
 }
 
 function mailto(to, subject, body){
@@ -1465,7 +1603,8 @@ function buildInfoCard(){
       <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>: a 500m radius search plus a bonus exact-Eircode match (only works when an application's own record has that field populated — true for ~0.6% nationally); zoning itself stays a link-out</li>
       <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
       <li>RPS &amp; ACA (statutory protected structures / conservation areas) — live for South Dublin, Wicklow, Fingal (ACA only), and Cork City (RPS only) so far; each of Ireland's 31 local authorities publishes its own, most as plan text/PDF rather than a queryable service. Local authority resolved via Tailte Éireann's own administrative boundaries.</li>
-      <li>Environmental hazards — radon risk, closed/historic landfills, and licensed IPPC/IED industrial facilities, all live via the <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA's own GeoServer</a> (gis.epa.ie). Radon was link-out only until this was found.</li>
+      <li>Environmental hazards — radon risk, closed/historic landfills, licensed IPPC/IED industrial facilities, and historic/abandoned mine sites, all live via the <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA's own GeoServer</a> (gis.epa.ie). Radon was link-out only until this was found.</li>
+      <li>Geohazards &amp; aquifer — landslide susceptibility, bedrock &amp; sand/gravel aquifer classification, karst features (springs, caves, turloughs, swallow holes), and public water supply / group water scheme source protection areas, all live via <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a>'s own ArcGIS server — the same one already used for bedrock/subsoil/groundwater vulnerability above.</li>
     </ol>
     <h4>Limitations &amp; caveats</h4>
     <ul style="padding-left:18px;margin:0;font-size:12.5px;color:var(--muted)">
@@ -1476,7 +1615,8 @@ function buildInfoCard(){
       <li>Zoning designation isn't covered by any dataset queried here — check myplan.ie directly.</li>
       <li>Ecology: "not within" a designated area (2km search radius) doesn't mean Appropriate Assessment screening is off the table — it isn't strictly bounded by the designation's own boundary. Get a professional ecological assessment for anything borderline.</li>
       <li>RPS &amp; ACA only cover 4 of 31 local authorities so far — everywhere else, the report says so rather than guessing.</li>
-      <li>Proximity to a closed landfill or licensed facility is a due-diligence flag, not a determination — a site-specific ground investigation would confirm actual risk.</li>
+      <li>Proximity to a closed landfill, licensed facility, or historic mine site is a due-diligence flag, not a determination — a site-specific ground investigation would confirm actual risk.</li>
+      <li>Landslide susceptibility is a regional classification (1:50,000), not a site-specific geotechnical assessment — a "Low" rating doesn't rule out localised slope instability, and vice versa.</li>
     </ul>`;
   return div;
 }
