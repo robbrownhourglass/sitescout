@@ -105,13 +105,19 @@
   }
   .tile-btn:hover{ border-color:var(--moss); }
   .tile-btn.active{ border-color:var(--moss); background:#eaf0ec; }
-  .tile-btn svg{ width:22px; height:22px; }
+  .tile-btn svg{ width:22px; height:22px; transition:opacity .15s ease; }
+  .tile-btn.pending svg{ opacity:.2; }
+  .tile-spinner{
+    display:none; position:absolute; top:50%; left:50%; margin:-9px 0 0 -9px;
+    width:18px; height:18px; border:2px solid var(--line); border-top-color:var(--moss);
+    border-radius:50%; animation:spin .7s linear infinite;
+  }
+  .tile-btn.pending .tile-spinner{ display:block; }
   .tile-dot{ width:7px; height:7px; border-radius:50%; background:var(--muted); position:absolute; top:4px; right:4px; }
   .tile-dot.ok{ background:var(--ok); }
   .tile-dot.warn{ background:var(--warn); }
   .tile-dot.bad{ background:var(--bad); }
-  .tile-dot.pending{ background:var(--line); animation:tile-pulse 1.4s ease-in-out infinite; }
-  @keyframes tile-pulse{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
+  .tile-btn.pending .tile-dot{ display:none; }
   .tile-strip-divider{ width:32px; height:1px; background:var(--line); margin:4px 0; flex:none; }
 
   #plotPicker{
@@ -145,7 +151,8 @@
   .card h3 .dot.ok{ background:var(--ok); }
   .card h3 .dot.warn{ background:var(--warn); }
   .card h3 .dot.bad{ background:var(--bad); }
-  .card h3 .dot.pending{ background:var(--line); animation:tile-pulse 1.4s ease-in-out infinite; }
+  .card h3 .dot.pending{ background:var(--line); animation:card-dot-pulse 1.4s ease-in-out infinite; }
+  @keyframes card-dot-pulse{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
   .card .body{ font-size:13.5px; color:var(--ink); }
   .card .body .muted{ color:var(--muted); }
   .card ul{ margin:4px 0 0; padding-left:18px; }
@@ -729,10 +736,10 @@ function buildTileStripSkeleton(){
 
   TILE_SPECS.forEach(spec => {
     const btn = document.createElement('button');
-    btn.className = 'tile-btn';
+    btn.className = 'tile-btn pending';
     btn.type = 'button';
     btn.title = spec.title;
-    btn.innerHTML = `${TILE_ICONS[spec.key] || ''}<span class="tile-dot pending"></span>`;
+    btn.innerHTML = `${TILE_ICONS[spec.key] || ''}<span class="tile-spinner"></span><span class="tile-dot pending"></span>`;
     btn.addEventListener('click', () => toggleDetail(spec));
     tileButtons[spec.key] = btn;
     tileStripEl.appendChild(btn);
@@ -761,9 +768,11 @@ function refreshTile(spec){
   if(!btn) return;
   const dot = btn.querySelector('.tile-dot');
   if(!isSpecReady(spec)){
+    btn.classList.add('pending');
     dot.className = 'tile-dot pending';
     return;
   }
+  btn.classList.remove('pending');
   dot.className = 'tile-dot ' + (statusFromCardNode(spec.build()) || 'ok');
 }
 
@@ -819,7 +828,8 @@ function isSpecReady(spec){
 }
 
 function buildLoadingCard(title){
-  return card(title, 'pending', 'Loading', 'live', '<div class="muted">Still loading…</div>', '');
+  return card(title, 'pending', 'Loading', 'live',
+    '<div class="muted" style="display:flex;align-items:center;gap:8px"><span class="spinner"></span> Still loading…</div>', '');
 }
 
 // Which map overlay(s) a given background section feeds, if any —
