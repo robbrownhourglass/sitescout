@@ -155,6 +155,10 @@
   @keyframes card-dot-pulse{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
   .card .body{ font-size:13.5px; color:var(--ink); }
   .card .body .muted{ color:var(--muted); }
+  .card .verdict{ font-size:13px; font-weight:600; padding:8px 10px; border-radius:6px; line-height:1.4; }
+  .card .verdict.ok{ background:#eaf0ec; color:var(--moss-dark); }
+  .card .verdict.warn{ background:#fbeee0; color:var(--amber); }
+  .card .verdict.bad{ background:#f6e6e1; color:var(--rust); }
   .card ul{ margin:4px 0 0; padding-left:18px; }
   .card li{ margin-bottom:3px; }
   .badge{
@@ -1101,6 +1105,30 @@ function startPlotConfirmation(data){
   fetchSectionsInBackground(data.section_names, loc.lat, loc.lon, data.eircode, loc.label, myGeneration);
 }
 
+// One-line plain-language summary at the top of each card's body — "report
+// card" style: not just the raw data, but a verdict ("not in a zone, but
+// N nearby within Xm/km"). `cls` drives the same ok/warn/bad palette as the
+// tile dots (bad = the worst finding a section can carry, not an error —
+// that's still communicated via the whole-card Error state in card() below).
+function verdict(text, cls){
+  return `<div class="verdict ${cls}">${text}</div>`;
+}
+
+// EPA's radon layer only ever returns one of three fixed strings nationwide
+// (confirmed by pulling every feature in the WFS layer: 42,164 "1 in 5",
+// 14,859 "1 in 10", 10,984 "1 in 20" — no other values exist). Map them to
+// a plain High/Medium/Low label rather than making the user parse "1 in N"
+// themselves. Ireland's Building Regulations (TGD C) define a "High Radon
+// Area" as >=10% probability of exceeding the reference level, so both
+// "1 in 5" and "1 in 10" meet that regulatory threshold, not just "1 in 5".
+function radonBand(desc){
+  if(!desc) return null;
+  if(desc.includes('1 in 5')) return { label: 'High', cls: 'bad', regulatory: true };
+  if(desc.includes('1 in 10')) return { label: 'Medium', cls: 'warn', regulatory: true };
+  if(desc.includes('1 in 20')) return { label: 'Low', cls: 'ok', regulatory: false };
+  return null;
+}
+
 function card(title, dotClass, badgeText, badgeCls, bodyHtml, srcHtml){
   const div = document.createElement('div');
   div.className = 'card';
@@ -1117,11 +1145,13 @@ function boundaryCard(b){
   }
   if(!b.found){
     return card('Property boundary (cadastral)', 'warn', 'Not found', 'manual',
-      `<div class="muted">No registered freehold or leasehold parcel found at this exact point. ${b.note || ''}</div>`,
+      `${verdict('No registered parcel found at this exact point', 'warn')}
+      <div class="muted">No registered freehold or leasehold parcel found at this exact point. ${b.note || ''}</div>`,
       'Check directly: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a> (folio &amp; filed plan search)');
   }
   const countNote = b.parcel_count > 1 ? ` <span class="muted">(${b.parcel_count} plots merged)</span>` : '';
   const html = `
+    ${verdict(`Registered ${b.tenure.toLowerCase()} parcel confirmed in ${b.county}${countNote}`, 'ok')}
     <div><strong>${b.tenure} parcel confirmed</strong>${countNote} (${b.county})</div>
     <div style="margin-top:6px">Approx. area: ${b.area_hectares} ha (${b.area_acres} acres)</div>`;
   return card('Property boundary (cadastral)', 'ok', 'Live', 'live', html,
@@ -1132,10 +1162,12 @@ function geologyCard(g){
   if(!g){
     return card('Geology & subsoil', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
+  const hasData = !!(g.subsoil_type || g.bedrock_unit);
   const html = `
+    ${verdict(hasData ? 'Bedrock and subsoil mapped for this site' : 'No geology data returned at this exact point', hasData ? 'ok' : 'warn')}
     <div><strong>Subsoil / sediment:</strong> ${g.subsoil_type || '<span class="muted">no data at this exact point</span>'}</div>
     <div style="margin-top:6px"><strong>Bedrock unit:</strong> ${g.bedrock_unit || '<span class="muted">no bedrock polygon returned at this exact point</span>'}${g.bedrock_description ? ` <span class="muted">(${g.bedrock_description})</span>` : ''}</div>`;
-  return card('Geology & subsoil', 'ok', 'Live', 'live', html,
+  return card('Geology & subsoil', hasData ? 'ok' : 'warn', 'Live', 'live', html,
     'Source: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Bedrock.aspx" target="_blank">GSI Bedrock &amp; Quaternary geology</a>');
 }
 
@@ -1143,15 +1175,27 @@ function waterCard(w, flood){
   if(!w){
     return card('Water table & flood risk', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
-  let html = `<div><strong>Groundwater vulnerability:</strong> ${w.vulnerability_category || '<span class="muted">no data at this exact point</span>'}</div>`;
-  let floodIsHigh = false;
+  let floodIsHigh = false, floodIsMedium = false;
+  let fBand, cBand;
   if(flood){
-    const fBand = flood.fluvial_probability, cBand = flood.coastal_probability;
+    fBand = flood.fluvial_probability; cBand = flood.coastal_probability;
     floodIsHigh = fBand === 'High' || cBand === 'High';
+    floodIsMedium = !floodIsHigh && (fBand === 'Medium' || cBand === 'Medium');
+  }
+  const vulnWarn = VULN_WARN_CODES.has(w.vulnerability_code);
+  let verdictText, verdictCls;
+  if(floodIsHigh){ verdictText = 'High flood risk mapped at this point (fluvial or coastal)'; verdictCls = 'bad'; }
+  else if(floodIsMedium || vulnWarn){ verdictText = floodIsMedium ? 'Moderate flood risk mapped at this point' : 'Elevated groundwater vulnerability at this point'; verdictCls = 'warn'; }
+  else if(w.vulnerability_code){ verdictText = 'No mapped flood risk; groundwater vulnerability not elevated'; verdictCls = 'ok'; }
+  else { verdictText = 'No groundwater or flood-risk data returned at this exact point'; verdictCls = 'warn'; }
+
+  let html = verdict(verdictText, verdictCls);
+  html += `<div style="margin-top:8px"><strong>Groundwater vulnerability:</strong> ${w.vulnerability_category || '<span class="muted">no data at this exact point</span>'}</div>`;
+  if(flood){
     html += `<div style="margin-top:6px"><strong>Fluvial (river) flood risk:</strong> ${fBand || '<span class="muted">not mapped at this point</span>'}</div>`;
     html += `<div style="margin-top:6px"><strong>Coastal flood risk:</strong> ${cBand || '<span class="muted">not mapped at this point</span>'}</div>`;
   }
-  const dot = (VULN_WARN_CODES.has(w.vulnerability_code) || floodIsHigh) ? 'warn' : (w.vulnerability_code ? 'ok' : 'warn');
+  const dot = verdictCls === 'bad' ? 'bad' : verdictCls;
   return card('Water table & flood risk', dot, 'Live', 'live', html,
     'Sources: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Groundwater.aspx" target="_blank">GSI Groundwater</a> · <a href="https://www.floodinfo.ie" target="_blank">OPW floodinfo.ie</a>');
 }
@@ -1160,20 +1204,30 @@ function archaeologyCard(a, zone){
   if(!a){
     return card('Archaeology & heritage', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
-  let html;
+  const countLabel = a.monument_count + (a.more_exist ? '+' : '');
+  let verdictText, verdictCls;
+  if(zone && zone.in_zone){
+    verdictText = `Within SMR Zone ${zone.zone_id} — notification required before ground disturbance`;
+    verdictCls = 'warn';
+  } else if(a.monument_count){
+    verdictText = `Not within an SMR Zone, but ${countLabel} recorded monument(s) within 2km`;
+    verdictCls = 'warn';
+  } else {
+    verdictText = 'Not within an SMR Zone; no recorded monuments within 2km';
+    verdictCls = 'ok';
+  }
+
+  let html = verdict(verdictText, verdictCls);
   if(a.monument_count){
-    const countLabel = a.monument_count + (a.more_exist ? '+' : '');
-    html = `<div><strong>${countLabel} recorded monument(s) within 2km</strong> (Sites &amp; Monuments Record)</div><ul>` +
+    html += `<div style="margin-top:8px"><strong>${countLabel} recorded monument(s) within 2km</strong> (Sites &amp; Monuments Record)</div><ul>` +
       a.monuments.slice(0, 6).map(m => `<li>${m.class || 'Monument'} <span class="muted">(${m.smr_ref})</span></li>`).join('') + '</ul>';
   } else {
-    html = '<div>No recorded monuments within 2km in the SMR.</div>';
+    html += '<div style="margin-top:8px">No recorded monuments within 2km in the SMR.</div>';
   }
   if(zone && zone.in_zone){
-    html += `<div style="margin-top:6px"><strong>Within SMR Zone ${zone.zone_id}</strong> <span class="muted">(~${zone.area_hectares} ha) — notification required before ground disturbance.</span></div>`;
-  } else if(zone){
-    html += `<div style="margin-top:6px" class="muted">Not within a mapped SMR Zone.</div>`;
+    html += `<div style="margin-top:6px"><span class="muted">(~${zone.area_hectares} ha zone)</span></div>`;
   }
-  return card('Archaeology & heritage', (zone && zone.in_zone) || a.monument_count ? 'warn' : 'ok', 'Live + links', 'live', html,
+  return card('Archaeology & heritage', verdictCls, 'Live + links', 'live', html,
     'Sources: National Monuments Service SMR &amp; SMR Zones · <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a>');
 }
 
@@ -1181,13 +1235,13 @@ function niahCard(n){
   if(!n){
     return card('Protected structures (NIAH)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
-  let html;
+  const countLabel = n.structure_count + (n.more_exist ? '+' : '');
+  let html = verdict(
+    n.structure_count ? `${countLabel} NIAH-listed structure(s) within 500m` : 'No NIAH-listed structures within 500m',
+    n.structure_count ? 'warn' : 'ok');
   if(n.structure_count){
-    const countLabel = n.structure_count + (n.more_exist ? '+' : '');
-    html = `<div><strong>${countLabel} NIAH structure(s) within 500m</strong></div><ul>` +
+    html += `<div style="margin-top:8px"><strong>${countLabel} NIAH structure(s) within 500m</strong></div><ul>` +
       n.structures.slice(0, 6).map(st => `<li>${st.name || st.address || 'Structure'} <span class="muted">(${st.rating}, reg. ${st.reg_no})</span></li>`).join('') + '</ul>';
-  } else {
-    html = '<div>No NIAH-listed structures within 500m.</div>';
   }
   return card('Protected structures (NIAH)', n.structure_count ? 'warn' : 'ok', 'Live', 'live', html,
     'Source: <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>, buildingsofireland.ie');
@@ -1198,16 +1252,27 @@ function ecologyCard(e){
     return card('Ecology & nature conservation', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   const withinList = Object.values(e.within).filter(Boolean);
-  let html;
+  const countLabel = e.site_count + (e.more_exist ? '+' : '');
+  let verdictText, verdictCls;
+  if(e.any_within){
+    verdictText = `Within a designated ecological area — Appropriate Assessment screening may be required`;
+    verdictCls = 'warn';
+  } else if(e.site_count){
+    verdictText = `Not within a mapped SAC/SPA/NHA/pNHA, but ${countLabel} designated area(s) within 2km`;
+    verdictCls = 'warn';
+  } else {
+    verdictText = 'Not within a mapped SAC/SPA/NHA/pNHA; none within 2km';
+    verdictCls = 'ok';
+  }
+  let html = verdict(verdictText, verdictCls);
   if(withinList.length){
-    html = withinList.map((v, i) => {
+    html += withinList.map((v, i) => {
       const aaNote = (v.type === 'sac' || v.type === 'spa') ? ' <span class="muted">— may require Appropriate Assessment</span>' : '';
-      return `<div${i > 0 ? ' style="margin-top:6px"' : ''}><strong>Within ${v.type_label}</strong>${aaNote}<br><span class="muted">${v.site_name} (${v.site_code}), ~${v.area_hectares} ha</span></div>`;
+      return `<div style="margin-top:8px"><strong>Within ${v.type_label}</strong>${aaNote}<br><span class="muted">${v.site_name} (${v.site_code}), ~${v.area_hectares} ha</span></div>`;
     }).join('');
   } else {
-    html = '<div>Not within a mapped SAC, SPA, NHA, or proposed NHA at this point.</div>';
+    html += '<div style="margin-top:8px">Not within a mapped SAC, SPA, NHA, or proposed NHA at this point.</div>';
   }
-  const countLabel = e.site_count + (e.more_exist ? '+' : '');
   html += `<div style="margin-top:8px" class="muted">${countLabel} designated area(s) mapped within 2km.</div>`;
   return card('Ecology & nature conservation', e.any_within ? 'warn' : 'ok', 'Live', 'live', html,
     'Source: <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC/SPA/NHA/pNHA)');
@@ -1218,12 +1283,30 @@ function rpsAcaCard(r){
     return card('RPS & ACA', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   if(!r.covered){
-    return card('RPS & ACA', 'ok', 'Not covered', 'link', `<div class="muted">${r.note}</div>`, '');
+    return card('RPS & ACA', 'ok', 'Not covered', 'link',
+      `${verdict('No live RPS/ACA source for this local authority yet', 'ok')}
+      <div class="muted" style="margin-top:8px">${r.note}</div>`, '');
   }
-  let html = `<div class="muted">Local authority: <strong>${r.authority}</strong></div>`;
+  const rpsCountLabel = r.rps.structure_count + (r.rps.more_exist ? '+' : '');
+  let verdictText, verdictCls;
+  if(r.aca.available && r.aca.in_aca){
+    verdictText = `Within ACA: ${r.aca.current.name}`;
+    verdictCls = 'warn';
+  } else {
+    const rpsPart = r.rps.available
+      ? (r.rps.structure_count ? `${rpsCountLabel} RPS structure(s) within 500m` : 'no RPS structures within 500m')
+      : 'RPS not covered for this authority yet';
+    const acaPart = r.aca.available
+      ? `not within an ACA (${r.aca.area_count} mapped nearby)`
+      : 'ACA not covered for this authority yet';
+    verdictText = `${rpsPart}; ${acaPart}`;
+    verdictCls = (r.rps.available && r.rps.structure_count) ? 'warn' : 'ok';
+  }
+
+  let html = verdict(verdictText, verdictCls);
+  html += `<div style="margin-top:8px" class="muted">Local authority: <strong>${r.authority}</strong></div>`;
   if(r.rps.available){
-    const countLabel = r.rps.structure_count + (r.rps.more_exist ? '+' : '');
-    html += `<div style="margin-top:8px"><strong>${countLabel} RPS structure(s) within 500m</strong></div>`;
+    html += `<div style="margin-top:8px"><strong>${rpsCountLabel} RPS structure(s) within 500m</strong></div>`;
     if(r.rps.structure_count){
       html += '<ul>' + r.rps.structures.slice(0, 6).map(st =>
         `<li>${st.address || st.description || 'Structure'} <span class="muted">(${st.ref || 'n/a'})</span></li>`
@@ -1239,7 +1322,7 @@ function rpsAcaCard(r){
   } else {
     html += '<div style="margin-top:8px" class="muted">ACA: no live source for this local authority yet.</div>';
   }
-  const dot = (r.aca.available && r.aca.in_aca) || (r.rps.available && r.rps.structure_count) ? 'warn' : 'ok';
+  const dot = verdictCls;
   return card('RPS & ACA', dot, 'Live', 'live', html,
     `Source: ${r.authority} Development Plan &middot; NIAH is a separate section, not the same as RPS`);
 }
@@ -1249,13 +1332,30 @@ function epaCard(e){
     return card('Environmental hazards (EPA)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   const radon = e.radon;
-  let html = `<div><strong>Radon:</strong> ${radon.found ? radon.risk_description : '<span class="muted">no classification returned at this point</span>'}</div>`;
+  const band = radon.found ? radonBand(radon.risk_description) : null;
+  const lf = e.landfills;
+  const ippc = e.ippc;
+  const lfCountLabel = lf.landfill_count + (lf.more_exist ? '+' : '');
+  const ippcCountLabel = ippc.facility_count + (ippc.more_exist ? '+' : '');
+
+  let verdictText, verdictCls;
+  if(band){
+    const regNote = band.regulatory
+      ? ' — meets Ireland’s regulatory "High Radon Area" threshold (≥10% probability); radon protective measures required for new construction.'
+      : ' — below the regulatory "High Radon Area" threshold.';
+    verdictText = `${band.label} radon zone: ${radon.risk_description}${regNote}`;
+    verdictCls = band.cls;
+  } else {
+    verdictText = 'No radon classification returned at this point';
+    verdictCls = 'warn';
+  }
+  let html = verdict(verdictText, verdictCls);
+
+  html += `<div style="margin-top:10px"><strong>Radon zone: ${band ? band.label : '<span class="muted">Unknown</span>'}</strong> ${radon.found ? `<span class="muted">(${radon.risk_description})</span>` : ''}</div>`;
   if(radon.found && radon.more_info_url){
     html += `<div class="muted" style="margin-top:2px"><a href="${radon.more_info_url}" target="_blank">Test your home</a></div>`;
   }
 
-  const lf = e.landfills;
-  const lfCountLabel = lf.landfill_count + (lf.more_exist ? '+' : '');
   html += `<div style="margin-top:10px"><strong>${lfCountLabel} closed landfill(s) within 1km</strong></div>`;
   if(lf.landfill_count){
     html += '<ul>' + lf.landfills.slice(0, 6).map(site =>
@@ -1263,8 +1363,6 @@ function epaCard(e){
     ).join('') + '</ul>';
   }
 
-  const ippc = e.ippc;
-  const ippcCountLabel = ippc.facility_count + (ippc.more_exist ? '+' : '');
   html += `<div style="margin-top:10px"><strong>${ippcCountLabel} licensed IPPC/IED facility(ies) within 1km</strong></div>`;
   if(ippc.facility_count){
     html += '<ul>' + ippc.facilities.slice(0, 6).map(fac =>
@@ -1272,7 +1370,10 @@ function epaCard(e){
     ).join('') + '</ul>';
   }
 
-  const dot = (lf.landfill_count || ippc.facility_count) ? 'warn' : 'ok';
+  // Tile dot reflects the worst finding across all three EPA layers, not
+  // just landfills/IPPC (a High radon zone with no nearby landfill used to
+  // still show a green "ok" dot — this was a real gap, not by design).
+  const dot = verdictCls === 'bad' ? 'bad' : (verdictCls === 'warn' || lf.landfill_count || ippc.facility_count) ? 'warn' : 'ok';
   return card('Environmental hazards (EPA)', dot, 'Live', 'live', html,
     'Source: <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA Maps</a>, gis.epa.ie');
 }
@@ -1286,7 +1387,8 @@ function utilitiesCard(u){
     return card('Utilities (power / water / sewage)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   const html = `
-    <div class="muted">Electricity and water/sewage asset maps are not published as open data (security-sensitive) — they're obtained on request. Pre-drafted for this site:</div>
+    ${verdict('No open utility data for this site — pre-drafted requests below', 'warn')}
+    <div class="muted" style="margin-top:8px">Electricity and water/sewage asset maps are not published as open data (security-sensitive) — they're obtained on request. Pre-drafted for this site:</div>
     <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
       <a class="request-btn" href="${mailto(u.electricity.to, u.electricity.subject, u.electricity.body)}">✉ Draft ESB Networks cable map request</a>
       <a class="request-btn" href="${mailto(u.water_wastewater.to, u.water_wastewater.subject, u.water_wastewater.body)}">✉ Draft Uisce Éireann asset map request</a>
@@ -1299,29 +1401,44 @@ function planningCard(p, apps){
   if(!p){
     return card('Planning context', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
-  let html = '';
   const siteMatch = apps && apps.site_match;
+  const radiusM = (apps && apps.search_radius_m) || 500;
+  const nearbyCount = apps ? apps.application_count : 0;
+  const nearbyLabel = nearbyCount + (apps && apps.more_exist ? '+' : '');
+
+  let verdictText, verdictCls;
   if(siteMatch && siteMatch.application_count){
-    html += `<div><strong>${siteMatch.application_count} application(s) — this Eircode (exact match)</strong></div><ul>` +
+    verdictText = `${siteMatch.application_count} planning application(s) on this exact Eircode` + (nearbyCount ? `; ${nearbyLabel} more within ${radiusM}m` : '');
+    verdictCls = 'warn';
+  } else if(nearbyCount){
+    verdictText = `No planning history on this exact site, but ${nearbyLabel} application(s) within ${radiusM}m`;
+    verdictCls = 'warn';
+  } else if(apps){
+    verdictText = `No planning applications found within ${radiusM}m`;
+    verdictCls = 'ok';
+  } else {
+    verdictText = 'Planning application history not yet loaded';
+    verdictCls = 'ok';
+  }
+  let html = verdict(verdictText, verdictCls);
+
+  if(siteMatch && siteMatch.application_count){
+    html += `<div style="margin-top:10px"><strong>${siteMatch.application_count} application(s) — this Eircode (exact match)</strong></div><ul>` +
       siteMatch.applications.slice(0, 5).map(app => {
         const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
         const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
         return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
       }).join('') + '</ul>';
   }
-  const radiusM = (apps && apps.search_radius_m) || 500;
   if(apps && apps.application_count){
-    const countLabel = apps.application_count + (apps.more_exist ? '+' : '');
-    html += `<div${siteMatch && siteMatch.application_count ? ' style="margin-top:10px"' : ''}><strong>${countLabel} planning application(s) within ${radiusM}m</strong></div><ul>` +
+    html += `<div style="margin-top:10px"><strong>${nearbyLabel} planning application(s) within ${radiusM}m</strong></div><ul>` +
       apps.applications.slice(0, 5).map(app => {
         const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
         const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
         return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
       }).join('') + '</ul>';
-  } else if(apps){
-    html += `<div>No planning applications found within ${radiusM}m.</div>`;
   }
-  return card('Planning context', (apps && apps.application_count) ? 'warn' : 'ok', apps ? 'Live + links' : 'Links', 'live', html,
+  return card('Planning context', verdictCls, apps ? 'Live + links' : 'Links', 'live', html,
     `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
 }
 
