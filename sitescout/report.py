@@ -171,6 +171,30 @@ def print_report(report: dict) -> None:
         print(f"  Licensed IPPC/IED facilities: {ippc_count_label} within 1km")
         for fac in ippc["facilities"][:6]:
             print(f"    - {fac['name']} ({fac['licence_status']})")
+        mines = e["mines"]
+        mines_count_label = f"{mines['site_count']}{'+' if mines.get('more_exist') else ''}"
+        print(f"  Historic mine sites: {mines_count_label} within {mines.get('search_radius_m', 2000)}m ({mines['boundary_count']} mapped working(s))")
+        for site in mines["sites"][:6]:
+            print(f"    - {site['name']} ({site['commodity']})")
+
+    if "geohazards" in s:
+        g = s["geohazards"]
+        print("\n-- Geohazards & aquifer (GSI) --")
+        ls = g["landslide"]
+        print(f"  Landslide susceptibility: {ls.get('class_description') or 'no data at this point'}")
+        aq = g["aquifer"]
+        print(f"  Bedrock aquifer: {aq.get('bedrock_aquifer_description') or 'no data at this point'}")
+        if aq.get("sand_gravel_aquifer_description"):
+            print(f"  Sand & gravel aquifer: {aq['sand_gravel_aquifer_description']}")
+        karst = g["karst"]
+        print(f"  Karst features: {karst['feature_count']} within {karst['search_radius_m']}m")
+        sp = g["source_protection"]
+        if sp["in_source_protection_area"]:
+            print(f"  ⚠ Within public water supply source protection area: {sp['source_protection_area_name']}")
+        elif sp["in_group_water_scheme_zone"]:
+            print(f"  ⚠ Within group water scheme zone of contribution: {sp['group_water_scheme_name']}")
+        else:
+            print(f"  Not within a mapped source protection area ({sp['nearby_count']} nearby within {sp['search_radius_m']}m)")
 
     if "utilities" in s:
         u = s["utilities"]
@@ -341,6 +365,31 @@ def _to_markdown(report: dict) -> str:
         lines.append(f"- Licensed IPPC/IED facilities: {ippc_count_label} within 1km")
         for fac in ippc["facilities"][:6]:
             lines.append(f"  - {fac['name']} ({fac['licence_status']})")
+        mines = e["mines"]
+        mines_count_label = f"{mines['site_count']}{'+' if mines.get('more_exist') else ''}"
+        lines.append(f"- Historic mine sites: {mines_count_label} within {mines.get('search_radius_m', 2000)}m ({mines['boundary_count']} mapped working(s))")
+        for site in mines["sites"][:6]:
+            lines.append(f"  - {site['name']} ({site['commodity']})")
+        lines.append("")
+
+    if "geohazards" in s:
+        g = s["geohazards"]
+        lines.append("## Geohazards & aquifer (GSI)")
+        ls = g["landslide"]
+        lines.append(f"- Landslide susceptibility: {ls.get('class_description') or 'no data at this point'}")
+        aq = g["aquifer"]
+        lines.append(f"- Bedrock aquifer: {aq.get('bedrock_aquifer_description') or 'no data at this point'}")
+        if aq.get("sand_gravel_aquifer_description"):
+            lines.append(f"- Sand & gravel aquifer: {aq['sand_gravel_aquifer_description']}")
+        karst = g["karst"]
+        lines.append(f"- Karst features: {karst['feature_count']} within {karst['search_radius_m']}m")
+        sp = g["source_protection"]
+        if sp["in_source_protection_area"]:
+            lines.append(f"- ⚠ Within public water supply source protection area: {sp['source_protection_area_name']}")
+        elif sp["in_group_water_scheme_zone"]:
+            lines.append(f"- ⚠ Within group water scheme zone of contribution: {sp['group_water_scheme_name']}")
+        else:
+            lines.append(f"- Not within a mapped source protection area ({sp['nearby_count']} nearby within {sp['search_radius_m']}m)")
         lines.append("")
 
     if "utilities" in s:

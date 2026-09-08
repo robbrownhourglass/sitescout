@@ -41,10 +41,19 @@ WFS_URL = "https://gis.epa.ie/geoserver/wfs"
 RADON_LAYER = "EPA:RadonRiskMapofIreland"
 LANDFILLS_LAYER = "EPA:ClosedLandfills_2023"
 IPPC_LAYER = "EPA:IPPC_LicFacilities"
+# Historic/abandoned mine sites — found the same way as radon/landfills/IPPC
+# (reading layer names off this GeoServer's own GetCapabilities list, which
+# CLAUDE.md already noted includes "mines" among the categories not yet
+# used). Two layers: point locations (site name + commodity produced) and
+# polygon site boundaries (old workings, spoil heaps etc. — often several
+# per named site, e.g. Silvermines, Co. Tipperary returned 4 boundaries).
+MINES_SITES_LAYER = "EPA:MINES_SiteLocation"
+MINES_BOUNDARIES_LAYER = "EPA:MINES_SiteBoundaries"
 
 RADON_SEARCH_HALF_M = 100         # one classification per area; a small buffer reliably hits the polygon at the point
 LANDFILLS_SEARCH_RADIUS_M = 1000  # landfills can have a wider zone of influence than their mapped boundary
 IPPC_SEARCH_RADIUS_M = 1000
+MINES_SEARCH_RADIUS_M = 2000      # historic mine workings can spread well beyond a single mapped boundary — confirmed at Silvermines, Co. Tipperary
 
 
 def _bbox_around(lat: float, lon: float, half_m: float) -> str:
@@ -216,15 +225,68 @@ def get_ippc_facilities(lat: float, lon: float) -> dict:
     }
 
 
+def get_historic_mines(lat: float, lon: float) -> dict:
+    log.info("Querying EPA historic/abandoned mine sites within %dm…", MINES_SEARCH_RADIUS_M)
+    sites_data = _wfs_query(MINES_SITES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=10)
+    sites = []
+    for f in sites_data["features"]:
+        site_lat, site_lon = _first_point(f.get("geometry"))
+        sites.append({
+            "name": f["properties"].get("Name"),
+            "commodity": f["properties"].get("CommodityProduced"),
+            "description": f["properties"].get("Description"),
+            "more_info_url": f["properties"].get("URL"),
+            "lat": site_lat,
+            "lon": site_lon,
+        })
+
+    boundaries_data = _wfs_query(MINES_BOUNDARIES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=25)
+    boundaries = [
+        {
+            "name": f["properties"].get("Name"),
+            "status": f["properties"].get("Status"),
+            "feature_type": f["properties"].get("FeatureType"),
+            "area_hectares": round(f["properties"]["AreaHa"], 1) if f["properties"].get("AreaHa") else None,
+            "polygon_ring_sets_wgs84": _polygon_ring_sets(f.get("geometry")),
+        }
+        for f in boundaries_data["features"]
+    ]
+
+    more_exist = (
+        sites_data.get("numberMatched", 0) > sites_data.get("numberReturned", 0)
+        or boundaries_data.get("numberMatched", 0) > boundaries_data.get("numberReturned", 0)
+    )
+    log.info(
+        "-> %d historic mine site(s), %d mapped working(s)/boundary(ies) within %dm%s",
+        len(sites), len(boundaries), MINES_SEARCH_RADIUS_M, " (capped, more exist)" if more_exist else "",
+    )
+    for s in sites[:6]:
+        log.info("   - %s (%s)", s["name"], s["commodity"])
+
+    return {
+        "site_count": len(sites),
+        "sites": sites,
+        "boundary_count": len(boundaries),
+        "boundaries": boundaries,
+        "more_exist": more_exist,
+        "search_radius_m": MINES_SEARCH_RADIUS_M,
+        "source": "EPA Historic Mine Sites Inventory",
+        "caveat": "Historic mine workings can carry contamination (heavy metals, acid mine drainage) "
+                  "and ground-stability risks (old shafts, adits, spoil heaps) well beyond a single "
+                  "mapped boundary — a due-diligence flag, not a determination in itself.",
+    }
+
+
 def get_environmental_hazards(lat: float, lon: float) -> dict:
     """One combined section — radon + closed landfills + licensed
-    industrial facilities — mirroring ecology.py's pattern of bundling
-    several related EPA/NPWS layers behind one report section/sidebar
-    tile rather than three separate ones.
+    industrial facilities + historic mine sites — mirroring ecology.py's
+    pattern of bundling several related EPA/NPWS layers behind one report
+    section/sidebar tile rather than several separate ones.
     """
     return {
         "radon": get_radon_risk(lat, lon),
         "landfills": get_closed_landfills(lat, lon),
         "ippc": get_ippc_facilities(lat, lon),
+        "mines": get_historic_mines(lat, lon),
         "source": "Environmental Protection Agency (EPA), gis.epa.ie",
     }
