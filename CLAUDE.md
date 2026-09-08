@@ -229,6 +229,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
 | RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
+| Environmental hazards (radon, closed landfills, licensed IPPC/IED facilities) | EPA's own GeoServer (`gis.epa.ie/geoserver`), queried via WFS `GetFeature` (not WMS `GetFeatureInfo` like `wms.py`) | `epa.py` |
 
 **How the second batch above (SMR Zones, NIAH, planning applications, flood
 risk, ecology) was found** — same "pull the JS apart" technique as the
@@ -266,6 +267,23 @@ app, rather than the documented-but-dead endpoints:
    (linked from npws.ie/protected-sites), whose web map has all four
    ecological-designation layers (SAC/SPA/NHA/pNHA) on one `NPWSDesignatedAreas`
    `FeatureServer` — a single national dataset, unlike RPS/ACA below.
+7. EPA's "EPA Maps" viewer (gis.epa.ie/EPAMaps) is, like floodinfo.ie, a
+   self-hosted GeoServer behind a custom app rather than Esri — its own
+   `app-bundle.js` references relative `/geoserver/wms` and `/geoserver/gwc/...`
+   paths, confirming the base URL is `gis.epa.ie/geoserver`. Its
+   `GetCapabilities` lists a huge national environmental dataset (air
+   quality, bathing water, mines, WFD water body status, etc.) — `epa.py`
+   only uses three layers so far (radon, closed landfills, licensed IPPC
+   facilities), found by reading the layer names off that capabilities
+   list. Used its WFS `GetFeature` (not WMS `GetFeatureInfo`) since it
+   returns real vector features directly in WGS84 with `srsName=EPSG:4326`
+   — but the `bbox` filter param needs an explicit CRS suffix
+   (`bbox=minx,miny,maxx,maxy,EPSG:4326`) or GeoServer silently interprets
+   the numbers in the layer's native storage CRS (Irish Transverse
+   Mercator) instead, and the query just returns zero features — no error,
+   reads exactly like "nothing nearby." Confirmed by testing against a
+   real landfill's own centroid and still getting zero results until the
+   suffix was added.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
@@ -295,7 +313,6 @@ Not yet wired in / unresolved:
   history) — not in the NPAD dataset. Ireland's ~31 local authorities each
   publish their own zoning maps; no single national layer was found.
   `myplan_zoning` in `planning.get_planning_links()` stays a link-out.
-- **EPA radon risk map** — link-out only; no query endpoint sought yet.
 - **Utilities** (ESB Networks electricity, Uisce Éireann water/wastewater) —
   confirmed these are genuinely not open data (security-sensitive
   underground infrastructure). `utilities.py` drafts the actual request
