@@ -52,12 +52,23 @@ sitescout/
   gsi.py                    geology (bedrock, subsoil) + groundwater vulnerability
   heritage.py               archaeology (SMR), SMR Zones (notification zones), NIAH (protected
                              structures) — all National Monuments Service ArcGIS layers
-  cadastral.py              property boundary (Tailte Éireann cadastral parcels)
+  ecology.py                NPWS designated areas (SAC/SPA/NHA/pNHA) — one national dataset
+  local_authority.py        resolves a point to its city/county council (Tailte Éireann boundaries)
+  rps.py                    RPS/ACA (statutory protected structures/conservation areas) —
+                             per-local-authority, only 4 of 31 wired in so far; see rps.SOURCES
+  cadastral.py              property boundary (Tailte Éireann cadastral parcels) — a single-point
+                             lookup (get_boundary, used by the CLI) and a within-radius one
+                             (get_nearby_parcels, used by the web UI's plot picker), plus
+                             summarise_selected_parcels() to merge whatever the user picks
   utilities.py              drafts ESB/Uisce Éireann data-request emails (no open API exists)
-  planning.py               planning applications (National Planning Application Database) and
-                             flood risk (OPW CFRAM via wms.py), live; zoning + radon stay link-outs
-  pipeline.py               shared orchestration (cadastral/gsi/heritage/utilities/planning -> report),
-                             used by both cli.py and webapp.py so they can't drift apart
+  planning.py               planning applications (National Planning Application Database,
+                             radius search + a bonus exact-Eircode match) and flood risk (OPW
+                             CFRAM via wms.py), live; zoning + radon stay link-outs
+  pipeline.py               shared section logic: SECTION_SPECS / run_section() runs one named
+                             section at a time (used by the web UI's per-section endpoint);
+                             run() runs all of them via a ThreadPoolExecutor for the CLI's
+                             one-shot report ("boundary" is deliberately not a SECTION_SPEC — the
+                             web UI gets it from the plot picker, not a fresh point query)
   report.py                 compiles everything, prints to terminal, optional JSON/MD save
   cli.py                    argparse wiring; the only entry point that lets Autoaddress
                              prompt on stdin (autoaddress.resolve()) when a query is ambiguous
@@ -65,12 +76,33 @@ sitescout/
                              autoaddress.search()/follow() directly and round-trips
                              disambiguation options to the browser instead (see its docstring)
   templates/index.html      the web UI page (adapted from ireland-site-scout-demo.html, but
-                             talks only to this app's own /api/scout, /api/scout/choose)
+                             talks only to this app's own /api/scout(/choose|/section/<name>))
 ```
 
-Flow: `autoaddress.resolve()` (CLI) or `autoaddress.search()`/`follow()`
-(web) → `geocode.geocode()` → `pipeline.run()` (`cadastral`, `gsi` x2,
-`heritage`, `utilities`, `planning`) → `report.build_report()`.
+Flow (CLI): `autoaddress.resolve()` → `geocode.geocode()` →
+`pipeline.run()` (every section concurrently via `ThreadPoolExecutor`,
+`boundary` from a single-point `cadastral.get_boundary()`) →
+`report.build_report()`.
+
+Flow (web UI) — deliberately different, to hide backend latency behind the
+plot-confirmation step rather than making the user wait for one big
+response:
+1. `POST /api/scout` (or `/choose`, for disambiguation) resolves the point
+   and returns quickly: `location` + `cadastral.get_nearby_parcels()`
+   (every parcel within 150m, flagging which one the point actually falls
+   in) + the list of section names to fetch next. No section data yet.
+2. The browser shows the plot picker (map, click to select/merge nearby
+   parcels — one property is often several registered parcels) and, at
+   the same time, fires `GET /api/scout/section/<name>` once per section
+   name, all in parallel — verified at 3.76s wall-clock for all 11
+   sections against the live server (was ~19s sequential before this
+   split), so in practice most/all of them land before the user's done
+   clicking. Each arriving section ticks its sidebar tile from a pending
+   (grey, pulsing) dot to its real status.
+3. "Confirm N plots" computes the boundary section client-side from
+   whatever got selected (`cadastral.summarise_selected_parcels()`'s JS
+   port in the template — no extra round-trip, the picker already has
+   full parcel geometry) and reveals it as the last tile to complete.
 
 ## Credentials
 
@@ -294,6 +326,14 @@ Not yet wired in / unresolved:
 
 ## Known limitations / TODO
 
+- [ ] **The shared `AUTOADDRESS_KEY` in `.env.example` started returning
+      401 Unauthorized as of 8 Sept 2026** (confirmed: same query worked
+      earlier in this project's history, now fails at the `/3.0/search`
+      step regardless of query). Likely expired/revoked on Autoaddress's
+      side, not a code regression — the app degrades rather than breaks
+      (falls back to geocoding the raw input directly, per `cli.py`/
+      `webapp.py`'s existing except-branches), but real address
+      disambiguation won't work until a fresh key is obtained.
 - [ ] Coordinate precision is area-level only (see saga above) — biggest
       open item. Either pursue Autoaddress backend/IP-allowlist access, or
       license ECAD directly. Note this also affects the new radius-based
