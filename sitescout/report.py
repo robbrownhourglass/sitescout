@@ -176,6 +176,11 @@ def print_report(report: dict) -> None:
         print(f"  Historic mine sites: {mines_count_label} within {mines.get('search_radius_m', 2000)}m ({mines['boundary_count']} mapped working(s))")
         for site in mines["sites"][:6]:
             print(f"    - {site['name']} ({site['commodity']})")
+        maj = e["major_industrial"]
+        maj_count_label = f"{maj['facility_count']}{'+' if maj.get('more_exist') else ''}"
+        print(f"  Major industrial facilities (EPA PRTR): {maj_count_label} within {maj.get('search_radius_m', 10000)}m")
+        for fac in maj["facilities"][:8]:
+            print(f"    - {fac['name']} — {fac['sector']}")
 
     if "geohazards" in s:
         g = s["geohazards"]
@@ -370,6 +375,11 @@ def _to_markdown(report: dict) -> str:
         lines.append(f"- Historic mine sites: {mines_count_label} within {mines.get('search_radius_m', 2000)}m ({mines['boundary_count']} mapped working(s))")
         for site in mines["sites"][:6]:
             lines.append(f"  - {site['name']} ({site['commodity']})")
+        maj = e["major_industrial"]
+        maj_count_label = f"{maj['facility_count']}{'+' if maj.get('more_exist') else ''}"
+        lines.append(f"- Major industrial facilities (EPA PRTR): {maj_count_label} within {maj.get('search_radius_m', 10000)}m")
+        for fac in maj["facilities"][:8]:
+            lines.append(f"  - {fac['name']} — {fac['sector']}")
         lines.append("")
 
     if "geohazards" in s:

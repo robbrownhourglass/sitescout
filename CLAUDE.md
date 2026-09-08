@@ -239,6 +239,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
 | RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
 | Environmental hazards (radon, closed landfills, licensed IPPC/IED facilities, historic mine sites) | EPA's own GeoServer (`gis.epa.ie/geoserver`), queried via WFS `GetFeature` (not WMS `GetFeatureInfo` like `wms.py`) | `epa.py` |
+| Major industrial facilities — incl. active mines/quarries (EPA PRTR) | EPA's Pollutant Release and Transfer Register, 9 sector `WFS` layers (`EPA:PRTR_*`) — Ireland's largest per-sector emitters only, searched at 10km (much wider than the other `epa.py` layers — see note below) | `epa.py` |
 | Landslide susceptibility | GSI `IE_GSI_Landslide_Susceptibility_Classification_50K_IE26_ITM` (national coverage, point-in-polygon) | `geohazards.py` |
 | Aquifer classification (bedrock + sand/gravel) | GSI `IE_GSI_Aquifer_Datasets_IE26_ITM` (layer 2 = bedrock aquifer, national coverage; layer 0 = sand/gravel, only some areas) | `geohazards.py` |
 | Karst features (springs, caves, turloughs, swallow holes) | GSI `IE_GSI_Karst_Datasets_40K_IE32_ITM` (layer 0) — radius search; text list only, see note below on why there's no map overlay | `geohazards.py` |
@@ -254,6 +255,29 @@ Landfill coords: 5,597 → 416 points. This is a real (disclosed) shape
 simplification, not full accuracy — good for "roughly where does this zone
 end" at site-scouting zoom levels, not a survey-grade boundary. Closed
 landfills and IPPC facilities are small enough not to need this.
+
+**Two different radii for "industrial facility nearby" — don't collapse
+them into one:** `get_ippc_facilities()` (any EPA-licensed premises,
+1km) and `get_major_industrial_facilities()` (EPA's PRTR register —
+Ireland's biggest per-sector emitters only, 10km) are deliberately
+separate lookups at deliberately different radii, both folded into the
+same `epa` section. Found this split was necessary after a real gap
+report: Boliden Tara Mines (Europe's largest zinc mine, still actively
+operating) sits in `IPPC_LicFacilities` with a "Licensed" status, but its
+own licensed-facility coordinate is over 4km from Navan town centre —
+well outside a 1km (or even 3km) radius. Blowing IPPC_SEARCH_RADIUS_M out
+to cover that isn't the right fix — it would flood every town's report
+with every small licensed premises (dry cleaners, print shops) within
+several km. PRTR is the right list to search wider: it's a EU
+emissions-reporting register that only includes facilities crossing a
+reporting threshold, confirmed nationally small per sector (16-166
+facilities each, 9 sectors) — confirmed live that a 10km radius returns a
+sane, cappable count even in genuine industrial clusters (34 near Cork
+Harbour, 69 in dense Dublin city centre — both fine capped/paginated like
+every other list here). Each PRTR feature carries its own "Main PRTR
+Sector" attribute as a ready-made human label (e.g. "Mineral industry" for
+Tara Mines, "Chemical industry", "Energy sector", etc.) — used directly
+rather than re-deriving a category from the layer name.
 
 **How the second batch above (SMR Zones, NIAH, planning applications, flood
 risk, ecology) was found** — same "pull the JS apart" technique as the
@@ -297,20 +321,26 @@ app, rather than the documented-but-dead endpoints:
    paths, confirming the base URL is `gis.epa.ie/geoserver`. Its
    `GetCapabilities` lists a huge national environmental dataset (air
    quality, bathing water, mines, WFD water body status, etc.) — `epa.py`
-   uses four layers so far (radon, closed landfills, licensed IPPC
+   uses five layer-groups so far (radon, closed landfills, licensed IPPC
    facilities, historic/abandoned mine sites — `MINES_SiteLocation` +
-   `MINES_SiteBoundaries`), found by reading the layer names off that
-   capabilities list. Used its WFS `GetFeature` (not WMS `GetFeatureInfo`)
-   since it returns real vector features directly in WGS84 with
-   `srsName=EPSG:4326` — but the `bbox` filter param needs an explicit CRS
-   suffix (`bbox=minx,miny,maxx,maxy,EPSG:4326`) or GeoServer silently
-   interprets the numbers in the layer's native storage CRS (Irish
-   Transverse Mercator) instead, and the query just returns zero features
-   — no error, reads exactly like "nothing nearby." Confirmed by testing
-   against a real landfill's own centroid and still getting zero results
-   until the suffix was added. WFD water body status (river/lake/coastal
-   ecological status) is a large, still-unused category on this same
-   capabilities list — a candidate for a future integration.
+   `MINES_SiteBoundaries` — and the 9-sector PRTR register), found by
+   reading the layer names off that capabilities list. Used its WFS
+   `GetFeature` (not WMS `GetFeatureInfo`) since it returns real vector
+   features directly in WGS84 with `srsName=EPSG:4326` — but the `bbox`
+   filter param needs an explicit CRS suffix
+   (`bbox=minx,miny,maxx,maxy,EPSG:4326`) or GeoServer silently interprets
+   the numbers in the layer's native storage CRS (Irish Transverse
+   Mercator) instead, and the query just returns zero features — no error,
+   reads exactly like "nothing nearby." Confirmed by testing against a
+   real landfill's own centroid and still getting zero results until the
+   suffix was added. The PRTR sector layers (`EPA:PRTR_Mineral_industry`,
+   `EPA:PRTR_Chemical_industry`, etc. — see the "Two different radii" note
+   above for why they're a separate, wider-radius lookup from
+   IPPC_LicFacilities) were found the same way, after `IPPC_LicFacilities`
+   alone missed an actively-operating major mine a user reported nearby.
+   WFD water body status (river/lake/coastal ecological status) is still a
+   large, unused category on this same capabilities list — a candidate for
+   a future integration.
 8. `geohazards.py`'s four layers (landslide susceptibility, aquifer
    classification, karst features, groundwater source protection areas)
    needed none of the above reverse-engineering — gsi.geodata.gov.ie's own

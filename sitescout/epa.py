@@ -50,10 +50,44 @@ IPPC_LAYER = "EPA:IPPC_LicFacilities"
 MINES_SITES_LAYER = "EPA:MINES_SiteLocation"
 MINES_BOUNDARIES_LAYER = "EPA:MINES_SiteBoundaries"
 
+# EPA's Pollutant Release and Transfer Register (PRTR) — the EU-mandated
+# annual emissions-reporting register, which only covers Ireland's largest
+# per-sector emitters (thresholds set in the E-PRTR Regulation), split
+# across 9 sector layers on this GeoServer. Found the same way as MINES_*
+# above — reading layer names off GetCapabilities — after a real gap
+# surfaced: an actively-operating major facility (Boliden Tara Mines,
+# Europe's largest zinc mine) sits in IPPC_LicFacilities (below) but its
+# own licensed-facility point is over 4km from the town centre most people
+# would search near it — well outside IPPC_SEARCH_RADIUS_M. Rather than
+# blow that radius out for every facility (which would flood a search in
+# any town with every small licensed premises within several km), PRTR
+# gives a *separate*, much smaller, curated list — confirmed nationally
+# small per sector (16 to 166 facilities each) — that's genuinely safe to
+# search at a much wider radius. Each PRTR feature carries its own
+# "Main PRTR Sector" attribute as a clean human label (e.g. "Mineral
+# industry" for Tara Mines) — used directly rather than re-deriving a
+# label from the layer name.
+PRTR_SECTOR_LAYERS = [
+    "EPA:PRTR_Mineral_industry",
+    "EPA:PRTR_Chemical_industry",
+    "EPA:PRTR_Energy_sector",
+    "EPA:PRTR_Production_and_processing_of_metals",
+    "EPA:PRTR_Waste_and_waste_water_management",
+    "EPA:PRTR_Animal_and_vegetable_products_from_the_food_and_beverage_sector",
+    "EPA:PRTR_Intensive_livestock_production_and_aquaculture",
+    "EPA:PRTR_Paper_and_wood_production_and_processing",
+    "EPA:PRTR_Other_activities",
+]
+
 RADON_SEARCH_HALF_M = 100         # one classification per area; a small buffer reliably hits the polygon at the point
 LANDFILLS_SEARCH_RADIUS_M = 1000  # landfills can have a wider zone of influence than their mapped boundary
 IPPC_SEARCH_RADIUS_M = 1000
 MINES_SEARCH_RADIUS_M = 2000      # historic mine workings can spread well beyond a single mapped boundary — confirmed at Silvermines, Co. Tipperary
+# Confirmed live: 10km around Cork Harbour (a genuine heavy-industry
+# cluster) returns 34 PRTR facilities across all 9 sectors combined, dense
+# Dublin city centre returns 69 — both display fine capped/paginated like
+# every other list in this app, nothing close to unusable.
+PRTR_SEARCH_RADIUS_M = 10000
 
 
 def _bbox_around(lat: float, lon: float, half_m: float) -> str:
@@ -277,16 +311,64 @@ def get_historic_mines(lat: float, lon: float) -> dict:
     }
 
 
+def get_major_industrial_facilities(lat: float, lon: float) -> dict:
+    """Ireland's largest per-sector emitters (EPA's PRTR register), searched
+    at a much wider radius than get_ippc_facilities() above — see
+    PRTR_SEARCH_RADIUS_M's comment for why a single shared radius doesn't
+    work for both "any licensed premises nearby" and "is there a major
+    active industrial or mining operation in the wider area".
+    """
+    log.info("Querying EPA PRTR major industrial facilities (9 sectors) within %dm…", PRTR_SEARCH_RADIUS_M)
+    facilities = []
+    more_exist = False
+    for layer in PRTR_SECTOR_LAYERS:
+        data = _wfs_query(layer, lat, lon, PRTR_SEARCH_RADIUS_M, max_features=25)
+        for f in data["features"]:
+            p = f["properties"]
+            flat, flon = _first_point(f.get("geometry"))
+            facilities.append({
+                "name": p.get("Name"),
+                "sector": p.get("Main PRTR Sector"),
+                "reg_no": p.get("Reg No."),
+                "county": p.get("County"),
+                "latest_reporting_year": p.get("Latest Year"),
+                "lat": flat,
+                "lon": flon,
+            })
+        if data.get("numberMatched", 0) > data.get("numberReturned", 0):
+            more_exist = True
+    facilities.sort(key=lambda f: f["name"] or "")
+    log.info(
+        "-> %d major industrial facility(ies) (PRTR) within %dm%s",
+        len(facilities), PRTR_SEARCH_RADIUS_M, " (capped, more exist)" if more_exist else "",
+    )
+    for fac in facilities[:8]:
+        log.info("   - %s (%s)", fac["name"], fac["sector"])
+    return {
+        "facility_count": len(facilities),
+        "facilities": facilities,
+        "more_exist": more_exist,
+        "search_radius_m": PRTR_SEARCH_RADIUS_M,
+        "source": "EPA Pollutant Release and Transfer Register (PRTR)",
+        "caveat": "PRTR only lists facilities large enough to cross EU emissions-reporting thresholds — "
+                  "Ireland's biggest per-sector operations (major mines, power stations, chemical plants, "
+                  "large waste/food-processing sites), not every licensed premises. See the Environmental "
+                  "hazards section above for smaller nearby licensed facilities within a tighter radius.",
+    }
+
+
 def get_environmental_hazards(lat: float, lon: float) -> dict:
     """One combined section — radon + closed landfills + licensed
-    industrial facilities + historic mine sites — mirroring ecology.py's
-    pattern of bundling several related EPA/NPWS layers behind one report
-    section/sidebar tile rather than several separate ones.
+    industrial facilities + historic mine sites + major industrial
+    facilities (PRTR) — mirroring ecology.py's pattern of bundling several
+    related EPA/NPWS layers behind one report section/sidebar tile rather
+    than several separate ones.
     """
     return {
         "radon": get_radon_risk(lat, lon),
         "landfills": get_closed_landfills(lat, lon),
         "ippc": get_ippc_facilities(lat, lon),
         "mines": get_historic_mines(lat, lon),
+        "major_industrial": get_major_industrial_facilities(lat, lon),
         "source": "Environmental Protection Agency (EPA), gis.epa.ie",
     }
