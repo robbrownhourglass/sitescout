@@ -223,6 +223,20 @@ def print_report(report: dict) -> None:
         print("\n-- Utilities (request-based, no open API) --")
         print(f"  Electricity -> {u['electricity']['to']}")
         print(f"  Water/wastewater -> {u['water_wastewater']['to']}")
+        grid = u.get("grid")
+        if grid:
+            print("\n-- Transmission grid (EirGrid) --")
+            ns = grid["nearest_station"]
+            if ns:
+                print(f"  Nearest substation: {ns['name']} ({ns['voltage']}), ~{ns['distance_m']}m away")
+            else:
+                print(f"  No substation within {grid['station_search_radius_m']}m")
+            print(f"  {len(grid['lines'])} overhead line(s), {len(grid['cables'])} underground cable(s) within {grid['line_search_radius_m']}m")
+            if grid["likely_crossing"]:
+                print("  ⚠ A transmission line or cable likely crosses or closely borders this site")
+            if grid["committed_stations"] or grid["committed_lines"]:
+                print(f"  {len(grid['committed_stations'])} committed (planned) station(s), {len(grid['committed_lines'])} committed line(s)/cable(s) nearby")
+            print(f"  {grid['caveat']}")
 
     if "planning" in s:
         p = s["planning"]
@@ -443,6 +457,21 @@ def _to_markdown(report: dict) -> str:
         lines.append(f"- Electricity: {u['electricity']['to']}")
         lines.append(f"- Water/wastewater: {u['water_wastewater']['to']}")
         lines.append("")
+        grid = u.get("grid")
+        if grid:
+            lines.append("## Transmission grid (EirGrid)")
+            ns = grid["nearest_station"]
+            if ns:
+                lines.append(f"- Nearest substation: {ns['name']} ({ns['voltage']}), ~{ns['distance_m']}m away")
+            else:
+                lines.append(f"- No substation within {grid['station_search_radius_m']}m")
+            lines.append(f"- {len(grid['lines'])} overhead line(s), {len(grid['cables'])} underground cable(s) within {grid['line_search_radius_m']}m")
+            if grid["likely_crossing"]:
+                lines.append("- ⚠ A transmission line or cable likely crosses or closely borders this site")
+            if grid["committed_stations"] or grid["committed_lines"]:
+                lines.append(f"- {len(grid['committed_stations'])} committed (planned) station(s), {len(grid['committed_lines'])} committed line(s)/cable(s) nearby")
+            lines.append(f"> {grid['caveat']}")
+            lines.append("")
 
     if "planning" in s:
         p = s["planning"]

@@ -28,7 +28,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from . import cadastral, ecology, epa, geohazards, gsi, heritage, rps, utilities, planning, report, water_quality
+from . import cadastral, ecology, eirgrid, epa, geohazards, gsi, heritage, rps, utilities, planning, report, water_quality
 
 log = logging.getLogger("sitescout.pipeline")
 
@@ -36,6 +36,19 @@ log = logging.getLogger("sitescout.pipeline")
 def _planning_applications(lat: float, lon: float, eircode: str | None) -> dict:
     data = planning.get_planning_applications(lat, lon, eircode)
     attach_boundaries(data)
+    return data
+
+
+def _utilities(lat: float, lon: float, label: str) -> dict:
+    """utilities.draft_requests() (ESB/Uisce Éireann, request-based, no
+    open data) plus eirgrid.get_transmission_grid() (EirGrid's own public
+    transmission network data) under one "utilities" section — both are
+    the electricity/water theme, just one drafts an email and the other
+    has real live data, same as planning.py bundling live applications
+    with a zoning link-out under one "planning" theme.
+    """
+    data = utilities.draft_requests(lat, lon, label)
+    data["grid"] = eirgrid.get_transmission_grid(lat, lon)
     return data
 
 
@@ -76,7 +89,7 @@ SECTION_SPECS = {
     "epa": lambda lat, lon, eircode, label: epa.get_environmental_hazards(lat, lon),
     "geohazards": lambda lat, lon, eircode, label: geohazards.get_geohazards(lat, lon),
     "water_quality": lambda lat, lon, eircode, label: water_quality.get_water_body_status(lat, lon),
-    "utilities": lambda lat, lon, eircode, label: utilities.draft_requests(lat, lon, label or ""),
+    "utilities": lambda lat, lon, eircode, label: _utilities(lat, lon, label or ""),
     "planning": lambda lat, lon, eircode, label: planning.get_planning_links(lat, lon),
 }
 
