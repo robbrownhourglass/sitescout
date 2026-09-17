@@ -49,6 +49,9 @@ sitescout/
   arcgis.py                 shared helper for querying Esri ArcGIS REST layers by point
   wms.py                    shared helper for OPW's flood-map GeoServer (WMS GetFeatureInfo,
                              Web Mercator <-> WGS84 reprojection) — see planning.get_flood_risk()
+  wfs.py                    shared helper for EPA's GeoServer (gis.epa.ie) via WFS GetFeature —
+                             extracted from epa.py once water_quality.py needed the same
+                             bbox+CRS-suffix query primitive (see its own gotcha note)
   gsi.py                    geology (bedrock, subsoil) + groundwater vulnerability
   heritage.py               archaeology (SMR), SMR Zones (notification zones), NIAH (protected
                              structures) — all National Monuments Service ArcGIS layers
@@ -61,6 +64,10 @@ sitescout/
                              karst features, and groundwater source protection areas — all off
                              the same GSI ArcGIS server gsi.py already uses, just further-out
                              service folders (Geohazards, more of Groundwater) on that same server
+  water_quality.py          Water Framework Directive (WFD) status — groundwater body + nearby
+                             river/lake/coastal/transitional water bodies — off the same EPA
+                             GeoServer as epa.py, via wfs.py; its own section/tile, not folded
+                             into epa.py's already-crowded environmental hazards card
   local_authority.py        resolves a point to its city/county council (Tailte Éireann boundaries)
   rps.py                    RPS/ACA (statutory protected structures/conservation areas) —
                              per-local-authority, only 4 of 31 wired in so far; see rps.SOURCES
@@ -71,8 +78,10 @@ sitescout/
   utilities.py              drafts ESB/Uisce Éireann data-request emails (no open API exists)
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
-                             CFRAM via wms.py), live; zoning stays a link-out (radon moved to
-                             epa.py — see below, it's live now too, don't re-add it here)
+                             CFRAM via wms.py — fluvial/coastal/pluvial x current/mid-future/
+                             high-future, 21 layers total, queried concurrently), live; zoning
+                             stays a link-out (radon moved to epa.py — see below, it's live now
+                             too, don't re-add it here)
   pipeline.py               shared section logic: SECTION_SPECS / run_section() runs one named
                              section at a time (used by the web UI's per-section endpoint);
                              run() runs all of them via a ThreadPoolExecutor for the CLI's
@@ -234,7 +243,8 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Protected structures (NIAH) | `NIAHBuildings` `FeatureServer`, same ArcGIS org as SMR above | `heritage.py` |
 | Property boundary | Tailte Éireann `Cadastral_Parcels_Freehold` (layer 12) / `Cadastral_Parcels_Leasehold` (layer 13) | `cadastral.py` |
 | Planning applications | National Planning Application Database `FeatureServer` (`IrishPlanningApplications_FVLayer`) — 500m radius search plus a bonus exact-Eircode match via `arcgis.attribute_query()` | `planning.py` |
-| Flood risk (fluvial/coastal) | OPW CFRAM predictive flood-extent maps, GeoServer WMS `GetFeatureInfo` on floodinfo.ie's own server | `planning.py` + `wms.py` |
+| Flood risk (fluvial/coastal/pluvial, current + future climate) | OPW CFRAM predictive flood-extent maps, GeoServer WMS `GetFeatureInfo` on floodinfo.ie's own server — 21 layers (3 hazards x up to 3 scenarios x 3 AEP bands), queried concurrently | `planning.py` + `wms.py` |
+| Water body status (groundwater + river/lake/coastal/transitional) | EPA WFD `*_WFD_LatestStatus` layers (`GWB_WFD_LatestStatus`, `RWB_WFD_LatestStatus`, etc.) — each carries geometry AND status in one query | `water_quality.py` + `wfs.py` |
 | Ecology (SAC/SPA/NHA/pNHA) | NPWS `NPWSDesignatedAreas` `FeatureServer` (4 layers, one national dataset — unlike RPS/ACA, which are per-local-authority) | `ecology.py` |
 | Local authority (which council a point is in) | Tailte Éireann `Administrative_Areas___OSi_National_Statutory_Boundaries` `FeatureServer` | `local_authority.py` |
 | RPS / ACA (4 of 31 local authorities) | Per-authority ArcGIS `FeatureServer`s — South Dublin, Wicklow, Fingal (ACA only), Cork City (RPS only); routing table in `rps.SOURCES` | `rps.py` |
@@ -363,6 +373,33 @@ app, rather than the documented-but-dead endpoints:
    silently wrong pins, so karst features are reported as a text list only
    (type + name), not drawn as points. Don't "fix" this by adding lat/lon
    fields back without also adding and testing a real ITM→WGS84 transform.
+9. Flood risk's expansion (fluvial/coastal/pluvial x current/mid/high-future)
+   needed no new reverse-engineering either — floodinfo.ie's GeoServer
+   `GetCapabilities` (`GET /geoserver/wms?service=WMS&version=1.1.1&request=GetCapabilities`)
+   lists every layer directly, decodable from the naming convention already
+   known from the current-climate layers already in use:
+   `ext_{hazard}_{scenario}_{AEP}` (hazard: f/c/p = fluvial/coastal/pluvial;
+   scenario: c/m/h = current/mid-future/high-future). Pluvial only exists at
+   current climate — no `ext_p_m_*`/`ext_p_h_*` in the capabilities list.
+   Confirmed each new layer live before wiring in: mid/high-future fluvial
+   hit at Fermoy (a known flood-prone town) even past current-climate's
+   extent; pluvial hit in Dublin city centre; coastal high-future hit at
+   Cork city centre. Also present on this GeoServer but still unused: the
+   `nat_depth_2m_*` raster depth-grid layers (see "Not yet wired in" below).
+10. `water_quality.py`'s WFD layers were found while re-checking EPA's
+    GeoServer capabilities for the PRTR work (item 7) — a huge family of
+    `WFD_*` layers exists (per-cycle historical status, individual
+    pressures like agriculture/urban runoff/industry, catchment/basin
+    boundaries, bathing water, salmonid waters, shellfish waters, etc. —
+    still mostly unused). `*_WFD_LatestStatus` (`GWB_`/`RWB_`/`LWB_`/`CWB_`/
+    `TWB_` prefixes for groundwater/river/lake/coastal/transitional) were
+    picked specifically because each one already carries both geometry and
+    a plain-English current status in a single query — most of the other
+    WFD layers need a separate boundary-layer + status-table join by ID,
+    which would be real extra work for less payoff. Confirmed real status
+    variation live, not just a single value: sampled 200 river water
+    bodies within 50km of Dublin and got 79 Poor / 71 Moderate / 48 Good /
+    2 High — this isn't a dataset that always says "Good".
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
@@ -396,10 +433,14 @@ Not yet wired in / unresolved:
   confirmed these are genuinely not open data (security-sensitive
   underground infrastructure). `utilities.py` drafts the actual request
   emails rather than pretending to have live data.
-- Flood risk only queries the **current-climate** CFRAM layers (3 fluvial +
-  3 coastal probability bands). Future-scenario and depth-grid layers exist
-  on the same GeoServer (see `floodmap.js` on floodinfo.ie) but aren't
-  queried — would be straightforward to add via `wms.py` if needed.
+- Flood risk now covers fluvial/coastal/pluvial across current + mid/high
+  future climate scenarios (21 layers — see `planning.FLOOD_LAYERS`).
+  **Depth-grid layers** (`nat_depth_2m_*` — a raster giving an actual depth
+  in metres, not just extent, at current climate only) are still unused —
+  found on the same `GetCapabilities` listing, not yet queried. Would need
+  a different WMS response handling than `GetFeatureInfo`'s vector-polygon
+  path (`wms.py` currently assumes a vector hit) — check the response shape
+  before assuming it's a drop-in extension.
 - **RPS & ACA — done, but only for 4 of 31 local authorities**
   (`rps.py` + `local_authority.py`). The spreadsheet's "GREEN" rows turned
   out to overstate readiness once actually checked: several are a static

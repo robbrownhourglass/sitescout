@@ -285,6 +285,7 @@ const CATEGORY_COLORS = {
   rpsAca: '#1f6f78',
   epa: '#c1440e',
   geohazards: '#8a6d3b',
+  waterQuality: '#2a7f9e',
 };
 
 // Small self-contained line-icon set for the tile strip — one glyph per
@@ -361,6 +362,13 @@ const TILE_ICONS = {
   geohazards: `<svg ${ICON_ATTRS}>
       <path d="M3 18 9 8l3.5 5L15 9l6 9Z"/>
       <path d="M9 8l1.6 3.6-2 2.4 2.2 1.6-1.8 2.4"/>
+    </svg>`,
+  // a winding river — water body status (distinct from the plain droplet
+  // used for groundwater vulnerability/flood risk)
+  waterQuality: `<svg ${ICON_ATTRS}>
+      <path d="M3 6c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
+      <path d="M3 12c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
+      <path d="M3 18c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
     </svg>`,
 };
 
@@ -669,14 +677,38 @@ function buildPlanningBoundariesLayer(p){
   return group;
 }
 
+function floodBandColor(band){
+  return band === 'High' ? CATEGORY_COLORS.floodHigh
+    : band === 'Medium' ? CATEGORY_COLORS.floodMedium
+    : CATEGORY_COLORS.floodLow;
+}
+
+// Split into two overlays by scenario rather than one combined layer —
+// current-climate is the "headline" toggle (solid outline); future-climate
+// scenarios (mid-range/high-end climate change) are a separate, dashed
+// opt-in layer, since they're a different kind of claim ("could look like
+// this later") from current-climate's "this is indicative of today". Same
+// severity color scheme (High/Medium/Low) drives both; pluvial (surface
+// water) shares that scheme too rather than getting its own color, since
+// severity is the more useful signal than which of the three mechanisms
+// caused it — the popup label still says which hazard it is.
 function buildFloodLayer(f){
   const group = L.layerGroup();
-  (f && f.features || []).forEach(feat => {
-    const color = feat.band === 'High' ? CATEGORY_COLORS.floodHigh
-      : feat.band === 'Medium' ? CATEGORY_COLORS.floodMedium
-      : CATEGORY_COLORS.floodLow;
+  (f && f.features || []).filter(feat => feat.scenario === 'current').forEach(feat => {
     geometryToRingSets(feat.geometry).forEach(ringSet => {
-      L.polygon(ringSet, { color, weight: 1, fillOpacity: 0.15, pane: 'polygonsPane' })
+      L.polygon(ringSet, { color: floodBandColor(feat.band), weight: 1, fillOpacity: 0.15, pane: 'polygonsPane' })
+        .bindPopup(`<strong>${feat.label}</strong><br>Band: ${feat.band}`)
+        .addTo(group);
+    });
+  });
+  return group;
+}
+
+function buildFloodFutureLayer(f){
+  const group = L.layerGroup();
+  (f && f.features || []).filter(feat => feat.scenario !== 'current').forEach(feat => {
+    geometryToRingSets(feat.geometry).forEach(ringSet => {
+      L.polygon(ringSet, { color: floodBandColor(feat.band), weight: 1, fillOpacity: 0.08, dashArray: '4 3', pane: 'polygonsPane' })
         .bindPopup(`<strong>${feat.label}</strong><br>Band: ${feat.band}`)
         .addTo(group);
     });
@@ -862,6 +894,47 @@ function buildSourceProtectionLayer(g){
   return group;
 }
 
+// EU WFD ecological status classes, best to worst — same badness ranking
+// as water_quality.py's STATUS_BADNESS_RANK, just mapped to a color here
+// instead of a number.
+function waterStatusColor(status){
+  return status === 'Bad' ? CATEGORY_COLORS.floodHigh
+    : status === 'Poor' ? '#c1440e'
+    : status === 'Moderate' ? CATEGORY_COLORS.floodMedium
+    : CATEGORY_COLORS.waterQuality; // Good / High / unknown
+}
+
+// Water bodies mix geometry types — river reaches are MultiLineString,
+// lake/coastal/transitional/groundwater bodies are MultiPolygon — so this
+// draws whichever shape each feature actually has, unlike every other
+// overlay builder in this app (which only ever handles polygons).
+function buildWaterQualityLayer(wq){
+  const group = L.layerGroup();
+  if(!wq) return group;
+  const bodies = [...(wq.surface_water_bodies || [])];
+  if(wq.groundwater_body) bodies.push(Object.assign({ type: 'groundwater' }, wq.groundwater_body));
+  bodies.forEach(body => {
+    const geom = body.geometry;
+    if(!geom) return;
+    const color = waterStatusColor(body.status);
+    const popup = `<strong>${body.name || 'Water body'}</strong> <span class="muted">(${body.type})</span><br>WFD status: ${body.status || 'unknown'}`;
+    if(geom.type === 'MultiLineString'){
+      geom.coordinates.forEach(line => {
+        L.polyline(line.map(([lng, lat]) => [lat, lng]), { color, weight: 3, pane: 'polygonsPane' })
+          .bindPopup(popup)
+          .addTo(group);
+      });
+    } else {
+      geometryToRingSets(geom).forEach(ringSet => {
+        L.polygon(ringSet, { color, weight: 1.2, fillOpacity: 0.18, pane: 'polygonsPane' })
+          .bindPopup(popup)
+          .addTo(group);
+      });
+    }
+  });
+  return group;
+}
+
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
 // panel with that category's full detail — the "card" content is the same
@@ -966,6 +1039,7 @@ const TILE_SPECS = [
   { key: 'rpsAca', title: 'RPS & ACA', deps: ['rps_aca'], build: () => rpsAcaCard(sectionData.rps_aca) },
   { key: 'epa', title: 'Environmental hazards (EPA)', deps: ['epa'], build: () => epaCard(sectionData.epa) },
   { key: 'geohazards', title: 'Geohazards & aquifer', deps: ['geohazards'], build: () => geohazardsCard(sectionData.geohazards) },
+  { key: 'waterQuality', title: 'Water body status (EPA WFD)', deps: ['water_quality'], build: () => waterQualityCard(sectionData.water_quality) },
   { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
   { key: 'utilities', title: 'Utilities', deps: ['utilities'], build: () => utilitiesCard(sectionData.utilities) },
 ];
@@ -994,7 +1068,10 @@ const SECTION_OVERLAY_BUILDERS = {
     ['Planning applications', buildPlanningLayer],
     ['Planning application boundaries', buildPlanningBoundariesLayer],
   ],
-  flood_risk: [['Flood extent (OPW)', buildFloodLayer]],
+  flood_risk: [
+    ['Flood extent, current climate (OPW)', buildFloodLayer],
+    ['Flood extent, future climate scenarios (OPW)', buildFloodFutureLayer],
+  ],
   ecology: [['Ecology (NPWS)', buildEcologyLayer]],
   rps_aca: [
     ['Protected structures (RPS)', buildRpsLayer],
@@ -1009,6 +1086,9 @@ const SECTION_OVERLAY_BUILDERS = {
   ],
   geohazards: [
     ['Source protection areas (GSI)', buildSourceProtectionLayer],
+  ],
+  water_quality: [
+    ['Water body status (EPA WFD)', buildWaterQualityLayer],
   ],
 };
 
@@ -1261,15 +1341,15 @@ function waterCard(w, flood){
     return card('Water table & flood risk', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   let floodIsHigh = false, floodIsMedium = false;
-  let fBand, cBand;
+  let fBand, cBand, pBand;
   if(flood){
-    fBand = flood.fluvial_probability; cBand = flood.coastal_probability;
-    floodIsHigh = fBand === 'High' || cBand === 'High';
-    floodIsMedium = !floodIsHigh && (fBand === 'Medium' || cBand === 'Medium');
+    fBand = flood.fluvial_probability; cBand = flood.coastal_probability; pBand = flood.pluvial_probability;
+    floodIsHigh = fBand === 'High' || cBand === 'High' || pBand === 'High';
+    floodIsMedium = !floodIsHigh && (fBand === 'Medium' || cBand === 'Medium' || pBand === 'Medium');
   }
   const vulnWarn = VULN_WARN_CODES.has(w.vulnerability_code);
   let verdictText, verdictCls;
-  if(floodIsHigh){ verdictText = 'High flood risk mapped at this point (fluvial or coastal)'; verdictCls = 'bad'; }
+  if(floodIsHigh){ verdictText = 'High flood risk mapped at this point (fluvial, coastal, or surface water)'; verdictCls = 'bad'; }
   else if(floodIsMedium || vulnWarn){ verdictText = floodIsMedium ? 'Moderate flood risk mapped at this point' : 'Elevated groundwater vulnerability at this point'; verdictCls = 'warn'; }
   else if(w.vulnerability_code){ verdictText = 'No mapped flood risk; groundwater vulnerability not elevated'; verdictCls = 'ok'; }
   else { verdictText = 'No groundwater or flood-risk data returned at this exact point'; verdictCls = 'warn'; }
@@ -1277,8 +1357,13 @@ function waterCard(w, flood){
   let html = verdict(verdictText, verdictCls);
   html += `<div style="margin-top:8px"><strong>Groundwater vulnerability:</strong> ${w.vulnerability_category || '<span class="muted">no data at this exact point</span>'}</div>`;
   if(flood){
-    html += `<div style="margin-top:6px"><strong>Fluvial (river) flood risk:</strong> ${fBand || '<span class="muted">not mapped at this point</span>'}</div>`;
-    html += `<div style="margin-top:6px"><strong>Coastal flood risk:</strong> ${cBand || '<span class="muted">not mapped at this point</span>'}</div>`;
+    html += `<div style="margin-top:6px"><strong>Fluvial (river) flood risk:</strong> ${fBand || '<span class="muted">not mapped at this point</span>'} <span class="muted">(current climate)</span></div>`;
+    html += `<div style="margin-top:6px"><strong>Coastal flood risk:</strong> ${cBand || '<span class="muted">not mapped at this point</span>'} <span class="muted">(current climate)</span></div>`;
+    html += `<div style="margin-top:6px"><strong>Pluvial (surface water) flood risk:</strong> ${pBand || '<span class="muted">not mapped at this point</span>'} <span class="muted">(current climate)</span></div>`;
+    const mf = flood.future_scenarios.mid_future, hf = flood.future_scenarios.high_future;
+    html += `<div style="margin-top:10px" class="muted">Future climate scenarios (fluvial / coastal):</div>`;
+    html += `<div style="margin-top:2px">Mid-range: ${mf.fluvial_probability || 'not mapped'} / ${mf.coastal_probability || 'not mapped'}</div>`;
+    html += `<div style="margin-top:2px">High-end: ${hf.fluvial_probability || 'not mapped'} / ${hf.coastal_probability || 'not mapped'}</div>`;
   }
   const dot = verdictCls === 'bad' ? 'bad' : verdictCls;
   return card('Water table & flood risk', dot, 'Live', 'live', html,
@@ -1542,6 +1627,44 @@ function geohazardsCard(g){
     'Source: <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a> — Landslide Susceptibility, Aquifer, Karst &amp; Groundwater Source Protection datasets');
 }
 
+const WFD_STATUS_ORDER = ['High', 'Good', 'Moderate', 'Poor', 'Bad'];
+
+function waterQualityCard(wq){
+  if(!wq){
+    return card('Water body status (EPA WFD)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const gw = wq.groundwater_body;
+  const surfaceBodies = wq.surface_water_bodies || [];
+
+  let verdictText;
+  if(wq.worst_status === 'Bad' || wq.worst_status === 'Poor'){
+    const worstBody = surfaceBodies.find(b => b.status === wq.worst_status) || (gw && gw.status === wq.worst_status ? gw : null);
+    verdictText = `${wq.worst_status} WFD status nearby${worstBody ? ` — ${worstBody.name}` : ''}`;
+  } else if(wq.worst_status === 'Moderate'){
+    verdictText = `Moderate WFD status is the worst nearby (${surfaceBodies.length} water body(ies) checked)`;
+  } else if(wq.worst_status){
+    verdictText = `No degraded water bodies nearby — best status found: ${wq.worst_status}`;
+  } else {
+    verdictText = 'No WFD status data returned nearby';
+  }
+  const verdictCls = wq.severity;
+
+  let html = verdict(verdictText, verdictCls);
+
+  html += `<div style="margin-top:10px"><strong>Groundwater body:</strong> ${gw ? `${gw.name} — ${gw.status}` : '<span class="muted">no data at this exact point</span>'}</div>`;
+
+  html += `<div style="margin-top:10px"><strong>${surfaceBodies.length} nearby surface water body(ies)</strong></div>`;
+  if(surfaceBodies.length){
+    const sorted = [...surfaceBodies].sort((a, b) => WFD_STATUS_ORDER.indexOf(b.status) - WFD_STATUS_ORDER.indexOf(a.status));
+    html += '<ul>' + sorted.slice(0, 8).map(b =>
+      `<li>${b.type.charAt(0).toUpperCase() + b.type.slice(1)}: ${b.name} <span class="muted">(${b.status || 'unknown'})</span></li>`
+    ).join('') + '</ul>';
+  }
+
+  return card('Water body status (EPA WFD)', verdictCls, 'Live', 'live', html,
+    'Source: <a href="https://www.epa.ie" target="_blank">EPA</a> Water Framework Directive (WFD) water body status — groundwater, river, lake, coastal &amp; transitional');
+}
+
 function mailto(to, subject, body){
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
@@ -1620,7 +1743,7 @@ function buildInfoCard(){
       <li>Property boundary — <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels; legal folio &amp; filed plan via <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a></li>
       <li>Bedrock &amp; subsoil geology — <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a></li>
       <li>Groundwater vulnerability — GSI Groundwater Vulnerability map</li>
-      <li>Flood risk — OPW CFRAM predictive flood-extent maps, live via <a href="https://www.floodinfo.ie" target="_blank">floodinfo.ie</a>'s own GeoServer</li>
+      <li>Flood risk — OPW CFRAM predictive flood-extent maps, live via <a href="https://www.floodinfo.ie" target="_blank">floodinfo.ie</a>'s own GeoServer: fluvial, coastal, and pluvial (surface water) hazards, each across current-climate plus mid-range and high-end future-climate scenarios (pluvial has no future scenario in this dataset)</li>
       <li>Archaeology — National Monuments Service Sites &amp; Monuments Record (SMR)</li>
       <li>SMR Zones — archaeological notification zones, from the National Monuments Service's Historic Environment Viewer</li>
       <li>Protected structures — <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>; also see <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a></li>
@@ -1631,12 +1754,13 @@ function buildInfoCard(){
       <li>RPS &amp; ACA (statutory protected structures / conservation areas) — live for South Dublin, Wicklow, Fingal (ACA only), and Cork City (RPS only) so far; each of Ireland's 31 local authorities publishes its own, most as plan text/PDF rather than a queryable service. Local authority resolved via Tailte Éireann's own administrative boundaries.</li>
       <li>Environmental hazards — radon risk, closed/historic landfills, licensed IPPC/IED industrial facilities, historic/abandoned mine sites, and major industrial facilities (active mines, quarries, power stations, chemical plants etc. — EPA's Pollutant Release and Transfer Register, searched at a much wider 10km radius since these can matter well beyond a site's immediate area), all live via the <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA's own GeoServer</a> (gis.epa.ie). Radon was link-out only until this was found.</li>
       <li>Geohazards &amp; aquifer — landslide susceptibility, bedrock &amp; sand/gravel aquifer classification, karst features (springs, caves, turloughs, swallow holes), and public water supply / group water scheme source protection areas, all live via <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a>'s own ArcGIS server — the same one already used for bedrock/subsoil/groundwater vulnerability above.</li>
+      <li>Water body status — Water Framework Directive (WFD) ecological/chemical status classification (High/Good/Moderate/Poor/Bad) for the groundwater body a site sits above, plus any nearby river, lake, coastal, or transitional (estuarine) water bodies, live via the same <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA GeoServer</a> as the environmental hazards section above.</li>
     </ol>
     <h4>Limitations &amp; caveats</h4>
     <ul style="padding-left:18px;margin:0;font-size:12.5px;color:var(--muted)">
       <li>This is a demo — coordinates are area/postcode-level approximations, not exact per-building locations, so every result on this page inherits that imprecision.</li>
       <li>Property boundary is Tailte Éireann's mapped extent of a registered title, not a legally guaranteed boundary; unregistered titles won't appear. Legal folio &amp; filed plan: <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a>.</li>
-      <li>Flood risk is indicative only (current-climate CFRAM scenario) — not a substitute for a site-specific Flood Risk Assessment; "not mapped" doesn't mean "safe."</li>
+      <li>Flood risk is indicative only (CFRAM modelling) — not a substitute for a site-specific Flood Risk Assessment; "not mapped" doesn't mean "safe." Future-climate scenarios are separate, typically larger extents than the current-climate headline figure, not a refinement of it.</li>
       <li>NIAH rating is an architectural heritage assessment, not statutory protection in itself — RPS (a separate section) is the actual legal protection; a structure can be on either, both, or neither.</li>
       <li>Zoning designation isn't covered by any dataset queried here — check myplan.ie directly.</li>
       <li>Ecology: "not within" a designated area (2km search radius) doesn't mean Appropriate Assessment screening is off the table — it isn't strictly bounded by the designation's own boundary. Get a professional ecological assessment for anything borderline.</li>
@@ -1644,6 +1768,7 @@ function buildInfoCard(){
       <li>Proximity to a closed landfill, licensed facility, historic mine site, or major industrial facility is a due-diligence flag, not a determination — a site-specific assessment would confirm actual risk.</li>
       <li>Major industrial facilities (EPA PRTR) only lists Ireland's largest per-sector emitters, not every active mine, quarry, or factory — a smaller active operation nearby may not appear in this list even though it appears on the ground.</li>
       <li>Landslide susceptibility is a regional classification (1:50,000), not a site-specific geotechnical assessment — a "Low" rating doesn't rule out localised slope instability, and vice versa.</li>
+      <li>WFD water body status describes the whole water body (often several km of river, or a whole lake/estuary), not conditions at this exact point — relevant to nearby development or discharge, not a statement about the site itself.</li>
     </ul>`;
   return div;
 }
