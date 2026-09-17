@@ -218,6 +218,17 @@ def print_report(report: dict) -> None:
             print("  No nearby surface water bodies mapped")
         print(f"  {wq['caveat']}")
 
+    if "biodiversity" in s:
+        b = s["biodiversity"]
+        print(f"\n-- Species records (GBIF; {b['total_record_count']} occurrence record(s) within {b['search_radius_km']}km) --")
+        if b["threatened_species"]:
+            print(f"  ⚠ {b['threatened_count']} threatened species (IUCN Red List) recorded nearby:")
+            for sp in b["threatened_species"][:8]:
+                print(f"    - {sp['species']} ({sp['common_name'] or 'no common name'}) — {sp['category_label']}, last observed {sp['last_observed']}")
+        else:
+            print("  No threatened (IUCN VU/EN/CR) species recorded nearby")
+        print(f"  {b['caveat']}")
+
     if "utilities" in s:
         u = s["utilities"]
         print("\n-- Utilities (request-based, no open API) --")
@@ -449,6 +460,18 @@ def _to_markdown(report: dict) -> str:
         if not wq["surface_water_bodies"]:
             lines.append("- No nearby surface water bodies mapped")
         lines.append(f"> {wq['caveat']}")
+        lines.append("")
+
+    if "biodiversity" in s:
+        b = s["biodiversity"]
+        lines.append(f"## Species records (GBIF; {b['total_record_count']} occurrence record(s) within {b['search_radius_km']}km)")
+        if b["threatened_species"]:
+            lines.append(f"⚠ {b['threatened_count']} threatened species (IUCN Red List) recorded nearby:")
+            for sp in b["threatened_species"][:8]:
+                lines.append(f"- {sp['species']} ({sp['common_name'] or 'no common name'}) — {sp['category_label']}, last observed {sp['last_observed']}")
+        else:
+            lines.append("No threatened (IUCN VU/EN/CR) species recorded nearby")
+        lines.append(f"> {b['caveat']}")
         lines.append("")
 
     if "utilities" in s:
