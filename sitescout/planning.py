@@ -13,8 +13,11 @@ floodinfo.ie (see CLAUDE.md for the full writeup of how each was found):
   appeals) — same query shape as the rest of this app (`arcgis.py`).
 - Flood risk: floodinfo.ie's map viewer is a custom OpenLayers app calling
   OPW's own GeoServer directly — CFRAM predictive flood-extent polygons,
-  fluvial and coastal, at three probability bands each. Different query
-  shape (WMS `GetFeatureInfo`, not an ArcGIS point query) — see `wms.py`.
+  fluvial, coastal, and pluvial (surface water), at three probability
+  bands each, across current-climate plus mid/high-end future-climate
+  scenarios (fluvial/coastal only — pluvial has no future scenario in this
+  dataset). Different query shape (WMS `GetFeatureInfo`, not an ArcGIS
+  point query) — see `wms.py`.
 
 Zoning specifically (as opposed to planning application history) isn't in
 the NPAD dataset — Ireland's ~31 local authorities each publish their own
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -68,21 +72,47 @@ def _eircode_where_clause(field: str, eircode: str) -> Optional[str]:
     escape = lambda s: s.replace("'", "''")
     return f"{field} = '{escape(spaced)}' OR {field} = '{escape(unspaced)}'"
 
-# OPW's CFRAM predictive flood-extent layers, current climate scenario only
-# (future-scenario and depth-grid layers exist too — see floodmap.js on
-# floodinfo.ie — not wired in here to keep this to one clear headline
-# number per hazard type, matching OPW's own High/Medium/Low framing).
+# OPW's CFRAM predictive flood-extent layers. Found the full layer set by
+# querying floodinfo.ie's own GeoServer GetCapabilities directly (simpler
+# than re-deriving it from JS a second time) — it lists far more than the
+# current-climate-only set this app originally used:
+#   ext_{hazard}_{scenario}_{AEP} — hazard: f=fluvial, c=coastal, p=pluvial
+#   (surface water, a genuinely different flood mechanism, not previously
+#   covered at all); scenario: c=current climate, m=mid-range future,
+#   h=high-end future. Pluvial only has a current-climate scenario in this
+#   dataset (no ext_p_m_*/ext_p_h_* exist). Confirmed live: mid/high-future
+#   fluvial layers hit at Fermoy (a known flood-prone town) even where
+#   current-climate doesn't extend as far; pluvial hit in Dublin city
+#   centre; coastal mid-future hit at Cork city centre.
 # AEP = Annual Exceedance Probability. Bands per OPW's published thresholds:
-# fluvial High/Medium/Low = 10% / 1% / 0.1% AEP; coastal = 10% / 0.5% / 0.1%.
+# fluvial High/Medium/Low = 10% / 1% / 0.1% AEP; coastal = 10% / 0.5% / 0.1%;
+# pluvial uses the same 10% / 1% / 0.1% convention as fluvial.
 FLOOD_LAYERS = [
-    ("fluvial", "High", "esds_floodmaps:ext_f_c_0010", "Fluvial (river), 10% AEP — ~1-in-10-year event"),
-    ("fluvial", "Medium", "esds_floodmaps:ext_f_c_0100", "Fluvial (river), 1% AEP — ~1-in-100-year event"),
-    ("fluvial", "Low", "esds_floodmaps:ext_f_c_1000", "Fluvial (river), 0.1% AEP — ~1-in-1000-year event"),
-    ("coastal", "High", "esds_floodmaps:ext_c_c_0010", "Coastal, 10% AEP — ~1-in-10-year event"),
-    ("coastal", "Medium", "esds_floodmaps:ext_c_c_0200", "Coastal, 0.5% AEP — ~1-in-200-year event"),
-    ("coastal", "Low", "esds_floodmaps:ext_c_c_1000", "Coastal, 0.1% AEP — ~1-in-1000-year event"),
+    ("fluvial", "current", "High", "esds_floodmaps:ext_f_c_0010", "Fluvial (river), current climate, 10% AEP — ~1-in-10-year event"),
+    ("fluvial", "current", "Medium", "esds_floodmaps:ext_f_c_0100", "Fluvial (river), current climate, 1% AEP — ~1-in-100-year event"),
+    ("fluvial", "current", "Low", "esds_floodmaps:ext_f_c_1000", "Fluvial (river), current climate, 0.1% AEP — ~1-in-1000-year event"),
+    ("coastal", "current", "High", "esds_floodmaps:ext_c_c_0010", "Coastal, current climate, 10% AEP — ~1-in-10-year event"),
+    ("coastal", "current", "Medium", "esds_floodmaps:ext_c_c_0200", "Coastal, current climate, 0.5% AEP — ~1-in-200-year event"),
+    ("coastal", "current", "Low", "esds_floodmaps:ext_c_c_1000", "Coastal, current climate, 0.1% AEP — ~1-in-1000-year event"),
+    ("fluvial", "mid_future", "High", "esds_floodmaps:ext_f_m_0010", "Fluvial (river), mid-range future climate, 10% AEP"),
+    ("fluvial", "mid_future", "Medium", "esds_floodmaps:ext_f_m_0100", "Fluvial (river), mid-range future climate, 1% AEP"),
+    ("fluvial", "mid_future", "Low", "esds_floodmaps:ext_f_m_1000", "Fluvial (river), mid-range future climate, 0.1% AEP"),
+    ("fluvial", "high_future", "High", "esds_floodmaps:ext_f_h_0010", "Fluvial (river), high-end future climate, 10% AEP"),
+    ("fluvial", "high_future", "Medium", "esds_floodmaps:ext_f_h_0100", "Fluvial (river), high-end future climate, 1% AEP"),
+    ("fluvial", "high_future", "Low", "esds_floodmaps:ext_f_h_1000", "Fluvial (river), high-end future climate, 0.1% AEP"),
+    ("coastal", "mid_future", "High", "esds_floodmaps:ext_c_m_0010", "Coastal, mid-range future climate, 10% AEP"),
+    ("coastal", "mid_future", "Medium", "esds_floodmaps:ext_c_m_0200", "Coastal, mid-range future climate, 0.5% AEP"),
+    ("coastal", "mid_future", "Low", "esds_floodmaps:ext_c_m_1000", "Coastal, mid-range future climate, 0.1% AEP"),
+    ("coastal", "high_future", "High", "esds_floodmaps:ext_c_h_0010", "Coastal, high-end future climate, 10% AEP"),
+    ("coastal", "high_future", "Medium", "esds_floodmaps:ext_c_h_0200", "Coastal, high-end future climate, 0.5% AEP"),
+    ("coastal", "high_future", "Low", "esds_floodmaps:ext_c_h_1000", "Coastal, high-end future climate, 0.1% AEP"),
+    ("pluvial", "current", "High", "esds_floodmaps:ext_p_c_0010", "Pluvial (surface water), current climate, 10% AEP"),
+    ("pluvial", "current", "Medium", "esds_floodmaps:ext_p_c_0100", "Pluvial (surface water), current climate, 1% AEP"),
+    ("pluvial", "current", "Low", "esds_floodmaps:ext_p_c_1000", "Pluvial (surface water), current climate, 0.1% AEP"),
 ]
 BAND_RANK = {"High": 3, "Medium": 2, "Low": 1}
+HAZARDS = ("fluvial", "coastal", "pluvial")
+SCENARIOS = ("current", "mid_future", "high_future")
 
 
 def get_planning_links(lat: float, lon: float) -> dict:
@@ -189,38 +219,62 @@ def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = N
 
 
 def get_flood_risk(lat: float, lon: float) -> dict:
-    log.info("Querying OPW flood-extent maps (fluvial + coastal, current climate)…")
-    bands = {"fluvial": None, "coastal": None}
-    features = []
-    for hazard, band, layer, label in FLOOD_LAYERS:
+    """21 WMS layers total (see FLOOD_LAYERS) — up from the original 6
+    (current-climate fluvial+coastal only) once pluvial and future-climate
+    scenarios were added. Queried concurrently (ThreadPoolExecutor, same
+    pattern as pipeline.run()/cadastral.get_boundaries_for_points()) rather
+    than the old sequential loop, to keep this one section's response time
+    reasonable now that it's 3.5x the layer count.
+    """
+    log.info("Querying OPW flood-extent maps (%d layers: fluvial/coastal/pluvial x current/mid-future/high-future)…", len(FLOOD_LAYERS))
+
+    def _query(spec):
+        hazard, scenario, band, layer, label = spec
         try:
             hits = wms.get_feature_info(layer, lon, lat)
         except Exception as exc:
             log.warning("-> %s (%s) query failed: %s", label, layer, exc)
-            continue
-        if not hits:
-            continue
-        current_rank = BAND_RANK.get(bands[hazard], 0)
-        if BAND_RANK[band] > current_rank:
-            bands[hazard] = band
-        for hit in hits:
-            features.append({
-                "hazard": hazard,
-                "band": band,
-                "label": label,
-                "geometry": hit["geometry"],
-            })
-    for hazard, band in bands.items():
-        log.info("-> %s flood extent: %s", hazard, band or "not mapped at this point")
+            return spec, []
+        return spec, hits
+
+    # bands[scenario][hazard] -> highest band hit for that scenario+hazard
+    bands = {scenario: {hazard: None for hazard in HAZARDS} for scenario in SCENARIOS}
+    features = []
+    with ThreadPoolExecutor(max_workers=len(FLOOD_LAYERS)) as executor:
+        for spec, hits in executor.map(_query, FLOOD_LAYERS):
+            hazard, scenario, band, layer, label = spec
+            if not hits:
+                continue
+            current_rank = BAND_RANK.get(bands[scenario][hazard], 0)
+            if BAND_RANK[band] > current_rank:
+                bands[scenario][hazard] = band
+            for hit in hits:
+                features.append({
+                    "hazard": hazard, "scenario": scenario, "band": band,
+                    "label": label, "geometry": hit["geometry"],
+                })
+
+    for scenario in SCENARIOS:
+        for hazard in HAZARDS:
+            log.info("-> %s / %s: %s", scenario, hazard, bands[scenario][hazard] or "not mapped at this point")
+
+    current = bands["current"]
     return {
-        "fluvial_probability": bands["fluvial"],
-        "coastal_probability": bands["coastal"],
+        "fluvial_probability": current["fluvial"],
+        "coastal_probability": current["coastal"],
+        "pluvial_probability": current["pluvial"],
+        "future_scenarios": {
+            "mid_future": {"fluvial_probability": bands["mid_future"]["fluvial"], "coastal_probability": bands["mid_future"]["coastal"]},
+            "high_future": {"fluvial_probability": bands["high_future"]["fluvial"], "coastal_probability": bands["high_future"]["coastal"]},
+        },
         "features": features,
         "source": "OPW CFRAM predictive flood-extent maps (floodinfo.ie)",
         "caveat": (
-            "Indicative only, current-climate scenario, not a substitute for a site-specific "
-            "Flood Risk Assessment. CFRAM studies don't cover every watercourse or coastline in "
-            "Ireland — no result here means 'not mapped', not 'confirmed safe'. See floodinfo.ie "
-            "for future-scenario and depth-grid layers not queried here."
+            "Indicative only, not a substitute for a site-specific Flood Risk Assessment. CFRAM "
+            "studies don't cover every watercourse or coastline in Ireland — no result here means "
+            "'not mapped', not 'confirmed safe'. Pluvial (surface water) flooding only has a "
+            "current-climate scenario in this dataset; fluvial/coastal future scenarios (mid-range "
+            "and high-end climate change) are separate from and typically larger than the "
+            "current-climate extent shown as the headline figure."
         ),
     }

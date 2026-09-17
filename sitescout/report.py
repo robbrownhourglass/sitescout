@@ -113,9 +113,14 @@ def print_report(report: dict) -> None:
 
     if "flood_risk" in s:
         f = s["flood_risk"]
-        print("\n-- Flood risk (OPW CFRAM, current climate) --")
-        print(f"  Fluvial (river): {f['fluvial_probability'] or 'not mapped at this point'}")
-        print(f"  Coastal: {f['coastal_probability'] or 'not mapped at this point'}")
+        print("\n-- Flood risk (OPW CFRAM) --")
+        print(f"  Fluvial (river), current climate: {f['fluvial_probability'] or 'not mapped at this point'}")
+        print(f"  Coastal, current climate: {f['coastal_probability'] or 'not mapped at this point'}")
+        print(f"  Pluvial (surface water), current climate: {f['pluvial_probability'] or 'not mapped at this point'}")
+        for scenario, scenario_label in (("mid_future", "mid-range future"), ("high_future", "high-end future")):
+            fs = f["future_scenarios"][scenario]
+            print(f"  Fluvial, {scenario_label} climate: {fs['fluvial_probability'] or 'not mapped at this point'}")
+            print(f"  Coastal, {scenario_label} climate: {fs['coastal_probability'] or 'not mapped at this point'}")
         print(f"  {f['caveat']}")
 
     if "ecology" in s:
@@ -200,6 +205,18 @@ def print_report(report: dict) -> None:
             print(f"  ⚠ Within group water scheme zone of contribution: {sp['group_water_scheme_name']}")
         else:
             print(f"  Not within a mapped source protection area ({sp['nearby_count']} nearby within {sp['search_radius_m']}m)")
+
+    if "water_quality" in s:
+        wq = s["water_quality"]
+        print("\n-- Water body status (EPA WFD) --")
+        gw = wq["groundwater_body"]
+        if gw:
+            print(f"  Groundwater body: {gw['name']} — {gw['status']}")
+        for b in wq["surface_water_bodies"][:8]:
+            print(f"  {b['type'].capitalize()}: {b['name']} — {b['status']}")
+        if not wq["surface_water_bodies"]:
+            print("  No nearby surface water bodies mapped")
+        print(f"  {wq['caveat']}")
 
     if "utilities" in s:
         u = s["utilities"]
@@ -312,9 +329,14 @@ def _to_markdown(report: dict) -> str:
 
     if "flood_risk" in s:
         f = s["flood_risk"]
-        lines.append("## Flood risk (OPW CFRAM, current climate)")
-        lines.append(f"- Fluvial (river): {f['fluvial_probability'] or 'not mapped at this point'}")
-        lines.append(f"- Coastal: {f['coastal_probability'] or 'not mapped at this point'}")
+        lines.append("## Flood risk (OPW CFRAM)")
+        lines.append(f"- Fluvial (river), current climate: {f['fluvial_probability'] or 'not mapped at this point'}")
+        lines.append(f"- Coastal, current climate: {f['coastal_probability'] or 'not mapped at this point'}")
+        lines.append(f"- Pluvial (surface water), current climate: {f['pluvial_probability'] or 'not mapped at this point'}")
+        for scenario, scenario_label in (("mid_future", "mid-range future"), ("high_future", "high-end future")):
+            fs = f["future_scenarios"][scenario]
+            lines.append(f"- Fluvial, {scenario_label} climate: {fs['fluvial_probability'] or 'not mapped at this point'}")
+            lines.append(f"- Coastal, {scenario_label} climate: {fs['coastal_probability'] or 'not mapped at this point'}")
         lines.append(f"> {f['caveat']}")
         lines.append("")
 
@@ -400,6 +422,19 @@ def _to_markdown(report: dict) -> str:
             lines.append(f"- ⚠ Within group water scheme zone of contribution: {sp['group_water_scheme_name']}")
         else:
             lines.append(f"- Not within a mapped source protection area ({sp['nearby_count']} nearby within {sp['search_radius_m']}m)")
+        lines.append("")
+
+    if "water_quality" in s:
+        wq = s["water_quality"]
+        lines.append("## Water body status (EPA WFD)")
+        gw = wq["groundwater_body"]
+        if gw:
+            lines.append(f"- Groundwater body: {gw['name']} — {gw['status']}")
+        for b in wq["surface_water_bodies"][:8]:
+            lines.append(f"- {b['type'].capitalize()}: {b['name']} — {b['status']}")
+        if not wq["surface_water_bodies"]:
+            lines.append("- No nearby surface water bodies mapped")
+        lines.append(f"> {wq['caveat']}")
         lines.append("")
 
     if "utilities" in s:

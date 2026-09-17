@@ -27,16 +27,11 @@ project started (see CLAUDE.md's "Not yet wired in" list).
 from __future__ import annotations
 
 import logging
-import math
 from typing import Optional
 
-import requests
-
-from . import config
+from .wfs import wfs_query
 
 log = logging.getLogger("sitescout.epa")
-
-WFS_URL = "https://gis.epa.ie/geoserver/wfs"
 
 RADON_LAYER = "EPA:RadonRiskMapofIreland"
 LANDFILLS_LAYER = "EPA:ClosedLandfills_2023"
@@ -90,31 +85,9 @@ MINES_SEARCH_RADIUS_M = 2000      # historic mine workings can spread well beyon
 PRTR_SEARCH_RADIUS_M = 10000
 
 
-def _bbox_around(lat: float, lon: float, half_m: float) -> str:
-    dlat = half_m / 111_000
-    dlon = half_m / (111_000 * math.cos(math.radians(lat)))
-    return f"{lon - dlon},{lat - dlat},{lon + dlon},{lat + dlat},EPSG:4326"
-
-
-def _wfs_query(type_name: str, lat: float, lon: float, half_m: float, max_features: int = 25) -> dict:
-    """Returns the raw parsed WFS response (not just `features`) so callers
-    can check `numberMatched` vs `numberReturned` — same "exactly N found"
-    vs "N found, capped, more exist" distinction as arcgis.point_query_full().
-    """
-    params = {
-        "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-        "typeNames": type_name,
-        "bbox": _bbox_around(lat, lon, half_m),
-        "outputFormat": "application/json",
-        "srsName": "EPSG:4326",
-        "count": max_features,
-    }
-    resp = requests.get(WFS_URL, params=params, timeout=config.HTTP_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    if "features" not in data:
-        raise RuntimeError(f"EPA WFS error for {type_name}: {data}")
-    return data
+# wfs_query() (the bbox+CRS-suffix WFS GetFeature helper, and the gotcha
+# about needing that suffix) now lives in wfs.py, shared with
+# water_quality.py — imported above as `wfs_query`.
 
 
 def _simplify_ring(ring: list, max_points: int = 400) -> list:
@@ -179,7 +152,7 @@ def _first_point(geometry: Optional[dict]) -> tuple:
 
 def get_radon_risk(lat: float, lon: float) -> dict:
     log.info("Querying EPA Radon Risk Map…")
-    feats = _wfs_query(RADON_LAYER, lat, lon, RADON_SEARCH_HALF_M, max_features=1)["features"]
+    feats = wfs_query(RADON_LAYER, lat, lon, RADON_SEARCH_HALF_M, max_features=1)["features"]
     if not feats:
         log.info("-> No radon classification returned at this exact point")
         return {
@@ -200,7 +173,7 @@ def get_radon_risk(lat: float, lon: float) -> dict:
 
 def get_closed_landfills(lat: float, lon: float) -> dict:
     log.info("Querying EPA closed/historic landfills within %dm…", LANDFILLS_SEARCH_RADIUS_M)
-    data = _wfs_query(LANDFILLS_LAYER, lat, lon, LANDFILLS_SEARCH_RADIUS_M)
+    data = wfs_query(LANDFILLS_LAYER, lat, lon, LANDFILLS_SEARCH_RADIUS_M)
     landfills = [
         {
             "name": f["properties"].get("Name and Location of Facility"),
@@ -232,7 +205,7 @@ def get_closed_landfills(lat: float, lon: float) -> dict:
 
 def get_ippc_facilities(lat: float, lon: float) -> dict:
     log.info("Querying EPA licensed IPPC/IED facilities within %dm…", IPPC_SEARCH_RADIUS_M)
-    data = _wfs_query(IPPC_LAYER, lat, lon, IPPC_SEARCH_RADIUS_M)
+    data = wfs_query(IPPC_LAYER, lat, lon, IPPC_SEARCH_RADIUS_M)
     facilities = []
     for f in data["features"]:
         p = f["properties"]
@@ -261,7 +234,7 @@ def get_ippc_facilities(lat: float, lon: float) -> dict:
 
 def get_historic_mines(lat: float, lon: float) -> dict:
     log.info("Querying EPA historic/abandoned mine sites within %dm…", MINES_SEARCH_RADIUS_M)
-    sites_data = _wfs_query(MINES_SITES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=10)
+    sites_data = wfs_query(MINES_SITES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=10)
     sites = []
     for f in sites_data["features"]:
         site_lat, site_lon = _first_point(f.get("geometry"))
@@ -274,7 +247,7 @@ def get_historic_mines(lat: float, lon: float) -> dict:
             "lon": site_lon,
         })
 
-    boundaries_data = _wfs_query(MINES_BOUNDARIES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=25)
+    boundaries_data = wfs_query(MINES_BOUNDARIES_LAYER, lat, lon, MINES_SEARCH_RADIUS_M, max_features=25)
     boundaries = [
         {
             "name": f["properties"].get("Name"),
@@ -322,7 +295,7 @@ def get_major_industrial_facilities(lat: float, lon: float) -> dict:
     facilities = []
     more_exist = False
     for layer in PRTR_SECTOR_LAYERS:
-        data = _wfs_query(layer, lat, lon, PRTR_SEARCH_RADIUS_M, max_features=25)
+        data = wfs_query(layer, lat, lon, PRTR_SEARCH_RADIUS_M, max_features=25)
         for f in data["features"]:
             p = f["properties"]
             flat, flon = _first_point(f.get("geometry"))
