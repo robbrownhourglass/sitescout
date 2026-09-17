@@ -68,6 +68,10 @@ sitescout/
                              river/lake/coastal/transitional water bodies — off the same EPA
                              GeoServer as epa.py, via wfs.py; its own section/tile, not folded
                              into epa.py's already-crowded environmental hazards card
+  biodiversity.py           species occurrence records + IUCN Red List threatened species nearby,
+                             via GBIF (not NBDC's own map viewer directly — see its docstring for
+                             why: a real bug on NBDC's server, found and worked around, not a
+                             request-shape problem)
   local_authority.py        resolves a point to its city/county council (Tailte Éireann boundaries)
   rps.py                    RPS/ACA (statutory protected structures/conservation areas) —
                              per-local-authority, only 4 of 31 wired in so far; see rps.SOURCES
@@ -261,6 +265,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Karst features (springs, caves, turloughs, swallow holes) | GSI `IE_GSI_Karst_Datasets_40K_IE32_ITM` (layer 0) — radius search; text list only, see note below on why there's no map overlay | `geohazards.py` |
 | Groundwater source protection (public water supply + group water scheme) | GSI `IE_GSI_Group_Water_Scheme_Public_Water_Supply_Source_Protection_Areas_20K_IE26_ITM` (layer 0 = SPAs, layer 1 = zones of contribution) | `geohazards.py` |
 | Transmission grid (substations, overhead lines, underground cables — existing + committed/planned) | EirGrid's own public "TDP 2024 Web Map PUBLIC" `FeatureServer`, found via ArcGIS Online's public content search rather than a specific viewer | `eirgrid.py` |
+| Species occurrence records + IUCN Red List threatened species | GBIF (Global Biodiversity Information Facility) public REST API (`api.gbif.org`), not NBDC's own map viewer — see below | `biodiversity.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
 polygon), not just a text readout — but the raw polygons are large enough
@@ -422,11 +427,12 @@ app, rather than the documented-but-dead endpoints:
     Navan is literally the connection point feeding Boliden Tara Mines
     (epa.py's PRTR addition) — this dataset reflects real, current grid
     topology, not a stale snapshot.
-12. **NBDC species occurrence records — investigated, not pursued.**
-    `maps.biodiversityireland.ie` is a real, live, custom-built ArcGIS JS
-    API app (not a simple public WebAppViewer), backed by an ASP.NET
-    Boilerplate (ABP) service layer. Reverse-engineered as far as: its map
-    configuration endpoint (`POST /api/services/app/mapConfigurationService/GetMapConfigurations`
+12. **NBDC's own map viewer — investigated, abandoned in favour of GBIF
+    (see `biodiversity.py`).** `maps.biodiversityireland.ie` is a real,
+    live, custom-built ArcGIS JS API app (not a simple public
+    WebAppViewer), backed by an ASP.NET Boilerplate (ABP) service layer.
+    Reverse-engineered as far as: its map configuration endpoint
+    (`POST /api/services/app/mapConfigurationService/GetMapConfigurations`
     with a JSON array of view names, e.g. `["Terrestrial"]`, found by
     fetching `/api/AbpServiceProxies/GetAll` — the app's own dynamically
     generated proxy script, which spells out every service URL) returns
@@ -435,15 +441,43 @@ app, rather than the documented-but-dead endpoints:
     `ecology.py` already covers via NPWS's own, simpler endpoint, so no
     new value there). The actual species-occurrence layer is added
     dynamically per-species via `POST /api/services/app/visualisationService/GetStandardSpeciesVisualisation`
-    with a `speciesFilter` object — but its DTO classes
+    with a `speciesFilter` object — its DTO classes
     (`SpeciesVisualisationFilter`, `SpeciesInfo`, under
     `Scripts/nbdc/MapIndex/Visualisation/Dto/`) are Esri `Accessor`
     subclasses with properties assigned dynamically at runtime, not
-    statically declared — nothing in the static JS reveals the actual
-    field names/shape needed. Confirming the request shape would need live
-    browser DevTools network inspection (watching a real species search),
-    which wasn't done — don't guess at this shape and ship an unverified
-    request; either do that inspection first, or treat this as still open.
+    statically declared, so the shape isn't visible in static JS. Pushed
+    one step further — its taxon *search* endpoint
+    (`POST /api/services/app/taxonService/GetTaxonsQuery`) DOES match real
+    species by name regardless of which plausible field name was guessed
+    (`query`/`searchTerm`/`text`/`name`/`searchText` all matched
+    "Hedgehog" identically) — but the server then crashes on every guess
+    with the exact same unhandled error: `"Self referencing loop detected
+    with type 'BiodiversityMaps.EntityFramework.Models.Taxon'"`, an
+    Entity Framework serialization bug on NBDC's own backend, not a
+    request-shape problem. That's what closed this path off, not lack of
+    effort — even the right request likely can't get a usable response
+    back from this particular service today.
+    `biodiversity.py` uses **GBIF** instead (see the verified-sources
+    table) — NBDC's own published records flow into GBIF anyway, and
+    GBIF's public API is clean, documented, stable, and actually works.
+13. GBIF specifics worth not re-deriving: `geoDistance=lat,lon,Rkm` on
+    `api.gbif.org/v1/occurrence/search` is the radius-search parameter —
+    no auth needed. **Gotcha, confirmed by testing:** `iucnRedListCategory`
+    (or presumably any multi-value enum filter) only works as an OR filter
+    when passed as **separate repeated query params**
+    (`iucnRedListCategory=VU&iucnRedListCategory=EN&iucnRedListCategory=CR`)
+    — a single comma-separated value
+    (`iucnRedListCategory=VU,EN,CR`) silently returned **zero** results
+    despite the facet count on the same bbox showing 11 real matches
+    across those three categories. `requests`' list-of-tuples `params`
+    form is what `biodiversity.py` uses to send repeated params — a plain
+    dict can't represent that. Also checked and found NOT reliable for
+    Irish data: `establishmentMeans` (native/introduced/invasive) returns
+    0 nationally for `INTRODUCED` or `INVASIVE` — essentially unpopulated
+    for GBIF's Irish-tagged records, so `biodiversity.py` doesn't attempt
+    an invasive-species flag from it. `iucnRedListCategory`, by contrast,
+    is well populated and confirmed varying (VU/EN/CR all found in a
+    single 2km-radius test).
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
