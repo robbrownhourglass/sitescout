@@ -75,7 +75,13 @@ sitescout/
                              lookup (get_boundary, used by the CLI) and a within-radius one
                              (get_nearby_parcels, used by the web UI's plot picker), plus
                              summarise_selected_parcels() to merge whatever the user picks
-  utilities.py              drafts ESB/Uisce Éireann data-request emails (no open API exists)
+  utilities.py              drafts ESB/Uisce Éireann data-request emails (no open API exists for
+                             the local distribution network they operate)
+  eirgrid.py                EirGrid's *transmission* grid (110kV+ substations/lines/cables,
+                             existing + committed/planned) — distinct from utilities.py's ESB
+                             Networks *distribution* network; public because transmission
+                             projects require statutory consultation. Merged into the same
+                             "utilities" section/tile by pipeline.py, not its own tile.
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
                              CFRAM via wms.py — fluvial/coastal/pluvial x current/mid-future/
@@ -254,6 +260,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Aquifer classification (bedrock + sand/gravel) | GSI `IE_GSI_Aquifer_Datasets_IE26_ITM` (layer 2 = bedrock aquifer, national coverage; layer 0 = sand/gravel, only some areas) | `geohazards.py` |
 | Karst features (springs, caves, turloughs, swallow holes) | GSI `IE_GSI_Karst_Datasets_40K_IE32_ITM` (layer 0) — radius search; text list only, see note below on why there's no map overlay | `geohazards.py` |
 | Groundwater source protection (public water supply + group water scheme) | GSI `IE_GSI_Group_Water_Scheme_Public_Water_Supply_Source_Protection_Areas_20K_IE26_ITM` (layer 0 = SPAs, layer 1 = zones of contribution) | `geohazards.py` |
+| Transmission grid (substations, overhead lines, underground cables — existing + committed/planned) | EirGrid's own public "TDP 2024 Web Map PUBLIC" `FeatureServer`, found via ArcGIS Online's public content search rather than a specific viewer | `eirgrid.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
 polygon), not just a text readout — but the raw polygons are large enough
@@ -400,6 +407,43 @@ app, rather than the documented-but-dead endpoints:
     variation live, not just a single value: sampled 200 river water
     bodies within 50km of Dublin and got 79 Poor / 71 Moderate / 48 Good /
     2 High — this isn't a dataset that always says "Good".
+11. `eirgrid.py` (EirGrid transmission grid — substations, overhead lines,
+    underground cables, existing + committed/planned): found via ArcGIS
+    Online's own public content search
+    (`GET https://www.arcgis.com/sharing/rest/search?q=eirgrid&f=json`)
+    rather than a specific public viewer — turned up "TDP 2024 Web Map
+    PUBLIC" (Transmission Development Plan), a `FeatureServer` owned by
+    EirGrid's own ArcGIS org and confirmed current (modified 2024).
+    Distinct from ESB Networks' *distribution* network (utilities.py,
+    confirmed genuinely closed) — EirGrid's *transmission* network
+    (110kV+) is public because new transmission infrastructure requires
+    statutory public consultation. Cross-checked against a real-world fact
+    found earlier in this project: Knockumber substation (110kV) near
+    Navan is literally the connection point feeding Boliden Tara Mines
+    (epa.py's PRTR addition) — this dataset reflects real, current grid
+    topology, not a stale snapshot.
+12. **NBDC species occurrence records — investigated, not pursued.**
+    `maps.biodiversityireland.ie` is a real, live, custom-built ArcGIS JS
+    API app (not a simple public WebAppViewer), backed by an ASP.NET
+    Boilerplate (ABP) service layer. Reverse-engineered as far as: its map
+    configuration endpoint (`POST /api/services/app/mapConfigurationService/GetMapConfigurations`
+    with a JSON array of view names, e.g. `["Terrestrial"]`, found by
+    fetching `/api/AbpServiceProxies/GetAll` — the app's own dynamically
+    generated proxy script, which spells out every service URL) returns
+    real static layers (NHA/pNHA/SAC/SPA `FeatureServer`s at
+    `gisserver.biodiversityireland.ie` — but these duplicate what
+    `ecology.py` already covers via NPWS's own, simpler endpoint, so no
+    new value there). The actual species-occurrence layer is added
+    dynamically per-species via `POST /api/services/app/visualisationService/GetStandardSpeciesVisualisation`
+    with a `speciesFilter` object — but its DTO classes
+    (`SpeciesVisualisationFilter`, `SpeciesInfo`, under
+    `Scripts/nbdc/MapIndex/Visualisation/Dto/`) are Esri `Accessor`
+    subclasses with properties assigned dynamically at runtime, not
+    statically declared — nothing in the static JS reveals the actual
+    field names/shape needed. Confirming the request shape would need live
+    browser DevTools network inspection (watching a real species search),
+    which wasn't done — don't guess at this shape and ship an unverified
+    request; either do that inspection first, or treat this as still open.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
