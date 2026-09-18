@@ -1049,17 +1049,37 @@ function buildBiodiversityLayer(b){
   return group;
 }
 
-// No map overlay for the "terrain" section — neither piece of it has
-// drawable geometry. Precise LIDAR elevation is a single value at the
-// exact site point, not a shape. Contour lines were tried and confirmed
-// impossible: this ArcGIS service returns `exceededTransferLimit` with
-// zero features for EVERY combination of query params when geometry is
-// requested (f=json/geojson, 10m-500m radius, with/without
+// The precise-elevation map layer — a real per-pixel 2m elevation image,
+// not a single point value or a hillshade. Fetched lazily (the browser
+// only requests /api/terrain-image once this overlay is actually added to
+// the map, i.e. once found via addOverlay() below) and rendered
+// server-side in elevation.render_dtm_image() from the exact same cached
+// LIDAR tile get_precise_elevation() already read one pixel out of.
+// L.imageOverlay bounded to that tile's real WGS84 extent (bounds_wgs84,
+// computed from the coverage index's own ITM extent attributes via
+// pyproj — cheap, no raster read needed for the bounds themselves).
+// Wrapped in a layerGroup purely so addOverlay()'s existing
+// group.getLayers().length empty-check keeps working unmodified — an
+// L.imageOverlay isn't an L.layerGroup and has no such method itself.
+function buildTerrainImageLayer(t){
+  const group = L.layerGroup();
+  const p = t && t.precise;
+  if(!p || !p.found || !p.bounds_wgs84 || !p.image_url) return group;
+  L.imageOverlay(p.image_url, p.bounds_wgs84, { opacity: 0.75, pane: 'polygonsPane' }).addTo(group);
+  return group;
+}
+
+// Contour LINES have no drawable geometry from their own vector query —
+// confirmed impossible: this ArcGIS service returns `exceededTransferLimit`
+// with zero features for EVERY combination of query params when geometry
+// is requested (f=json/geojson, 10m-500m radius, with/without
 // generalization) — each contour "feature" is apparently one enormous
 // polyline spanning much of the country, blowing past whatever response
 // size cap this server enforces. See elevation.py's get_contours()
-// docstring. Attribute-only (the elevation value itself, shown in the
-// card) works fine — only the shape is unavailable.
+// docstring. That's why contours are drawn a completely different way —
+// as the ContourExportLayer server-rendered image tiles, set up in
+// initMap() above, not through SECTION_OVERLAY_BUILDERS at all (they're a
+// general reference layer, not tied to any one site's fetched data).
 
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
@@ -1224,9 +1244,13 @@ const SECTION_OVERLAY_BUILDERS = {
   biodiversity: [
     ['Threatened species (GBIF)', buildBiodiversityLayer],
   ],
-  // terrain: no map overlay — see the comment right after
-  // buildBiodiversityLayer above for why (no drawable geometry available
-  // from either terrain data source).
+  terrain: [
+    ['Precise terrain (OPW LIDAR)', buildTerrainImageLayer],
+  ],
+  // Elevation contours are a separate, general reference layer (not tied
+  // to this section's own data) — registered in initMap()/
+  // clearOverlayLayers() instead, see buildTerrainImageLayer's own
+  // comment above for the full story.
 };
 
 function addSectionOverlays(name, data){
@@ -1869,7 +1893,18 @@ function terrainCard(t){
     : `<span class="muted">none within ${c.search_radius_m}m</span>`;
   html += '</div>';
 
-  html += `<div style="margin-top:10px" class="muted">Contour lines are drawn on the map as a toggleable layer — see "Elevation contours (EPA)" in the layer switcher (top-left), off by default.</div>`;
+  if(p.found && p.image_min_elevation_m != null){
+    // Same 4 color stops as elevation.py's _COLOR_STOPS, kept in sync by
+    // hand (small, stable, no reason to fetch this from the backend) —
+    // every pixel in the map image is colored by exactly this scale
+    // against THIS tile's own real min/max, not a fixed national range.
+    html += `<div style="margin-top:10px"><strong>Precise elevation map layer</strong> <span class="muted">(this tile: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
+    html += `<div style="margin-top:4px;height:14px;border-radius:3px;background:linear-gradient(to right, rgb(46,139,60) 0%, rgb(154,205,50) 35%, rgb(222,165,62) 65%, rgb(255,255,255) 100%)"></div>`;
+    html += `<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px"><span>${p.image_min_elevation_m}m</span><span>${p.image_max_elevation_m}m</span></div>`;
+    html += `<div style="margin-top:6px" class="muted">Every pixel is a real 2m LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (OPW LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;
+  }
+
+  html += `<div style="margin-top:10px" class="muted">Contour lines are also available as a map layer — "Elevation contours (EPA)" in the layer switcher, off by default.</div>`;
 
   return card('Terrain & elevation', verdictCls, p.found ? 'Live' : 'Live (approx.)', 'live', html,
     'Sources: OPW LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
