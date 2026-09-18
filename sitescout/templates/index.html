@@ -1050,15 +1050,20 @@ function buildBiodiversityLayer(b){
 }
 
 // The precise-elevation map layer — a real per-pixel 2m elevation image,
-// not a single point value or a hillshade. Fetched lazily (the browser
-// only requests /api/terrain-image once this overlay is actually added to
-// the map, i.e. once found via addOverlay() below) and rendered
-// server-side in elevation.render_dtm_image() from the exact same cached
-// LIDAR tile get_precise_elevation() already read one pixel out of.
-// L.imageOverlay bounded to that tile's real WGS84 extent (bounds_wgs84,
-// computed from the coverage index's own ITM extent attributes via
-// pyproj — cheap, no raster read needed for the bounds themselves).
-// Wrapped in a layerGroup purely so addOverlay()'s existing
+// not a single point value or a hillshade. Mosaicked server-side from
+// every LIDAR tile touching a 1km radius (elevation.IMAGE_RADIUS_M), not
+// just whichever single ~2km tile happens to contain the exact point —
+// a 1km radius can straddle up to 4 tiles depending on where the point
+// falls relative to the survey grid (confirmed at Trinity College
+// Dublin, which needs all 4). Fetched lazily (the browser only requests
+// /api/terrain-image once this overlay is actually added to the map,
+// i.e. once found via addOverlay() below) and rendered server-side in
+// elevation.render_dtm_image() from the exact same cached tiles
+// get_precise_elevation() already assembled for its own point-value read.
+// L.imageOverlay bounded to the mosaic's real (cropped) WGS84 extent
+// (bounds_wgs84, computed via pyproj from the same ITM crop used to
+// build the image itself — guaranteed to match, not independently
+// derived). Wrapped in a layerGroup purely so addOverlay()'s existing
 // group.getLayers().length empty-check keeps working unmodified — an
 // L.imageOverlay isn't an L.layerGroup and has no such method itself.
 function buildTerrainImageLayer(t){
@@ -1898,7 +1903,7 @@ function terrainCard(t){
     // hand (small, stable, no reason to fetch this from the backend) —
     // every pixel in the map image is colored by exactly this scale
     // against THIS tile's own real min/max, not a fixed national range.
-    html += `<div style="margin-top:10px"><strong>Precise elevation map layer</strong> <span class="muted">(this tile: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
+    html += `<div style="margin-top:10px"><strong>Precise elevation map layer</strong> <span class="muted">(${(p.image_radius_m / 1000).toFixed(1)}km radius, ${p.image_tile_count} tile(s) stitched: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
     html += `<div style="margin-top:4px;height:14px;border-radius:3px;background:linear-gradient(to right, rgb(46,139,60) 0%, rgb(154,205,50) 35%, rgb(222,165,62) 65%, rgb(255,255,255) 100%)"></div>`;
     html += `<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px"><span>${p.image_min_elevation_m}m</span><span>${p.image_max_elevation_m}m</span></div>`;
     html += `<div style="margin-top:6px" class="muted">Every pixel is a real 2m LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (OPW LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;

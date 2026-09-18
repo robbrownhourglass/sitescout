@@ -641,6 +641,42 @@ app, rather than the documented-but-dead endpoints:
       of a tile that's already been downloaded and cached anyway.
     - New dependency: Pillow (PNG encoding) — tifffile/numpy/pyproj were
       already added for the point-value lookup; this reuses them.
+16. **Follow-up: the single-tile image was too small — now a proper
+    multi-tile mosaic.** A ~2km survey tile doesn't reliably cover even a
+    1km radius around an arbitrary point — if the point sits near a tile
+    edge (confirmed at Trinity College Dublin), most of that radius falls
+    in a *neighbouring* tile the single-tile version never fetched.
+    Fixed by mosaicking: `_find_touching_tiles()` uses `arcgis.point_query()`'s
+    existing `distance_m` (a real server-side buffered spatial query — no
+    manual point-sampling needed) to get every tile intersecting a
+    `IMAGE_RADIUS_M` (1000m) buffer from one source, confirmed live to
+    return up to 4 tiles for one point. "Does this source actually cover
+    the exact point" is answered with a plain bbox check against the
+    returned tiles' own `EXT_*` attributes rather than a second query or a
+    geometry library — these coverage-index features are plain
+    axis-aligned squares, so their extent literally IS their exact
+    boundary, an exact (not approximate) point-in-tile test with no
+    polygon math needed. `_mosaic_dtm()` stitches the tiles into one
+    array positioned by each tile's own real ITM extent (confirmed they
+    share exact edges on a common grid — no reprojection/resampling), then
+    crops to a square of the requested radius. Visually confirmed
+    seamless — a real rendered mosaic at Trinity College Dublin shows the
+    River Liffey running continuously across all 4 stitched tiles with no
+    visible seam.
+    - `get_precise_elevation()` and `render_dtm_image()` both call the
+      SAME `_mosaic_dtm()` now, guaranteeing the reported bounds/min/max
+      and the actual rendered image are always consistent — no risk of
+      two independently-built mosaics drifting apart.
+    - Real cost tradeoff, disclosed rather than hidden: `get_precise_elevation()`
+      now builds the full mosaic (up to 4 tile downloads) even though it
+      only needs one pixel from it, because the reported `bounds_wgs84`/
+      min/max must match whatever `render_dtm_image()` will later render
+      from the SAME mosaic-shaped data — computing them from a smaller,
+      single-tile extent while the image covers a bigger cropped area
+      would misplace the image overlay on the map (wrong bounds) and show
+      a wrong legend. Confirmed cold-cache cost: ~12s for a genuine 4-tile
+      case (one-time, per unique area); warm-cache (tiles already cached
+      from an earlier lookup nearby): ~0.4s, same as before.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
