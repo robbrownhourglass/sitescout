@@ -288,6 +288,7 @@ const CATEGORY_COLORS = {
   waterQuality: '#2a7f9e',
   grid: '#b8860b',
   biodiversity: '#b0306e',
+  terrain: '#5b6b52',
 };
 
 // Small self-contained line-icon set for the tile strip — one glyph per
@@ -380,6 +381,12 @@ const TILE_ICONS = {
       <ellipse cx="11" cy="6.8" rx="1.6" ry="2.1"/>
       <ellipse cx="15.5" cy="7.2" rx="1.6" ry="2.1"/>
       <ellipse cx="18.5" cy="10.5" rx="1.5" ry="2"/>
+    </svg>`,
+  // stacked contour-like bands — terrain & elevation
+  terrain: `<svg ${ICON_ATTRS}>
+      <path d="M3 19h18"/>
+      <path d="M4 19c2-6 4-11 8-14 4 3 6 8 8 14"/>
+      <path d="M7.5 19c1.3-4 2.7-7.5 4.5-9.5 1.8 2 3.2 5.5 4.5 9.5"/>
     </svg>`,
 };
 
@@ -997,6 +1004,18 @@ function buildBiodiversityLayer(b){
   return group;
 }
 
+// No map overlay for the "terrain" section — neither piece of it has
+// drawable geometry. Precise LIDAR elevation is a single value at the
+// exact site point, not a shape. Contour lines were tried and confirmed
+// impossible: this ArcGIS service returns `exceededTransferLimit` with
+// zero features for EVERY combination of query params when geometry is
+// requested (f=json/geojson, 10m-500m radius, with/without
+// generalization) — each contour "feature" is apparently one enormous
+// polyline spanning much of the country, blowing past whatever response
+// size cap this server enforces. See elevation.py's get_contours()
+// docstring. Attribute-only (the elevation value itself, shown in the
+// card) works fine — only the shape is unavailable.
+
 // ---- Right-hand tile strip + slide-in detail panel. One tile per
 // category found; clicking a tile opens (or, if already open, closes) a
 // panel with that category's full detail — the "card" content is the same
@@ -1103,6 +1122,7 @@ const TILE_SPECS = [
   { key: 'geohazards', title: 'Geohazards & aquifer', deps: ['geohazards'], build: () => geohazardsCard(sectionData.geohazards) },
   { key: 'waterQuality', title: 'Water body status (EPA WFD)', deps: ['water_quality'], build: () => waterQualityCard(sectionData.water_quality) },
   { key: 'biodiversity', title: 'Species records (GBIF)', deps: ['biodiversity'], build: () => biodiversityCard(sectionData.biodiversity) },
+  { key: 'terrain', title: 'Terrain & elevation', deps: ['terrain'], build: () => terrainCard(sectionData.terrain) },
   { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
   { key: 'utilities', title: 'Utilities', deps: ['utilities'], build: () => utilitiesCard(sectionData.utilities) },
 ];
@@ -1159,6 +1179,9 @@ const SECTION_OVERLAY_BUILDERS = {
   biodiversity: [
     ['Threatened species (GBIF)', buildBiodiversityLayer],
   ],
+  // terrain: no map overlay — see the comment right after
+  // buildBiodiversityLayer above for why (no drawable geometry available
+  // from either terrain data source).
 };
 
 function addSectionOverlays(name, data){
@@ -1762,6 +1785,49 @@ function biodiversityCard(b){
     'Source: <a href="https://www.gbif.org" target="_blank">GBIF.org</a> — includes National Biodiversity Data Centre (NBDC)-published Irish records');
 }
 
+function terrainCard(t){
+  if(!t){
+    return card('Terrain & elevation', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const p = t.precise;
+  const c = t.contours;
+
+  let verdictText, verdictCls;
+  if(p.found){
+    verdictText = `Ground elevation: ${p.ground_elevation_m}m (OPW LIDAR, ${p.resolution_m}m resolution)`;
+    verdictCls = 'ok';
+  } else if(c.elevation_range_m){
+    verdictText = `No precise LIDAR data here — nearby contours suggest roughly ${c.elevation_range_m[0]}-${c.elevation_range_m[1]}m`;
+    verdictCls = 'warn';
+  } else {
+    verdictText = 'No elevation data available at this point';
+    verdictCls = 'warn';
+  }
+
+  let html = verdict(verdictText, verdictCls);
+
+  html += `<div style="margin-top:10px"><strong>Precise elevation (OPW LIDAR):</strong> `;
+  if(p.found){
+    html += `${p.ground_elevation_m}m ground`;
+    if(p.surface_elevation_m != null){
+      html += `, ${p.surface_elevation_m}m surface (+${p.canopy_or_building_height_m}m above ground)`;
+    }
+    html += ` <span class="muted">(${p.resolution_m}m grid, surveyed ${p.survey_date})</span>`;
+  } else {
+    html += `<span class="muted">not available — OPW's LIDAR survey concentrates on rivers, floodplains, and coasts</span>`;
+  }
+  html += '</div>';
+
+  html += `<div style="margin-top:10px"><strong>Nearby contours:</strong> `;
+  html += c.elevation_range_m
+    ? `${c.contour_count} line(s) within ${c.search_radius_m}m, ${c.elevation_range_m[0]}-${c.elevation_range_m[1]}m <span class="muted">(10m interval, 20m grid)</span>`
+    : `<span class="muted">none within ${c.search_radius_m}m</span>`;
+  html += '</div>';
+
+  return card('Terrain & elevation', verdictCls, p.found ? 'Live' : 'Live (approx.)', 'live', html,
+    'Sources: OPW LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
+}
+
 function mailto(to, subject, body){
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
@@ -1873,6 +1939,7 @@ function buildInfoCard(){
       <li>Protected structures — <a href="https://www.buildingsofireland.ie" target="_blank">NIAH</a>; also see <a href="https://www.heritagemaps.ie" target="_blank">Heritage Maps</a></li>
       <li>Electricity infrastructure — ESB Networks Dial Before You Dig (request-based, local distribution network); national transmission network (110kV+ substations, overhead lines, underground cables, existing and committed/planned) live via <a href="https://www.eirgrid.ie" target="_blank">EirGrid</a>'s own public Transmission Development Plan web map</li>
       <li>Species occurrence records — total biodiversity record density plus any IUCN Red List threatened species (Vulnerable/Endangered/Critically Endangered) recorded nearby, live via <a href="https://www.gbif.org" target="_blank">GBIF.org</a>, which includes National Biodiversity Data Centre (NBDC)-published Irish records</li>
+      <li>Terrain &amp; elevation — precise ground/surface elevation (~2m grid) from OPW's own LIDAR survey tiles, downloaded and cached on demand per site (not a live queryable elevation API — GSI only publishes cosmetic shaded-relief renderings of this data via API, not the real elevation values); falls back to national 10m-interval contour lines where OPW hasn't surveyed (mainly away from rivers/floodplains/coasts)</li>
       <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests</li>
       <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>: a 500m radius search plus a bonus exact-Eircode match (only works when an application's own record has that field populated — true for ~0.6% nationally); zoning itself stays a link-out</li>
       <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
@@ -1896,6 +1963,7 @@ function buildInfoCard(){
       <li>WFD water body status describes the whole water body (often several km of river, or a whole lake/estuary), not conditions at this exact point — relevant to nearby development or discharge, not a statement about the site itself.</li>
       <li>EirGrid transmission data covers the national grid (110kV+) only — a nearby substation is an indicative connection-feasibility signal, not a guaranteed available capacity; confirm directly with EirGrid/ESB Networks for an actual application. The local distribution network that actually connects most buildings still has no open data.</li>
       <li>Species occurrence records reflect where something has been recorded, not a systematic survey — absence of a record doesn't mean a species isn't present, and a threatened species recorded years ago doesn't mean it's still there. A professional ecological assessment is the actual determination, not this list.</li>
+      <li>Precise elevation only covers where OPW surveyed for flood-risk mapping — mostly rivers, floodplains, and coasts, not the whole country. Contour-based elevation, shown where precise data isn't available, is a range (10m vertical interval, 20m grid), not a spot height.</li>
     </ul>`;
   return div;
 }

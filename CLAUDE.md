@@ -86,6 +86,15 @@ sitescout/
                              Networks *distribution* network; public because transmission
                              projects require statutory consultation. Merged into the same
                              "utilities" section/tile by pipeline.py, not its own tile.
+  elevation.py              precise terrain elevation (OPW LIDAR DTM/DSM, ~2m grid) — the ONE
+                             module in this app that downloads and caches its own data
+                             (.cache/lidar_tiles/, gitignored) rather than querying a live API for
+                             every request, because no live elevation-value API exists (see its
+                             own docstring for the full "hillshade isn't elevation" investigation);
+                             falls back to national 10m-interval contour lines (EPA Hydrological
+                             DTM, live ArcGIS query, no caching needed) where OPW hasn't surveyed.
+                             New deps: tifffile, numpy, pyproj (see requirements.txt) — the only
+                             module using them.
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
                              CFRAM via wms.py — fluvial/coastal/pluvial x current/mid-future/
@@ -161,6 +170,12 @@ that only matter for the deployed path, not local dev:
 - Railway injects `$PORT`; the Procfile binds to it
   (`--bind 0.0.0.0:$PORT`). Don't hardcode a port anywhere in the gunicorn
   start command.
+- `elevation.py` caches downloaded LIDAR tiles to `.cache/lidar_tiles/`
+  (gitignored) — on Railway this is ephemeral (wiped on redeploy/restart),
+  which is fine: it's a pure performance cache, not a data store the app
+  depends on, and a cache miss just re-downloads the ~4MB tile. Don't
+  "fix" this by adding a persistent volume unless cache-miss latency
+  actually becomes a real problem in practice.
 
 ## The Eircode coordinate-precision saga (important — read before "fixing" this again)
 
@@ -266,6 +281,8 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Groundwater source protection (public water supply + group water scheme) | GSI `IE_GSI_Group_Water_Scheme_Public_Water_Supply_Source_Protection_Areas_20K_IE26_ITM` (layer 0 = SPAs, layer 1 = zones of contribution) | `geohazards.py` |
 | Transmission grid (substations, overhead lines, underground cables — existing + committed/planned) | EirGrid's own public "TDP 2024 Web Map PUBLIC" `FeatureServer`, found via ArcGIS Online's public content search rather than a specific viewer | `eirgrid.py` |
 | Species occurrence records + IUCN Red List threatened species | GBIF (Global Biodiversity Information Facility) public REST API (`api.gbif.org`), not NBDC's own map viewer — see below | `biodiversity.py` |
+| Precise terrain elevation (~2m grid, ground + surface) | OPW's own LIDAR survey tiles (GeoTIFF, real float32 metres) — downloaded + cached on demand, not a live API (none exists — see below) | `elevation.py` |
+| National elevation contours (10m interval, 20m grid, fallback) | GSI/EPA "Hydrologically Corrected DTM" contour `MapServer` — attribute-only query, no map geometry (see below) | `elevation.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
 polygon), not just a text readout — but the raw polygons are large enough
@@ -478,6 +495,83 @@ app, rather than the documented-but-dead endpoints:
     an invasive-species flag from it. `iucnRedListCategory`, by contrast,
     is well populated and confirmed varying (VU/EN/CR all found in a
     single 2km-radius test).
+14. `elevation.py` — the terrain/elevation investigation, in full, because
+    it took several wrong turns before landing on the real answer:
+    - Every raster GSI publishes via ArcGIS Online at fine resolution
+      (2m/1m/25cm/12.5cm — found via `GET /sharing/rest/search?q=Ireland
+      DTM` the same way `eirgrid.py` was found) is titled "Hillshade" —
+      and confirmed, not assumed, to actually BE hillshade: queried each
+      one's own `?f=json` and got `pixelType: "U8"` (8-bit, 0-255) on
+      every single one, then confirmed live with an `/identify` call
+      returning `"146"` at a real point — a shading value, not a
+      plausible elevation for Ireland (whose terrain routinely exceeds
+      255m). No live API returns real elevation numbers at LIDAR
+      resolution; only a cosmetic rendering of the data.
+    - The real elevation values only exist in OPW's own downloadable
+      LIDAR survey tiles — found via the SAME GSI ArcGIS server's `Lidar`
+      folder (`GET .../server/rest/services/Lidar?f=json`) as a "coverage
+      index": one polygon per 2km x 2km survey tile, with `DATA_URL`,
+      `RESOLUTION`, `DATECAPTUR`, and the tile's own ITM extent
+      (`EXT_LEFT`/`EXT_TOP`/`EXT_RIGHT`/`EXT_BOTTOM`) as plain
+      queryable attributes — found by actually downloading one
+      (`OPW_16.zip`, 4.1MB) and reading the GeoTIFF inside with
+      `tifffile`: genuine `float32`, real metres (sample row: 21.6, 22.1,
+      22.7m...). `-9999.0` is the NoData sentinel.
+    - **Not full national coverage — confirmed, not assumed.** OPW flew
+      this for flood-risk mapping, so it concentrates on rivers,
+      floodplains, and coasts. Tested four deliberately inland/upland
+      points (Slieve Bloom Mountains, Wicklow Mountains interior, Bog of
+      Allen, rural mid-Roscommon): zero coverage at all four.
+    - **`RESOLUTION` metadata can be wrong — confirmed by actually
+      downloading a tile, not trusted at face value.** OPW Cork's
+      coverage index claims `RESOLUTION: 2.0` for every tile; downloading
+      one (`OPW_5.zip`, 214MB compressed) and reading the TIFF's actual
+      shape gave `16003 x 16003` pixels over the same 2km extent — really
+      0.125m (12.5cm), not 2m. `elevation.py` deliberately excludes OPW
+      Cork from `LIDAR_SOURCES` for this reason (wrong resolution
+      metadata, ~50x the file size, DTM only no DSM) — a real gap for
+      Cork city specifically, documented rather than silently wrong.
+    - **On-demand + cached, not a bulk national download.** The full OPW
+      NASC (3,444 tiles) + older OPW (635 tiles) datasets are ~16GB+ —
+      downloadable, but (a) not something to bundle into this app's
+      normal deployment and (b) wouldn't even be complete coverage (see
+      above). `elevation.py` instead queries the coverage index live per
+      site (same pattern as every other source in this app), and only
+      downloads+caches the one relevant tile (`.cache/lidar_tiles/`,
+      gitignored) if one exists — confirmed ~0.7s cold (incl. download),
+      ~0.1s warm.
+    - **Pixel lookup needs a real coordinate transform, not a hand-rolled
+      one.** Unlike karst.py's decision NOT to reproject ITM→WGS84 by
+      hand (no verified transform, real risk of silently wrong pins),
+      here a genuine WGS84→ITM (EPSG:2157) conversion is unavoidable to
+      index into the tile's pixel grid — so `pyproj` was added as a real,
+      tested dependency (confirmed against a known Dublin reference
+      point) rather than derived from scratch. This is the correct
+      response to that class of problem: add and verify a real library,
+      don't hand-roll unverified projection maths either way.
+    - **Large tiles don't need to be loaded into memory.** OPW Cork's
+      excluded 1GB+ tile is stored uncompressed, one row per TIFF strip
+      (`rowsperstrip: 1`) — confirmed `tifffile.memmap()` opens it
+      instantly and reads a single pixel in <1ms regardless of file size,
+      no need for windowed/tiled-TIFF machinery. Same approach used for
+      the much smaller (~4MB) tiles actually in use.
+    - **The contour fallback (EPA Hydrologically Corrected DTM, 10m
+      interval / 20m grid) has NO usable map geometry — confirmed
+      exhaustively, don't re-attempt this.** `returnGeometry=true` on
+      `.../IE_GSI_EPA_Hydrologically_Corrected_DTM_20m_Contours_10m_IE26_ITM/MapServer/0/query`
+      comes back `features: []` with `exceededTransferLimit: true` for
+      EVERY combination tried: `f=json` and `f=geojson`, distances from
+      10m to 500m, with and without `maxAllowableOffset`/
+      `geometryPrecision` generalization, even asking for just one
+      feature (`resultRecordCount=1`). This isn't karst.py's situation
+      (geometry silently disabled server-side) — the response genuinely
+      exceeds whatever size cap this ArcGIS Server enforces, which only
+      makes sense if each contour "feature" is one enormous polyline
+      spanning a huge stretch of the country rather than being split into
+      shorter segments. Attribute-only queries (`CONTOUR_M`, no geometry)
+      work fine — that's all `elevation.get_contours()` asks for, and
+      it's why there's no map overlay for the contour fallback, only a
+      text elevation range in the card.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
