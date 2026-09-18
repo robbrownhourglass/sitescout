@@ -65,9 +65,19 @@ row/col to read.
 A national contour-line layer (10m vertical interval, derived from a
 20m-resolution DTM) — much coarser than the LIDAR above, but genuinely
 live-queryable with no download/caching needed, and covers the whole
-country (unlike the LIDAR tiles). Used both as a fallback headline figure
-when no precise LIDAR tile covers the point, and as its own map overlay
-regardless (useful context even where precise data exists).
+country (unlike the LIDAR tiles). Used as a fallback headline figure when
+no precise LIDAR tile covers the point.
+
+This function only returns attribute values (`CONTOUR_M`), not geometry —
+`returnGeometry=true` on this service comes back `exceededTransferLimit`
+with zero features for every combination tried (see the full writeup in
+CLAUDE.md). The map DOES show contour lines despite that — as a
+server-rendered image tile layer (the same MapServer's `export`
+operation, Esri's non-WMS equivalent of WMS GetMap), built entirely in
+templates/index.html (`ContourExportLayer`), not from anything this
+function returns. Don't assume `get_contours()`'s output can drive a
+vector map layer — it can't, by design, because the underlying service
+can't supply one.
 """
 from __future__ import annotations
 

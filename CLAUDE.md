@@ -569,9 +569,33 @@ app, rather than the documented-but-dead endpoints:
       makes sense if each contour "feature" is one enormous polyline
       spanning a huge stretch of the country rather than being split into
       shorter segments. Attribute-only queries (`CONTOUR_M`, no geometry)
-      work fine — that's all `elevation.get_contours()` asks for, and
-      it's why there's no map overlay for the contour fallback, only a
-      text elevation range in the card.
+      work fine — that's all `elevation.get_contours()` asks for.
+    - **The map overlay was still solved — via `export`, not vector
+      geometry.** The vector geometry dead-end above only blocks getting
+      the raw *shapes* out of this service; it doesn't have WMS enabled
+      either (checked `supportedExtensions` on the MapServer's own
+      `?f=json` — only `FeatureServer`, no `WMS`). But its native
+      `MapServer/export` operation (Esri's own equivalent of WMS
+      `GetMap` — same idea, different name: render a bbox server-side,
+      return an image) works, confirmed live, and — bonus — accepts a
+      **plain WGS84 bbox directly** (`bboxSR=4326`), no ITM reprojection
+      needed for this one. The rendered image is monochrome lines with
+      elevation values printed as text labels baked into the image itself
+      — no color ramp/hypsometric tinting, so there's no "color back to a
+      number" legend to decode (asked and checked); the labels are just a
+      picture of the same `CONTOUR_M` values already available as real
+      data via the attribute query. Implemented as a small custom
+      `L.TileLayer` (standard slippy-map tile→lon/lat math, computed
+      independently rather than relying on Leaflet's private tile-bounds
+      internals) calling `/export` per tile — deliberately not the
+      Esri-Leaflet plugin, to avoid a whole new dependency for one layer.
+      Registered directly in `clearOverlayLayers()`, not through
+      `SECTION_OVERLAY_BUILDERS`/`addSectionOverlays()` — this layer is a
+      general reference layer available everywhere (like the Street/
+      Satellite base layers), not a per-site finding tied to one
+      section's fetched data, and it's off by default (unlike every
+      per-site overlay, which auto-displays) since it's dense enough
+      countrywide to clutter the view before the user's asked for it.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
