@@ -229,6 +229,23 @@ def print_report(report: dict) -> None:
             print("  No threatened (IUCN VU/EN/CR) species recorded nearby")
         print(f"  {b['caveat']}")
 
+    if "terrain" in s:
+        t = s["terrain"]
+        print("\n-- Terrain & elevation --")
+        p = t["precise"]
+        if p["found"]:
+            print(f"  Ground elevation (OPW LIDAR, {p['resolution_m']}m, surveyed {p['survey_date']}): {p['ground_elevation_m']}m")
+            if p["surface_elevation_m"] is not None:
+                print(f"  Surface elevation (incl. vegetation/buildings): {p['surface_elevation_m']}m (+{p['canopy_or_building_height_m']}m above ground)")
+        else:
+            print("  No precise LIDAR elevation at this point (OPW's survey concentrates on rivers/floodplains/coasts)")
+        c = t["contours"]
+        if c["elevation_range_m"]:
+            print(f"  Nearby contours ({c['contour_count']} within {c['search_radius_m']}m): {c['elevation_range_m'][0]}-{c['elevation_range_m'][1]}m")
+        else:
+            print(f"  No contour lines within {c['search_radius_m']}m")
+        print(f"  {t['caveat']}")
+
     if "utilities" in s:
         u = s["utilities"]
         print("\n-- Utilities (request-based, no open API) --")
@@ -472,6 +489,24 @@ def _to_markdown(report: dict) -> str:
         else:
             lines.append("No threatened (IUCN VU/EN/CR) species recorded nearby")
         lines.append(f"> {b['caveat']}")
+        lines.append("")
+
+    if "terrain" in s:
+        t = s["terrain"]
+        lines.append("## Terrain & elevation")
+        p = t["precise"]
+        if p["found"]:
+            lines.append(f"- Ground elevation (OPW LIDAR, {p['resolution_m']}m, surveyed {p['survey_date']}): {p['ground_elevation_m']}m")
+            if p["surface_elevation_m"] is not None:
+                lines.append(f"- Surface elevation (incl. vegetation/buildings): {p['surface_elevation_m']}m (+{p['canopy_or_building_height_m']}m above ground)")
+        else:
+            lines.append("- No precise LIDAR elevation at this point (OPW's survey concentrates on rivers/floodplains/coasts)")
+        c = t["contours"]
+        if c["elevation_range_m"]:
+            lines.append(f"- Nearby contours ({c['contour_count']} within {c['search_radius_m']}m): {c['elevation_range_m'][0]}-{c['elevation_range_m'][1]}m")
+        else:
+            lines.append(f"- No contour lines within {c['search_radius_m']}m")
+        lines.append(f"> {t['caveat']}")
         lines.append("")
 
     if "utilities" in s:

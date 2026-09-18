@@ -2,3 +2,6 @@ requests>=2.31
 python-dotenv>=1.0
 flask>=3.0
 gunicorn>=21.2
+tifffile>=2024.1
+numpy>=1.26
+pyproj>=3.6
