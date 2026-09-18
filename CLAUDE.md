@@ -677,6 +677,28 @@ app, rather than the documented-but-dead endpoints:
       a wrong legend. Confirmed cold-cache cost: ~12s for a genuine 4-tile
       case (one-time, per unique area); warm-cache (tiles already cached
       from an earlier lookup nearby): ~0.4s, same as before.
+17. **The mosaic still had gaps — fixed by searching a bigger circle than
+    the square it feeds.** Follow-up report after item 16 shipped: the
+    corners of the 1km-radius crop still weren't always covered. Root
+    cause, confirmed by testing: `_find_touching_tiles()` searched a
+    circular buffer of exactly `radius_m` (1000m), then `_mosaic_dtm()`
+    cropped to a `radius_m`-*square* — but a 1000m square's corners sit
+    √2×1000 ≈ 1414m from the centre, further than the 1000m circular
+    search ever reached. Any tile that only touched the square's corner
+    region was never fetched, leaving that corner as NoData/transparent
+    in the final image. Confirmed live at Fermoy, Co. Cork: a 1000m
+    circular search found 3 tiles; a 1414m one found 7 — the extra 4
+    covering exactly the missed corners. Fixed by searching
+    `radius_m * 1.5` (comfortably past the exact √2 factor, for rounding
+    margin) while still cropping to the original `radius_m` square —
+    confirmed the crop is now 0% NoData at both Fermoy (7 tiles) and
+    Trinity College Dublin (still 4, unchanged — it was never affected,
+    which is exactly why this shipped once already without this bug
+    surfacing there). The wider search does mean a few tiles get
+    downloaded whose area doesn't end up in the final square crop at all
+    — an accepted, harmless over-fetch (cached either way) in exchange
+    for a real correctness guarantee, not a hand-tuned "seems to work"
+    radius.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority

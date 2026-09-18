@@ -203,6 +203,21 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
     relative to the grid (confirmed live: Trinity College Dublin sits
     close enough to a boundary that its 1km radius touches exactly 4).
 
+    **Gotcha, confirmed by testing — search a circle bigger than the
+    square you're about to crop to.** The final mosaic is cropped to a
+    `radius_m`-square (see _mosaic_dtm()), but a square's corners are
+    further from its centre than its edges: a 1000m square's corners sit
+    √2×1000 ≈ 1414m out. Searching this coverage index with
+    `distance_m=radius_m` (a circle of that same radius) misses any tile
+    that only touches the square's corner region — confirmed live at
+    Fermoy, Co. Cork: a 1000m circular search found 3 tiles, but a 1414m
+    one (matching the square's true diagonal reach) found 7, the extra 4
+    covering exactly the corners the smaller circle didn't reach. So the
+    search radius here is deliberately `radius_m * sqrt(2)`, not
+    `radius_m` — over-fetches a handful of tiles whose area doesn't
+    actually end up in the final square crop (harmless, just a few extra
+    cached downloads), but guarantees nothing inside the square is missed.
+
     Uses arcgis.point_query()'s existing distance_m — a real server-side
     buffered spatial query, no manual sampling needed. "Does a source
     actually cover the exact point" is answered with a plain bbox check
@@ -218,13 +233,14 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
     itself falls within, in LIDAR_SOURCES priority order) rather than
     mixing tiles from different surveys/years into one image.
     """
+    search_radius_m = radius_m * 1.5  # > radius_m * sqrt(2) (~1.4142), a bit of extra margin against rounding
     itm_x, itm_y = _to_itm.transform(lon, lat)
     for source_label, coverage_url, dtm_pattern, dsm_pattern in LIDAR_SOURCES:
-        log.info("Checking %s LIDAR coverage within %dm…", source_label, radius_m)
+        log.info("Checking %s LIDAR coverage within %dm (for a %dm-radius square crop)…", source_label, search_radius_m, radius_m)
         try:
             feats = point_query(
                 coverage_url, lon, lat, out_fields=COVERAGE_OUT_FIELDS,
-                distance_m=radius_m, result_record_count=10,
+                distance_m=search_radius_m, result_record_count=16,
             )
         except Exception as exc:
             log.warning("-> %s coverage query failed: %s", source_label, exc)
@@ -261,7 +277,7 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
                 "resolution": a.get("RESOLUTION"),
                 "survey_date": a.get("DATECAPTUR"),
             })
-        log.info("-> %s: %d tile(s) touching %dm radius", source_label, len(tiles), radius_m)
+        log.info("-> %s: %d tile(s) found (search radius %dm, for a %dm-radius square crop)", source_label, len(tiles), search_radius_m, radius_m)
         return source_label, tiles
 
     return None, []
