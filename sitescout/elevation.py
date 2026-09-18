@@ -192,52 +192,79 @@ def _read_pixel(tif_path: Path, itm_x: float, itm_y: float, ext_left: float, ext
     return None if value <= -9999 else value
 
 
-def _find_covering_tiles(lat: float, lon: float):
-    """Generator, not a list — LIDAR_SOURCES whose coverage index
-    geometrically contains this point, downloaded+cached, yielded lazily
-    in source priority order (NASC first) so a caller that only wants the
-    first hit (render_dtm_image()) doesn't pay for querying every
-    remaining source once it already has what it needs. get_precise_
-    elevation() instead consumes the whole generator, since it needs to
-    fall through to the next source on a NoData pixel.
+IMAGE_RADIUS_M = 1000  # "cover a 1km radius" — a square crop of this half-width, not a strict circle (simpler; visually equivalent for this purpose)
 
-    Split out from get_precise_elevation() so render_dtm_image() can reuse
-    the same tile-resolution logic without duplicating it — rendering
-    doesn't care whether the exact query pixel is NoData (a whole tile can
-    still be worth drawing even if one specific point in it has a gap),
-    so it can't just reuse get_precise_elevation()'s own NoData-driven
-    fallback loop directly.
+
+def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optional[str], list[dict]]:
+    """All tiles from the FIRST LIDAR_SOURCES entry that actually covers
+    the exact point, intersecting a radius_m buffer around it — used to
+    build a multi-tile mosaic instead of a single ~2km tile, since a 1km
+    radius can straddle up to 4 tiles depending on where the point falls
+    relative to the grid (confirmed live: Trinity College Dublin sits
+    close enough to a boundary that its 1km radius touches exactly 4).
+
+    Uses arcgis.point_query()'s existing distance_m — a real server-side
+    buffered spatial query, no manual sampling needed. "Does a source
+    actually cover the exact point" is answered with a plain bbox check
+    against the returned tiles' own EXT_* attributes rather than a second
+    query: these coverage-index features are plain axis-aligned squares,
+    so their extent IS their exact boundary — no geometry library needed
+    for an exact (not approximate) point-in-tile test, same reasoning as
+    the karst/contour decisions not to hand-roll real polygon geometry
+    elsewhere in this app, just simpler here because these shapes are
+    trivial rectangles.
+
+    Deliberately sticks to ONE source per mosaic (whichever the point
+    itself falls within, in LIDAR_SOURCES priority order) rather than
+    mixing tiles from different surveys/years into one image.
     """
+    itm_x, itm_y = _to_itm.transform(lon, lat)
     for source_label, coverage_url, dtm_pattern, dsm_pattern in LIDAR_SOURCES:
-        log.info("Checking %s LIDAR coverage…", source_label)
+        log.info("Checking %s LIDAR coverage within %dm…", source_label, radius_m)
         try:
-            feats = point_query(coverage_url, lon, lat, out_fields=COVERAGE_OUT_FIELDS)
+            feats = point_query(
+                coverage_url, lon, lat, out_fields=COVERAGE_OUT_FIELDS,
+                distance_m=radius_m, result_record_count=10,
+            )
         except Exception as exc:
             log.warning("-> %s coverage query failed: %s", source_label, exc)
             continue
         if not feats:
             continue
 
-        a = feats[0]["attributes"]
-        data_name = a["DATA_NAME"]
-        dtm_name = dtm_pattern.format(name=data_name)
-        dsm_name = dsm_pattern.format(name=data_name)
-        try:
-            dtm_path, dsm_path = _download_and_extract(a["DATA_URL"], source_label, dtm_name, dsm_name)
-        except Exception as exc:
-            log.warning("-> %s tile download/extract failed: %s", source_label, exc)
-            continue
-        if not dtm_path:
+        contains_point = any(
+            f["attributes"]["EXT_LEFT"] <= itm_x <= f["attributes"]["EXT_RIGHT"]
+            and f["attributes"]["EXT_BOTTOM"] <= itm_y <= f["attributes"]["EXT_TOP"]
+            for f in feats
+        )
+        if not contains_point:
+            log.info("-> %s has tiles nearby but none covering the exact point — trying next source", source_label)
             continue
 
-        yield {
-            "source_label": source_label,
-            "dtm_path": dtm_path,
-            "dsm_path": dsm_path,
-            "ext": (a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"]),
-            "resolution": a.get("RESOLUTION"),
-            "survey_date": a.get("DATECAPTUR"),
-        }
+        tiles = []
+        for f in feats:
+            a = f["attributes"]
+            data_name = a["DATA_NAME"]
+            dtm_name = dtm_pattern.format(name=data_name)
+            dsm_name = dsm_pattern.format(name=data_name)
+            try:
+                dtm_path, dsm_path = _download_and_extract(a["DATA_URL"], source_label, dtm_name, dsm_name)
+            except Exception as exc:
+                log.warning("-> %s tile %s download/extract failed: %s", source_label, data_name, exc)
+                continue
+            if not dtm_path:
+                continue
+            tiles.append({
+                "dtm_path": dtm_path,
+                "dsm_path": dsm_path,
+                "ext": (a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"]),
+                "resolution": a.get("RESOLUTION"),
+                "survey_date": a.get("DATECAPTUR"),
+            })
+        log.info("-> %s: %d tile(s) touching %dm radius", source_label, len(tiles), radius_m)
+        return source_label, tiles
+
+    return None, []
 
 
 def _itm_bounds_to_wgs84(ext: tuple) -> list:
@@ -247,59 +274,120 @@ def _itm_bounds_to_wgs84(ext: tuple) -> list:
     return [[lat_sw, lon_sw], [lat_ne, lon_ne]]
 
 
-def _dtm_range(tif_path: Path) -> Optional[tuple[float, float]]:
-    """Full-array min/max, ignoring NoData. Only used by
-    get_precise_elevation() below, purely to caption the map image with a
-    real legend ("this tile ranges from X to Ym") — render_dtm_image()
-    needs this exact same min/max anyway for its own color scale, but
-    computes it from the array it's already reading for pixel colors
-    rather than calling this and reading the file a second time.
+def _mosaic_dtm(lat: float, lon: float, radius_m: float) -> Optional[dict]:
+    """Downloads every DTM tile touching a radius_m buffer around
+    (lat, lon) from one LIDAR source, stitches them into one array
+    positioned by each tile's own real ITM extent (all confirmed on the
+    same regular 2km grid — tiles fit together exactly edge-to-edge, no
+    reprojection/resampling needed), then crops to a radius_m square
+    around the point. Returns None if no source covers the point.
+
+    Shared by get_precise_elevation() (point value + bounds + range) and
+    render_dtm_image() (the actual picture) so both are guaranteed
+    consistent — computed from the exact same assembled data, not two
+    independently-built mosaics that could drift apart.
     """
-    arr = tifffile.imread(str(tif_path)).astype(np.float32)
-    valid = arr > -9999
-    if not valid.any():
+    source_label, tiles = _find_touching_tiles(lat, lon, radius_m)
+    if not tiles:
         return None
-    return float(arr[valid].min()), float(arr[valid].max())
+
+    resolution = tiles[0]["resolution"] or 2.0
+    left = min(t["ext"][0] for t in tiles)
+    top = max(t["ext"][1] for t in tiles)
+    right = max(t["ext"][2] for t in tiles)
+    bottom = min(t["ext"][3] for t in tiles)
+    width_px = round((right - left) / resolution)
+    height_px = round((top - bottom) / resolution)
+    canvas = np.full((height_px, width_px), -9999.0, dtype=np.float32)
+
+    for t in tiles:
+        arr = tifffile.imread(str(t["dtm_path"])).astype(np.float32)
+        t_left, _t_top, _t_right, t_bottom = t["ext"]
+        col_off = round((t_left - left) / resolution)
+        row_off = round((top - t["ext"][1]) / resolution)
+        h, w = arr.shape
+        canvas[row_off:row_off + h, col_off:col_off + w] = arr
+
+    itm_x, itm_y = _to_itm.transform(lon, lat)
+    col0 = max(0, round((itm_x - radius_m - left) / resolution))
+    col1 = min(width_px, round((itm_x + radius_m - left) / resolution))
+    row0 = max(0, round((top - (itm_y + radius_m)) / resolution))
+    row1 = min(height_px, round((top - (itm_y - radius_m)) / resolution))
+    cropped = canvas[row0:row1, col0:col1]
+
+    cropped_ext = (
+        left + col0 * resolution, top - row0 * resolution,
+        left + col1 * resolution, top - row1 * resolution,
+    )
+    return {
+        "array": cropped,
+        "ext": cropped_ext,
+        "resolution": resolution,
+        "source_label": source_label,
+        "survey_date": tiles[0]["survey_date"],
+        "tile_count": len(tiles),
+        "tiles": tiles,
+    }
 
 
 def get_precise_elevation(lat: float, lon: float) -> dict:
     itm_x, itm_y = _to_itm.transform(lon, lat)
 
-    for tile in _find_covering_tiles(lat, lon):
-        ground_m = _read_pixel(tile["dtm_path"], itm_x, itm_y, *tile["ext"])
-        surface_m = _read_pixel(tile["dsm_path"], itm_x, itm_y, *tile["ext"]) if tile["dsm_path"] else None
-        if ground_m is None:
-            log.info("-> %s tile found but point is NoData (edge/water gap) — trying next source", tile["source_label"])
-            continue
+    mosaic = _mosaic_dtm(lat, lon, IMAGE_RADIUS_M)
+    if not mosaic:
+        log.info("-> No precise LIDAR coverage at this point")
+        return {"found": False}
 
-        log.info(
-            "-> %s: ground %.2fm%s", tile["source_label"], ground_m,
-            f", surface {surface_m:.2f}m" if surface_m is not None else "",
-        )
-        image_range = _dtm_range(tile["dtm_path"])
-        return {
-            "found": True,
-            "ground_elevation_m": round(ground_m, 2),
-            "surface_elevation_m": round(surface_m, 2) if surface_m is not None else None,
-            "canopy_or_building_height_m": round(surface_m - ground_m, 2) if surface_m is not None else None,
-            "resolution_m": tile["resolution"],
-            "survey_date": tile["survey_date"],
-            "source": f"OPW LIDAR ({tile['source_label']})",
-            "bounds_wgs84": _itm_bounds_to_wgs84(tile["ext"]),
-            "image_min_elevation_m": round(image_range[0], 1) if image_range else None,
-            "image_max_elevation_m": round(image_range[1], 1) if image_range else None,
-            # Not rendered here — the image is only generated on demand,
-            # when the map layer is actually toggled on (see webapp.py's
-            # /api/terrain-image route and render_dtm_image() below), same
-            # lazy-fetch pattern as the contour tile layer. bounds_wgs84 and
-            # the min/max above are cheap enough (extent is plain metadata;
-            # the range read is one more small array read) to include
-            # eagerly rather than round-tripping again just for these.
-            "image_url": f"/api/terrain-image?lat={lat}&lon={lon}",
-        }
+    arr = mosaic["array"]
+    height, width = arr.shape
+    ext_left, ext_top, ext_right, ext_bottom = mosaic["ext"]
+    col = int((itm_x - ext_left) / mosaic["resolution"])
+    row = int((ext_top - itm_y) / mosaic["resolution"])
+    if not (0 <= row < height and 0 <= col < width) or arr[row, col] <= -9999:
+        log.info("-> Coverage exists nearby but this exact point is NoData")
+        return {"found": False}
+    ground_m = float(arr[row, col])
 
-    log.info("-> No precise LIDAR coverage at this point")
-    return {"found": False}
+    # DSM: a single point read from whichever mosaic tile actually
+    # contains (lat, lon) — the image itself is DTM-only, so DSM isn't
+    # worth mosaicking, just reused from the tile list _mosaic_dtm()
+    # already downloaded (no extra network call).
+    surface_m = None
+    for t in mosaic["tiles"]:
+        tl, tt, tr, tb = t["ext"]
+        if tl <= itm_x <= tr and tb <= itm_y <= tt and t["dsm_path"]:
+            surface_m = _read_pixel(t["dsm_path"], itm_x, itm_y, tl, tt, tr, tb)
+            break
+
+    valid = arr > -9999
+    vmin, vmax = float(arr[valid].min()), float(arr[valid].max())
+
+    log.info(
+        "-> %s: ground %.2fm%s (%d tile(s) mosaicked)", mosaic["source_label"], ground_m,
+        f", surface {surface_m:.2f}m" if surface_m is not None else "", mosaic["tile_count"],
+    )
+    return {
+        "found": True,
+        "ground_elevation_m": round(ground_m, 2),
+        "surface_elevation_m": round(surface_m, 2) if surface_m is not None else None,
+        "canopy_or_building_height_m": round(surface_m - ground_m, 2) if surface_m is not None else None,
+        "resolution_m": mosaic["resolution"],
+        "survey_date": mosaic["survey_date"],
+        "source": f"OPW LIDAR ({mosaic['source_label']})",
+        "bounds_wgs84": _itm_bounds_to_wgs84(mosaic["ext"]),
+        "image_min_elevation_m": round(vmin, 1),
+        "image_max_elevation_m": round(vmax, 1),
+        "image_radius_m": IMAGE_RADIUS_M,
+        "image_tile_count": mosaic["tile_count"],
+        # Not rendered here — the image is only generated on demand, when
+        # the map layer is actually toggled on (see webapp.py's
+        # /api/terrain-image route and render_dtm_image() below), same
+        # lazy-fetch pattern as the contour tile layer. bounds_wgs84 and
+        # the min/max above ARE computed eagerly here (this function
+        # already builds the mosaic anyway, for the point-value read) —
+        # not an extra cost specific to the image, so no reason to defer.
+        "image_url": f"/api/terrain-image?lat={lat}&lon={lon}",
+    }
 
 
 def _elevation_to_rgb(normalized: np.ndarray) -> np.ndarray:
@@ -319,31 +407,37 @@ def _elevation_to_rgb(normalized: np.ndarray) -> np.ndarray:
 
 
 def render_dtm_image(lat: float, lon: float) -> Optional[dict]:
-    """Renders the DTM tile covering (lat, lon) as a real per-pixel
-    elevation image — every pixel's color directly encodes that pixel's
-    own genuine LIDAR elevation value (min/max-normalised per tile, since
-    a fixed national scale would wash out contrast in any one 2km tile),
-    not a hillshade and not a derived/coarser product. This is the actual
-    2m data requested — the "Terrain & elevation" card's single point
-    value only ever showed one pixel out of the ~1000x1000 in the tile;
-    this shows all of them.
+    """Renders a mosaic of every DTM tile touching a IMAGE_RADIUS_M buffer
+    around (lat, lon) as a real per-pixel elevation image — every pixel's
+    color directly encodes that pixel's own genuine LIDAR elevation value
+    (min/max-normalised across the mosaic, since a fixed national scale
+    would wash out contrast in any one small area), not a hillshade and
+    not a derived/coarser product. This is the actual 2m data requested —
+    the "Terrain & elevation" card's single point value only ever showed
+    one pixel out of the ~1000x1000 in a tile; this shows all of them
+    across the full requested radius, not just whichever single ~2km tile
+    happened to contain the exact point (which could clip most of a 1km
+    radius if the point sits near a tile edge — confirmed happening at
+    Trinity College Dublin, which needed 4 tiles to fully cover 1km).
 
     Called on demand (see webapp.py's /api/terrain-image route), not
-    during the main site lookup — same lazy-fetch pattern as the contour
-    tile layer, so a site that never gets this layer toggled on never
-    pays the rendering cost.
+    during the main site lookup itself — same lazy-fetch pattern as the
+    contour tile layer, so a site that never gets this layer toggled on
+    never pays the rendering cost (get_precise_elevation() DOES build the
+    same mosaic eagerly, for its own point-value read — this function
+    just reuses that same logic via _mosaic_dtm(), not a separate mosaic).
     """
-    tile = next(_find_covering_tiles(lat, lon), None)  # first hit only — stops the generator there, no wasted queries against remaining sources
-    if not tile:
+    mosaic = _mosaic_dtm(lat, lon, IMAGE_RADIUS_M)
+    if not mosaic:
         return None
 
-    arr = tifffile.imread(str(tile["dtm_path"])).astype(np.float32)
+    arr = mosaic["array"]
     valid = arr > -9999
     if not valid.any():
         return None
 
     vmin, vmax = float(arr[valid].min()), float(arr[valid].max())
-    span = max(vmax - vmin, 0.01)  # guard against a div-by-zero on a perfectly flat tile
+    span = max(vmax - vmin, 0.01)  # guard against a div-by-zero on a perfectly flat area
     normalized = np.clip((arr - vmin) / span, 0, 1)
     rgb = _elevation_to_rgb(normalized)
     alpha = np.where(valid, 200, 0).astype(np.uint8)  # NoData pixels fully transparent
@@ -354,10 +448,10 @@ def render_dtm_image(lat: float, lon: float) -> Optional[dict]:
 
     return {
         "png_bytes": buf.getvalue(),
-        "bounds_wgs84": _itm_bounds_to_wgs84(tile["ext"]),
+        "bounds_wgs84": _itm_bounds_to_wgs84(mosaic["ext"]),
         "min_elevation_m": round(vmin, 1),
         "max_elevation_m": round(vmax, 1),
-        "source_label": tile["source_label"],
+        "source_label": mosaic["source_label"],
     }
 
 
