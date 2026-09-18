@@ -88,8 +88,10 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import requests
 import tifffile
+from PIL import Image
 from pyproj import Transformer
 
 from . import config
@@ -122,6 +124,20 @@ CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "lidar_tiles"
 TILE_DOWNLOAD_TIMEOUT_S = 60  # generous for a confirmed ~4MB tile; not sized for the excluded 200MB+ Cork case
 
 _to_itm = Transformer.from_crs("EPSG:4326", "EPSG:2157", always_xy=True)
+_from_itm = Transformer.from_crs("EPSG:2157", "EPSG:4326", always_xy=True)
+
+# A simple 4-stop hypsometric tint (green -> yellow-green -> tan -> white),
+# the standard "low to high" terrain-elevation color convention — chosen
+# specifically because it's a real, disclosed, per-tile min/max scale (see
+# render_dtm_image()), not a hillshade: every pixel's color directly
+# encodes that pixel's own real elevation, answering "can we see the real
+# 2m data" more directly than a relief shading would.
+_COLOR_STOPS = [
+    (0.00, (46, 139, 60)),
+    (0.35, (154, 205, 50)),
+    (0.65, (222, 165, 62)),
+    (1.00, (255, 255, 255)),
+]
 
 
 def _cache_path(source_label: str, filename: str) -> Path:
@@ -176,9 +192,22 @@ def _read_pixel(tif_path: Path, itm_x: float, itm_y: float, ext_left: float, ext
     return None if value <= -9999 else value
 
 
-def get_precise_elevation(lat: float, lon: float) -> dict:
-    itm_x, itm_y = _to_itm.transform(lon, lat)
+def _find_covering_tiles(lat: float, lon: float):
+    """Generator, not a list — LIDAR_SOURCES whose coverage index
+    geometrically contains this point, downloaded+cached, yielded lazily
+    in source priority order (NASC first) so a caller that only wants the
+    first hit (render_dtm_image()) doesn't pay for querying every
+    remaining source once it already has what it needs. get_precise_
+    elevation() instead consumes the whole generator, since it needs to
+    fall through to the next source on a NoData pixel.
 
+    Split out from get_precise_elevation() so render_dtm_image() can reuse
+    the same tile-resolution logic without duplicating it — rendering
+    doesn't care whether the exact query pixel is NoData (a whole tile can
+    still be worth drawing even if one specific point in it has a gap),
+    so it can't just reuse get_precise_elevation()'s own NoData-driven
+    fallback loop directly.
+    """
     for source_label, coverage_url, dtm_pattern, dsm_pattern in LIDAR_SOURCES:
         log.info("Checking %s LIDAR coverage…", source_label)
         try:
@@ -201,29 +230,135 @@ def get_precise_elevation(lat: float, lon: float) -> dict:
         if not dtm_path:
             continue
 
-        ext = (a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"])
-        ground_m = _read_pixel(dtm_path, itm_x, itm_y, *ext)
-        surface_m = _read_pixel(dsm_path, itm_x, itm_y, *ext) if dsm_path else None
+        yield {
+            "source_label": source_label,
+            "dtm_path": dtm_path,
+            "dsm_path": dsm_path,
+            "ext": (a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"]),
+            "resolution": a.get("RESOLUTION"),
+            "survey_date": a.get("DATECAPTUR"),
+        }
+
+
+def _itm_bounds_to_wgs84(ext: tuple) -> list:
+    ext_left, ext_top, ext_right, ext_bottom = ext
+    lon_sw, lat_sw = _from_itm.transform(ext_left, ext_bottom)
+    lon_ne, lat_ne = _from_itm.transform(ext_right, ext_top)
+    return [[lat_sw, lon_sw], [lat_ne, lon_ne]]
+
+
+def _dtm_range(tif_path: Path) -> Optional[tuple[float, float]]:
+    """Full-array min/max, ignoring NoData. Only used by
+    get_precise_elevation() below, purely to caption the map image with a
+    real legend ("this tile ranges from X to Ym") — render_dtm_image()
+    needs this exact same min/max anyway for its own color scale, but
+    computes it from the array it's already reading for pixel colors
+    rather than calling this and reading the file a second time.
+    """
+    arr = tifffile.imread(str(tif_path)).astype(np.float32)
+    valid = arr > -9999
+    if not valid.any():
+        return None
+    return float(arr[valid].min()), float(arr[valid].max())
+
+
+def get_precise_elevation(lat: float, lon: float) -> dict:
+    itm_x, itm_y = _to_itm.transform(lon, lat)
+
+    for tile in _find_covering_tiles(lat, lon):
+        ground_m = _read_pixel(tile["dtm_path"], itm_x, itm_y, *tile["ext"])
+        surface_m = _read_pixel(tile["dsm_path"], itm_x, itm_y, *tile["ext"]) if tile["dsm_path"] else None
         if ground_m is None:
-            log.info("-> %s tile found but point is NoData (edge/water gap) — trying next source", source_label)
+            log.info("-> %s tile found but point is NoData (edge/water gap) — trying next source", tile["source_label"])
             continue
 
         log.info(
-            "-> %s: ground %.2fm%s", source_label, ground_m,
+            "-> %s: ground %.2fm%s", tile["source_label"], ground_m,
             f", surface {surface_m:.2f}m" if surface_m is not None else "",
         )
+        image_range = _dtm_range(tile["dtm_path"])
         return {
             "found": True,
             "ground_elevation_m": round(ground_m, 2),
             "surface_elevation_m": round(surface_m, 2) if surface_m is not None else None,
             "canopy_or_building_height_m": round(surface_m - ground_m, 2) if surface_m is not None else None,
-            "resolution_m": a.get("RESOLUTION"),
-            "survey_date": a.get("DATECAPTUR"),
-            "source": f"OPW LIDAR ({source_label})",
+            "resolution_m": tile["resolution"],
+            "survey_date": tile["survey_date"],
+            "source": f"OPW LIDAR ({tile['source_label']})",
+            "bounds_wgs84": _itm_bounds_to_wgs84(tile["ext"]),
+            "image_min_elevation_m": round(image_range[0], 1) if image_range else None,
+            "image_max_elevation_m": round(image_range[1], 1) if image_range else None,
+            # Not rendered here — the image is only generated on demand,
+            # when the map layer is actually toggled on (see webapp.py's
+            # /api/terrain-image route and render_dtm_image() below), same
+            # lazy-fetch pattern as the contour tile layer. bounds_wgs84 and
+            # the min/max above are cheap enough (extent is plain metadata;
+            # the range read is one more small array read) to include
+            # eagerly rather than round-tripping again just for these.
+            "image_url": f"/api/terrain-image?lat={lat}&lon={lon}",
         }
 
     log.info("-> No precise LIDAR coverage at this point")
     return {"found": False}
+
+
+def _elevation_to_rgb(normalized: np.ndarray) -> np.ndarray:
+    """normalized: 2D float array in [0, 1]. Returns an (H, W, 3) uint8
+    array by piecewise-linear interpolation through _COLOR_STOPS.
+    """
+    h, w = normalized.shape
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    for i in range(len(_COLOR_STOPS) - 1):
+        t0, c0 = _COLOR_STOPS[i]
+        t1, c1 = _COLOR_STOPS[i + 1]
+        mask = (normalized >= t0) & (normalized <= t1)
+        local_t = np.clip((normalized - t0) / (t1 - t0), 0, 1)
+        for ch in range(3):
+            rgb[..., ch] = np.where(mask, c0[ch] + (c1[ch] - c0[ch]) * local_t, rgb[..., ch])
+    return rgb.astype(np.uint8)
+
+
+def render_dtm_image(lat: float, lon: float) -> Optional[dict]:
+    """Renders the DTM tile covering (lat, lon) as a real per-pixel
+    elevation image — every pixel's color directly encodes that pixel's
+    own genuine LIDAR elevation value (min/max-normalised per tile, since
+    a fixed national scale would wash out contrast in any one 2km tile),
+    not a hillshade and not a derived/coarser product. This is the actual
+    2m data requested — the "Terrain & elevation" card's single point
+    value only ever showed one pixel out of the ~1000x1000 in the tile;
+    this shows all of them.
+
+    Called on demand (see webapp.py's /api/terrain-image route), not
+    during the main site lookup — same lazy-fetch pattern as the contour
+    tile layer, so a site that never gets this layer toggled on never
+    pays the rendering cost.
+    """
+    tile = next(_find_covering_tiles(lat, lon), None)  # first hit only — stops the generator there, no wasted queries against remaining sources
+    if not tile:
+        return None
+
+    arr = tifffile.imread(str(tile["dtm_path"])).astype(np.float32)
+    valid = arr > -9999
+    if not valid.any():
+        return None
+
+    vmin, vmax = float(arr[valid].min()), float(arr[valid].max())
+    span = max(vmax - vmin, 0.01)  # guard against a div-by-zero on a perfectly flat tile
+    normalized = np.clip((arr - vmin) / span, 0, 1)
+    rgb = _elevation_to_rgb(normalized)
+    alpha = np.where(valid, 200, 0).astype(np.uint8)  # NoData pixels fully transparent
+    rgba = np.dstack([rgb, alpha])
+
+    buf = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+
+    return {
+        "png_bytes": buf.getvalue(),
+        "bounds_wgs84": _itm_bounds_to_wgs84(tile["ext"]),
+        "min_elevation_m": round(vmin, 1),
+        "max_elevation_m": round(vmax, 1),
+        "source_label": tile["source_label"],
+    }
 
 
 def get_contours(lat: float, lon: float) -> dict:

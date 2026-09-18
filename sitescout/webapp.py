@@ -38,9 +38,9 @@ from __future__ import annotations
 
 import logging
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
-from . import autoaddress, cadastral, config, geocode, pipeline, report
+from . import autoaddress, cadastral, config, elevation, geocode, pipeline, report
 
 log = config.setup_logging(verbose=False)
 
@@ -151,6 +151,34 @@ def api_scout_section(name: str):
         return _error(f"{name} lookup failed: {exc}", 502)
 
     return jsonify({"status": "ok", "section": name, "data": data})
+
+
+@app.get("/api/terrain-image")
+def api_terrain_image():
+    """Renders the OPW LIDAR DTM tile covering (lat, lon) as a real
+    per-pixel elevation image (see elevation.render_dtm_image()) — called
+    lazily by the map's "Precise terrain (OPW LIDAR)" overlay only when a
+    user actually toggles it on, same as the contour tile layer never
+    hitting this app's own server at all (it calls GSI's ArcGIS `export`
+    operation directly). This is the one image-producing endpoint in the
+    app; every other route returns JSON.
+    """
+    try:
+        lat = float(request.args["lat"])
+        lon = float(request.args["lon"])
+    except (KeyError, ValueError, TypeError):
+        return _error("lat and lon query params are required", 400)
+
+    try:
+        result = elevation.render_dtm_image(lat, lon)
+    except Exception as exc:
+        log.error("Terrain image render failed: %s", exc)
+        return _error(f"terrain image render failed: {exc}", 502)
+
+    if not result:
+        return _error("no precise LIDAR coverage at this point", 404)
+
+    return Response(result["png_bytes"], mimetype="image/png")
 
 
 def _slim_options(options: list[dict]) -> list[dict]:
