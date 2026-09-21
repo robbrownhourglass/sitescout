@@ -40,7 +40,7 @@ import logging
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from . import autoaddress, cadastral, config, elevation, geocode, pipeline, report
+from . import autoaddress, buildings, cadastral, config, elevation, geocode, pipeline, report
 
 log = config.setup_logging(verbose=False)
 
@@ -183,19 +183,31 @@ def api_terrain_image():
 
 @app.post("/api/terrain-mesh")
 def api_terrain_mesh():
-    """A precise elevation grid clipped to a plot boundary's own shape
-    (not a bounding rectangle) — see elevation.get_terrain_mesh() — for
-    the /terrain-3d page's rotatable 3D rendering. POST, not GET, since
-    the boundary (the confirmed plot selection's own ring geometry) is
-    the actual query, not a couple of scalar params like everywhere else.
+    """A real triangle mesh (vertices + faces) of the plot's own real LIDAR
+    elevation, exactly clipped to its boundary shape (not a bounding
+    rectangle, not a blocky grid staircase — see elevation.get_terrain_mesh()'s
+    module comment) plus nearby OSM building footprints extruded and
+    grounded on that same mesh (buildings.get_nearby_buildings()) — for the
+    /terrain-3d page's rotatable 3D rendering. POST, not GET, since the
+    boundary (the confirmed plot selection's own ring geometry) is the
+    actual query, not a couple of scalar params like everywhere else.
     """
     body = request.get_json(silent=True) or {}
     ring_sets = body.get("polygon_ring_sets_wgs84")
     if not ring_sets:
         return _error("polygon_ring_sets_wgs84 is required", 400)
 
+    nearby_buildings = []
+    center = elevation.mesh_center_and_radius(ring_sets)
+    if center:
+        center_lon, center_lat, radius_m = center
+        try:
+            nearby_buildings = buildings.get_nearby_buildings(center_lat, center_lon, radius_m)
+        except Exception as exc:
+            log.warning("Building footprint lookup failed (continuing without buildings): %s", exc)
+
     try:
-        result = elevation.get_terrain_mesh(ring_sets)
+        result = elevation.get_terrain_mesh(ring_sets, buildings=nearby_buildings)
     except Exception as exc:
         log.error("Terrain mesh build failed: %s", exc)
         return _error(f"terrain mesh build failed: {exc}", 502)
