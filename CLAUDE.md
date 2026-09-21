@@ -1389,6 +1389,44 @@ app, rather than the documented-but-dead endpoints:
       reuse the same texture/mesh rather than creating duplicates; and
       unchecking/rechecking the main flow toggle correctly hides and
       restores the catchment layer together with everything else.
+28. **Follow-up, real user report with a screenshot: two of three selected
+    points showed a thin line instead of a proper catchment area.**
+    Traced directly, not guessed: the two "broken" points shared the
+    EXACT same filled elevation (21.586m, confirmed) — they're the same
+    real flat pool. `_fill_and_route()`'s conquest-tree flow direction
+    (item 26) is, by construction, a spanning TREE: exactly one path from
+    any cell back toward the border. For two cells sharing one flat pool,
+    that means each one's reverse-BFS only follows the ONE arbitrary
+    branch of the fill algorithm's own tree that happened to reach that
+    specific pixel — not the pool's real combined contributing area,
+    which is the SAME for every cell in it (hydrologically, one shared
+    pool has one shared catchment, not a different one per pixel).
+    Confirmed the bug's exact scale before fixing: the two points showed
+    21 and 7 cells individually; expanding to the whole 610-cell shared
+    pool first and tracing from all of it gave the real answer, 3106
+    cells.
+    - **`_label_pools()`**: connected-component labelling (8-connected)
+      over cells sharing (near-)identical filled elevation — one more
+      compact per-cell code sent to the frontend (`pool_labels`, -1 for a
+      cell that isn't part of any shared pool), reusing the exact same
+      "send a code, decode client-side" pattern as `flow_dir_codes`.
+    - The frontend now expands a clicked sink to its WHOLE pool
+      (`seedsForSink()` — every cell sharing that sink's `pool_labels`
+      value) before seeding the reverse-BFS, not just the single clicked
+      pixel. Selecting either of two sinks sharing a pool, or both
+      together, now all correctly resolve to the identical, real
+      catchment — verified directly (see below), not just visually
+      plausible.
+    - Verified end-to-end via the same mock-click harness as item 27,
+      extended to specifically click the two real sinks confirmed (via a
+      live Python check against the exact same captured data) to share a
+      pool: selecting either one alone now shows the correct 3,106-cell
+      catchment (not 21 or 7), selecting the other alone shows the
+      identical 3,106 (not a different number — confirming both correctly
+      resolve to the SAME real pool), and selecting both together still
+      shows exactly 3,106 (correct union of a pool with itself — no
+      double-counting), while distinct-pool multi-select (item 27's own
+      test case) still correctly sums instead of collapsing.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
