@@ -1238,6 +1238,31 @@ app, rather than the documented-but-dead endpoints:
       standard technique, but not a substitute for an actual site
       drainage survey, and it says nothing about subsurface drainage,
       soil permeability, or engineered drainage already on site.
+    - **Follow-up, real user report with a screenshot: the lines looked
+      like disconnected arrows, and were pixelated/low-res.** Both traced
+      to the same root cause: the first version drew one independent
+      1-cell segment PER qualifying pixel (cell -> its own downstream
+      neighbour), so at every confluence, several short segments from
+      different upstream directions all terminated at the same point with
+      nothing connecting them into a continuous line — reading visually as
+      converging arrowheads, not a stream. Fixed by tracing whole channels
+      instead: `_compute_flow_network()` now also returns `flow_to`
+      (already computed internally, just not exposed before), used to
+      find real "channel heads" (a qualifying cell with no qualifying
+      upstream neighbour of its own) and walk each one's full path
+      downhill to a sink or the mosaic's own edge, drawing that entire
+      path as ONE connected multi-point line — stopping early if a path
+      merges into a channel another head already traced, to avoid
+      needlessly re-drawing shared downstream tails. Separately: PIL's own
+      line/ellipse drawing has no anti-aliasing at all, which combined
+      with the old short disconnected segments made everything look
+      chunky — fixed by drawing at `FLOW_SUPERSAMPLE` (3x) the final
+      texture size and downsampling with LANCZOS resampling, the standard
+      supersample-then-downsample technique for anti-aliased-looking
+      output from an API with none built in. Confirmed visually
+      afterward, including a close zoomed crop: smooth, continuous,
+      properly branching drainage lines with real tributary confluences,
+      not arrows — performance unaffected (~0.6s, same as before).
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
