@@ -70,6 +70,17 @@ def print_report(report: dict) -> None:
         print(f"  Bedrock: {g.get('bedrock_unit') or 'no data at this point'}")
         print(f"  Subsoil: {g.get('subsoil_type') or 'no data at this point'}")
 
+    if "soil" in s:
+        so = s["soil"]
+        print("\n-- Soil survey (ISIS) --")
+        if so.get("found"):
+            depth = f"{so['depth_cm']}cm" if (so.get("depth_cm") or "").strip() else "n/a"
+            print(f"  {so['soil_type']} ({so['association_name']} association) — drainage: {so['drainage']}, texture: {so['texture']}, depth: {depth}")
+            if so.get("soil_organic_carbon_t_ha") is not None:
+                print(f"  Soil organic carbon: {so['soil_organic_carbon_t_ha']:.1f} t/ha")
+        else:
+            print("  No ISIS soil polygon at this exact point")
+
     if "groundwater" in s:
         w = s["groundwater"]
         print("\n-- Water table --")
@@ -322,6 +333,19 @@ def _to_markdown(report: dict) -> str:
         lines.append("## Geology & subsoil")
         lines.append(f"- Bedrock: {g.get('bedrock_unit') or 'no data at this point'}")
         lines.append(f"- Subsoil: {g.get('subsoil_type') or 'no data at this point'}")
+        lines.append("")
+
+    if "soil" in s:
+        so = s["soil"]
+        lines.append("## Soil survey (ISIS)")
+        if so.get("found"):
+            depth = f"{so['depth_cm']}cm" if (so.get("depth_cm") or "").strip() else "n/a"
+            lines.append(f"- {so['soil_type']} ({so['association_name']} association) — drainage: {so['drainage']}, texture: {so['texture']}, depth: {depth}")
+            if so.get("soil_organic_carbon_t_ha") is not None:
+                lines.append(f"- Soil organic carbon: {so['soil_organic_carbon_t_ha']:.1f} t/ha")
+            lines.append(f"> {so['caveat']}")
+        else:
+            lines.append("No ISIS soil polygon at this exact point")
         lines.append("")
 
     if "groundwater" in s:

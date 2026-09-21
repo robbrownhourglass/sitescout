@@ -53,6 +53,10 @@ sitescout/
                              extracted from epa.py once water_quality.py needed the same
                              bbox+CRS-suffix query primitive (see its own gotcha note)
   gsi.py                    geology (bedrock, subsoil) + groundwater vulnerability
+  soil.py                   pedological soil survey (texture, drainage, depth, soil organic
+                             carbon) — the Irish Soil Information System (ISIS), off the same EPA
+                             GeoServer as epa.py/water_quality.py; a genuinely different dataset
+                             from gsi.py's geological "subsoil" (see verified-sources table)
   heritage.py               archaeology (SMR), SMR Zones (notification zones), NIAH (protected
                              structures) — all National Monuments Service ArcGIS layers
   ecology.py                NPWS designated areas (SAC/SPA/NHA/pNHA) — one national dataset
@@ -277,7 +281,8 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Eircode/address resolution | Autoaddress Search/Lookup API | `autoaddress.py` |
 | Coordinates | Google Geocoding API (fallback: Nominatim) | `geocode.py` |
 | Bedrock geology | GSI `Bedrock_Geology_Datasets_100K` (layer 3 — layer 0 is structural symbols, not the polygon geology) | `gsi.py` |
-| Subsoil | GSI `Quaternary_Sediments_50K` | `gsi.py` |
+| Subsoil (geological — glacial/post-glacial drift) | GSI `Quaternary_Sediments_50K` | `gsi.py` |
+| Soil survey (pedological — texture, drainage, depth, soil organic carbon) | Irish Soil Information System (ISIS), `EPA:SOIL_SISNationalSoils` on EPA's own GeoServer, CC BY 4.0 | `soil.py` + `wfs.py` |
 | Groundwater vulnerability | GSI `Groundwater_Vulnerability_40K` | `gsi.py` |
 | Archaeology (SMR) | National Monuments Service SMR `FeatureServer` (public ArcGIS Online, CORS-open) | `heritage.py` |
 | SMR Zones | National Monuments Service `SMRZone` `FeatureServer`, same ArcGIS org as SMR above | `heritage.py` |
@@ -1482,6 +1487,55 @@ app, rather than the documented-but-dead endpoints:
       bold line reaches rather than the line's own faint-trickle end —
       confirmed visually afterward: pools and lines now read as one
       continuous, solid body of water.
+
+30. **Soil survey (ISIS) — a real user question ("is subsoil different
+    from topsoil, are there actual soil samples published?") surfaced a
+    genuinely separate dataset from gsi.py's subsoil layer, not just a
+    rename.** GSI's `Quaternary_Sediments_50K` (already used by
+    `gsi.py`) is *geological* subsoil — the loose glacial/post-glacial
+    drift (till, sand/gravel, peat) between topsoil and bedrock; it says
+    nothing about soil texture, drainage, or fertility. The Irish Soil
+    Information System (ISIS) is a genuinely different, pedological
+    survey: a 2007-2013 EPA STRIVE + Teagasc project, building on An
+    Foras Talúntais's original 1950s-1990s national soil survey (~44% of
+    the country with real field profile descriptions) by adding 246
+    newly-sampled profile pits (2012-2013) plus digital soil mapping, to
+    produce a 1:250,000-scale, 213-soil-series national map — confirmed
+    real via its own EPA GeoNetwork metadata record, published CC BY 4.0.
+    - Found on the SAME EPA GeoServer `epa.py`/`water_quality.py` already
+      use — its `GetCapabilities` lists four soil layers; `SOIL_SISNationalSoils`
+      was picked because it's the only one carrying drainage, texture,
+      depth, AND soil organic carbon together in one query (the other
+      three: an older classification sharing GSI's own "TDSs"-style
+      codes, a drainage-only layer, and a subsoil-texture-only layer —
+      confirmed by querying all four live at the same test point before
+      choosing).
+    - **A real bug caught before shipping, not assumed away:** an initial
+      test used a ~1km-wide bbox with `count=1`, and got the SAME "River
+      alluvium" result at three geographically distinct test points
+      (Fermoy, Wicklow uplands, Galway) — suspicious given real soil
+      variety was the entire point. Confirmed directly: a wide bbox
+      genuinely intersects several different soil polygons in this
+      finer-grained dataset (unlike `water_quality.py`'s much larger WFD
+      polygons, where a similar-sized bbox is safely inside just one),
+      and GeoServer's `count=1` just returns whichever one it finds
+      first — not the one actually containing the point. Fixed by
+      tightening to a 50m half-bbox (`soil.QUERY_HALF_M`); re-tested and
+      got real, plausible variation (River alluvium at Fermoy, Brown
+      Earth/well-drained in the Wicklow uplands, "Urban - soil concreted
+      over" in built-up test points) — confirmed live, not assumed from
+      the fix alone.
+    - Its own `Depth` field returns whitespace-only strings (`' '`, not
+      an empty string or null) for urban/non-agricultural polygons — a
+      plain truthiness check on it (`if so.depth_cm`) is NOT enough, it
+      passes for `' '` in both Python and JS. `soilCard()` and
+      `report.py`'s printers all `.strip()`/`.trim()` before deciding
+      whether to show "n/a" — caught by actually rendering a real urban
+      test point's response, not by reading the schema.
+    - New "Soil survey" tile, separate from "Geology & subsoil" (not
+      folded in) — genuinely distinct data, and the geology card now
+      cross-references it with a one-line note clarifying its own
+      "subsoil" is the geological sense, not a soil-science reading.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority

@@ -313,6 +313,14 @@ const TILE_ICONS = {
   water: `<svg ${ICON_ATTRS}>
       <path d="M12 3.5S6 11 6 15c0 3.3 2.7 6 6 6s6-2.7 6-6c0-4-6-11.5-6-11.5Z"/>
     </svg>`,
+  // layered soil horizons with a root growing down through them
+  soil: `<svg ${ICON_ATTRS}>
+      <path d="M4 9h16"/>
+      <path d="M4 14h16"/>
+      <path d="M12 9v2.5c0 1-1 1.2-1 2.5s1 1.5 1 2.8V19"/>
+      <path d="M12 12.5c-1 0-1.6.8-2.2 1.2"/>
+      <path d="M12 16.3c1-.1 1.5-.7 2.2-1"/>
+    </svg>`,
   // standing stones + lintel (a dolmen/portal tomb — apt for Irish SMR data)
   archaeology: `<svg ${ICON_ATTRS}>
       <path d="M6 20V9l1.5-4h1L10 9v11"/>
@@ -1183,6 +1191,7 @@ document.getElementById('detailClose').addEventListener('click', closeDetail);
 const TILE_SPECS = [
   { key: 'boundary', title: 'Property boundary', deps: [], build: () => boundaryCard(sectionData.boundary) },
   { key: 'geology', title: 'Geology & subsoil', deps: ['geology'], build: () => geologyCard(sectionData.geology) },
+  { key: 'soil', title: 'Soil survey', deps: ['soil'], build: () => soilCard(sectionData.soil) },
   { key: 'water', title: 'Water table & flood risk', deps: ['groundwater', 'flood_risk'], build: () => waterCard(sectionData.groundwater, sectionData.flood_risk) },
   { key: 'archaeology', title: 'Archaeology & heritage', deps: ['archaeology', 'smr_zone'], build: () => archaeologyCard(sectionData.archaeology, sectionData.smr_zone) },
   { key: 'niah', title: 'Protected structures (NIAH)', deps: ['niah'], build: () => niahCard(sectionData.niah) },
@@ -1497,9 +1506,30 @@ function geologyCard(g){
   const html = `
     ${verdict(hasData ? 'Bedrock and subsoil mapped for this site' : 'No geology data returned at this exact point', hasData ? 'ok' : 'warn')}
     <div><strong>Subsoil / sediment:</strong> ${g.subsoil_type || '<span class="muted">no data at this exact point</span>'}</div>
-    <div style="margin-top:6px"><strong>Bedrock unit:</strong> ${g.bedrock_unit || '<span class="muted">no bedrock polygon returned at this exact point</span>'}${g.bedrock_description ? ` <span class="muted">(${g.bedrock_description})</span>` : ''}</div>`;
+    <div style="margin-top:6px"><strong>Bedrock unit:</strong> ${g.bedrock_unit || '<span class="muted">no bedrock polygon returned at this exact point</span>'}${g.bedrock_description ? ` <span class="muted">(${g.bedrock_description})</span>` : ''}</div>
+    <div class="muted" style="margin-top:8px">"Subsoil" here is geological — the loose glacial/post-glacial material between topsoil and bedrock — not a soil-science reading. See the Soil survey tile for actual soil texture, drainage, and depth.</div>`;
   return card('Geology & subsoil', hasData ? 'ok' : 'warn', 'Live', 'live', html,
     'Source: <a href="https://www.gsi.ie/en-ie/data-and-maps/Pages/Bedrock.aspx" target="_blank">GSI Bedrock &amp; Quaternary geology</a>');
+}
+
+function soilCard(so){
+  if(!so){
+    return card('Soil survey', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  if(!so.found){
+    return card('Soil survey', 'warn', 'Live', 'live',
+      `${verdict('No ISIS soil polygon returned at this exact point', 'warn')}`,
+      'Source: <a href="http://gis.teagasc.ie/soils/" target="_blank">Irish Soil Information System (ISIS)</a> — EPA/Teagasc');
+  }
+  const html = `
+    ${verdict(`${so.soil_type} (${so.association_name} soil association)`, 'ok')}
+    <div><strong>Drainage:</strong> ${so.drainage || '<span class="muted">n/a</span>'}</div>
+    <div style="margin-top:6px"><strong>Texture:</strong> ${so.texture || '<span class="muted">n/a</span>'}${so.texture_substrate ? ` <span class="muted">(${so.texture_substrate})</span>` : ''}</div>
+    <div style="margin-top:6px"><strong>Depth:</strong> ${(so.depth_cm || '').trim() ? so.depth_cm + 'cm' : '<span class="muted">n/a</span>'}</div>
+    ${so.soil_organic_carbon_t_ha != null ? `<div style="margin-top:6px"><strong>Soil organic carbon:</strong> ${so.soil_organic_carbon_t_ha.toFixed(1)} t/ha</div>` : ''}
+    <div class="muted" style="margin-top:8px">${so.caveat}</div>`;
+  return card('Soil survey', 'ok', 'Live', 'live', html,
+    'Source: <a href="http://gis.teagasc.ie/soils/" target="_blank">Irish Soil Information System (ISIS)</a> — EPA/Teagasc, CC BY 4.0');
 }
 
 function waterCard(w, flood){
@@ -2033,6 +2063,7 @@ function buildInfoCard(){
       <li>Geocoding — Google Maps Geocoding REST API (raw Eircode first, then resolved address), falls back to OpenStreetMap Nominatim</li>
       <li>Property boundary — <a href="https://tailte.ie" target="_blank">Tailte Éireann</a> Cadastral Parcels; legal folio &amp; filed plan via <a href="https://www.landdirect.ie" target="_blank">landdirect.ie</a></li>
       <li>Bedrock &amp; subsoil geology — <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a></li>
+      <li>Soil survey (texture, drainage, depth, SOC) — <a href="http://gis.teagasc.ie/soils/" target="_blank">Irish Soil Information System (ISIS)</a>, EPA/Teagasc</li>
       <li>Groundwater vulnerability — GSI Groundwater Vulnerability map</li>
       <li>Flood risk — OPW CFRAM predictive flood-extent maps, live via <a href="https://www.floodinfo.ie" target="_blank">floodinfo.ie</a>'s own GeoServer: fluvial, coastal, and pluvial (surface water) hazards, each across current-climate plus mid-range and high-end future-climate scenarios (pluvial has no future scenario in this dataset)</li>
       <li>Archaeology — National Monuments Service Sites &amp; Monuments Record (SMR)</li>

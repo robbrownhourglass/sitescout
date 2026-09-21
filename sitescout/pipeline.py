@@ -28,7 +28,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohazards, gsi, heritage, rps, utilities, planning, report, water_quality
+from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohazards, gsi, heritage, rps, soil, utilities, planning, report, water_quality
 
 log = logging.getLogger("sitescout.pipeline")
 
@@ -78,6 +78,7 @@ def attach_boundaries(planning_applications: dict) -> None:
 # has no picker UI to get a selection from.
 SECTION_SPECS = {
     "geology": lambda lat, lon, eircode, label: gsi.get_geology(lat, lon),
+    "soil": lambda lat, lon, eircode, label: soil.get_soil_survey(lat, lon),
     "groundwater": lambda lat, lon, eircode, label: gsi.get_groundwater(lat, lon),
     "archaeology": lambda lat, lon, eircode, label: heritage.get_archaeology(lat, lon),
     "smr_zone": lambda lat, lon, eircode, label: heritage.get_smr_zone(lat, lon),
