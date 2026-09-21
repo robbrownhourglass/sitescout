@@ -40,6 +40,10 @@
 <div id="topPanel" class="panel">
   <h1>3D terrain — this site's own shape</h1>
   <div class="muted">Real LIDAR elevation over the site and its surroundings, with the plot boundary and nearby roads painted onto the surface (not separate objects) and nearby buildings shown as real 3D shapes for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
+  <label id="flowToggleRow" style="display:none;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+    <input type="checkbox" id="flowToggle" /> Show water flow analysis
+  </label>
+  <div id="flowMeta" class="muted" style="margin-top:6px;display:none"></div>
   <a id="backLink" href="/">&larr; Back to site report</a>
 </div>
 
@@ -141,10 +145,10 @@ async function main(){
   }
 
   statusEl.style.display = 'none';
-  buildScene(mesh);
+  buildScene(mesh, ringSets);
 }
 
-function buildScene(mesh){
+function buildScene(mesh, ringSets){
   const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
 
@@ -296,6 +300,62 @@ function buildScene(mesh){
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // Water flow analysis (elevation.get_flow_analysis()): real local minima
+  // (where water pools and stays) plus the drainage network that feeds
+  // them, painted as their own transparent overlay — same "ink on the
+  // surface" approach as the boundary/roads texture, but a SEPARATE mesh
+  // (reusing this SAME terrain geometry — identical vertex positions/UVs,
+  // so it's guaranteed pixel-aligned) so it can be toggled on/off
+  // independently, and lazily fetched only on first toggle-on (same
+  // pattern as the map's own "Precise terrain" image layer — an
+  // optional, genuinely extra analysis, not something every visit here
+  // should pay for).
+  document.getElementById('flowToggleRow').style.display = 'flex';
+  const flowToggle = document.getElementById('flowToggle');
+  const flowMeta = document.getElementById('flowMeta');
+  let flowMesh = null;
+  let flowFetchPromise = null;
+
+  flowToggle.addEventListener('change', async () => {
+    if(!flowToggle.checked){
+      if(flowMesh) flowMesh.visible = false;
+      return;
+    }
+    if(flowMesh){
+      flowMesh.visible = true;
+      return;
+    }
+    if(!flowFetchPromise){
+      flowMeta.style.display = 'block';
+      flowMeta.textContent = 'Analyzing water flow…';
+      flowFetchPromise = fetch('/api/terrain-flow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ polygon_ring_sets_wgs84: ringSets }),
+      }).then(r => r.json().then(body => ({ ok: r.ok, body })));
+    }
+    const { ok, body } = await flowFetchPromise;
+    if(!ok || body.status !== 'ok'){
+      flowMeta.textContent = (body && body.message) || 'Flow analysis failed.';
+      flowToggle.checked = false;
+      return;
+    }
+    const flow = body.data;
+    const flowTexture = new THREE.TextureLoader().load('data:image/png;base64,' + flow.flow_overlay_png_base64);
+    flowTexture.colorSpace = THREE.SRGBColorSpace;
+    const flowMaterial = new THREE.MeshBasicMaterial({
+      map: flowTexture, transparent: true, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+    });
+    flowMesh = new THREE.Mesh(geometry, flowMaterial);
+    scene.add(flowMesh);
+    const shown = flow.sinks.length;
+    const total = flow.total_sinks_found;
+    flowMeta.textContent = total
+      ? `${total} low point${total > 1 ? 's' : ''} found where water would pool` + (total > shown ? ` (showing the ${shown} largest)` : '') + ' — blue lines show where it would flow to get there, thicker where more area drains through.'
+      : 'No distinct low points found inside this plot boundary.';
   });
 
   (function animate(){
