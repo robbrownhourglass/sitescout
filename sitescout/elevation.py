@@ -1418,6 +1418,60 @@ def _cluster_sinks(is_sink: np.ndarray, arr: np.ndarray, flow_acc: np.ndarray) -
     return clusters
 
 
+POOL_ELEVATION_EPSILON_M = 1e-4  # cells within this of each other's filled elevation count as "the same pool"
+
+
+def _label_pools(filled: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Connected-component labels (8-connected) for cells sharing
+    (near-)identical FILLED elevation — i.e. the same real flat pool
+    depression-filling created. -1 for a cell that isn't part of any
+    shared pool (a lone cell whose own filled elevation doesn't match any
+    neighbour — a channel cell, not the interior of a filled basin).
+
+    Exists because of a real, confirmed bug in the naive version of
+    interactive catchment selection (see get_flow_analysis()'s own note):
+    two real sinks sharing the exact same pool (filled elevation
+    21.586m, confirmed identical) showed wildly different, tiny "thin
+    line" catchments (21 and 7 cells) when traced individually — each one
+    only follows the ONE arbitrary branch of `_fill_and_route()`'s own
+    spanning tree that happened to reach that specific pixel, not the
+    pool's real total contributing area (confirmed correct once fixed:
+    expanding to the whole 610-cell shared pool first and tracing from
+    ALL of it gave 3106 cells — the real answer). Every cell in the same
+    real pool needs to be treated as one unit for catchment tracing, not
+    traced pixel-by-pixel.
+    """
+    h, w = filled.shape
+    labels = np.full((h, w), -1, dtype=np.int32)
+    visited = np.zeros((h, w), dtype=bool)
+    next_label = 0
+    for r0 in range(h):
+        for c0 in range(w):
+            if not valid[r0, c0] or visited[r0, c0]:
+                continue
+            visited[r0, c0] = True
+            target = filled[r0, c0]
+            queue = deque([(r0, c0)])
+            component = [(r0, c0)]
+            while queue:
+                r, c = queue.popleft()
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if (0 <= nr < h and 0 <= nc < w and valid[nr, nc] and not visited[nr, nc]
+                                and abs(filled[nr, nc] - target) < POOL_ELEVATION_EPSILON_M):
+                            visited[nr, nc] = True
+                            queue.append((nr, nc))
+                            component.append((nr, nc))
+            if len(component) >= 2:
+                for r, c in component:
+                    labels[r, c] = next_label
+                next_label += 1
+    return labels
+
+
 def _fill_and_route(arr: np.ndarray) -> tuple:
     """Priority-flood depression filling (Barnes et al. 2014 — the
     standard algorithm real hydrology tools use to prepare a DEM for
@@ -1694,4 +1748,10 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
         "cols": cols,
         "cell_size_m": resolution,
         "flow_dir_codes": _encode_flow_dir_codes(flow_to),
+        # Which cells share the same real flat pool (see _label_pools()'s
+        # own note on why this is needed — without it, two sinks sharing
+        # one pool trace back through two different arbitrary slivers of
+        # the fill algorithm's own spanning tree instead of that pool's
+        # real combined catchment). -1 = not part of any shared pool.
+        "pool_labels": _label_pools(filled, valid).flatten().tolist(),
     }
