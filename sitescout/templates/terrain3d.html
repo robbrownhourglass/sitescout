@@ -39,7 +39,7 @@
 
 <div id="topPanel" class="panel">
   <h1>3D terrain — this site's own shape</h1>
-  <div class="muted">Real OPW LIDAR elevation (~2m grid), clipped to the confirmed plot boundary — not a bounding box. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible; drag to rotate, scroll to zoom.</div>
+  <div class="muted">Real OPW LIDAR elevation, exactly clipped to the confirmed plot's own boundary shape — not a bounding box, not a blocky grid staircase. Nearby buildings (OpenStreetMap) are shown for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
   <a id="backLink" href="/">&larr; Back to site report</a>
 </div>
 
@@ -145,12 +145,17 @@ async function main(){
 }
 
 function buildScene(mesh){
-  const { rows, cols, cell_size_m: cellSize, heights, min_elevation_m: minEl, max_elevation_m: maxEl, source } = mesh;
+  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
 
   // Legend
   document.getElementById('legendPanel').style.display = 'block';
-  document.getElementById('legendMeta').textContent = `${source} — ${rows}×${cols} grid, ${cellSize}m cells`;
+  const estimatedNote = (buildings || []).some(b => b.height_is_estimated)
+    ? ' (height estimated for buildings without a real OSM height tag)' : '';
+  const buildingNote = buildings && buildings.length
+    ? ` &middot; ${buildings.length} nearby building${buildings.length > 1 ? 's' : ''} (OpenStreetMap)${estimatedNote}`
+    : '';
+  document.getElementById('legendMeta').innerHTML = `${source} &middot; exact boundary${buildingNote}`;
   document.getElementById('legendMin').textContent = minEl.toFixed(1) + 'm';
   document.getElementById('legendMax').textContent = maxEl.toFixed(1) + 'm';
 
@@ -172,50 +177,33 @@ function buildScene(mesh){
   fillLight.position.set(-1, 0.6, -0.8);
   scene.add(fillLight);
 
-  // One vertex per grid cell that has a real height (row/col index maps
-  // directly to a vertex index; cells with height === null get no vertex
-  // and every quad touching them is skipped below) — the resulting mesh's
-  // own outline IS the plot boundary, not a filled rectangle with a
-  // colored/blanked-out region. Centered on its own bounding box and
-  // shifted so the lowest point sits near y=0, purely so the default
-  // camera framing looks reasonable regardless of the site's real-world
-  // elevation (e.g. 3m vs 300m above sea level shouldn't change how far
-  // away the camera needs to start).
-  const halfWidth = (cols - 1) * cellSize / 2;
-  const halfDepth = (rows - 1) * cellSize / 2;
+  // The backend (elevation.get_terrain_mesh()) already built a real
+  // triangle mesh exactly clipped to the plot's own boundary shape —
+  // shapely polygon intersection + constrained Delaunay triangulation at
+  // the boundary, not a blocky "all 4 corners must be inside" grid
+  // staircase — so this just consumes vertices/faces directly, no
+  // clipping logic needed here at all. Each vertex is [x, y, elevationM]:
+  // x/y are metres east/north of the mesh's own local origin. Mapped to
+  // Three.js's (X, Y-up, Z) with Y = exaggerated relief and Z = -y — an
+  // arbitrary but consistent north-to-minus-Z choice; this is a freely
+  // rotatable view with no compass shown, so the exact mapping doesn't
+  // matter as long as buildings below use the identical one.
+  function terrainY(elevationM){
+    return (elevationM - minEl) * VERTICAL_EXAGGERATION;
+  }
 
-  const vertexIndex = new Map(); // "r,c" -> position in the vertex arrays
   const positions = [];
   const colors = [];
-  for(let r = 0; r < rows; r++){
-    for(let c = 0; c < cols; c++){
-      const h = heights[r][c];
-      if(h == null) continue;
-      const x = c * cellSize - halfWidth;
-      const z = r * cellSize - halfDepth;
-      const y = (h - minEl) * VERTICAL_EXAGGERATION;
-      vertexIndex.set(r + ',' + c, positions.length / 3);
-      positions.push(x, y, z);
-      const [cr, cg, cb] = elevationColor((h - minEl) / span);
-      colors.push(cr, cg, cb);
-    }
+  let maxAbsX = 0, maxAbsY = 0;
+  for(const [x, y, z] of vertices){
+    positions.push(x, terrainY(z), -y);
+    const [cr, cg, cb] = elevationColor((z - minEl) / span);
+    colors.push(cr, cg, cb);
+    maxAbsX = Math.max(maxAbsX, Math.abs(x));
+    maxAbsY = Math.max(maxAbsY, Math.abs(y));
   }
-
   const indices = [];
-  for(let r = 0; r < rows - 1; r++){
-    for(let c = 0; c < cols - 1; c++){
-      const a = vertexIndex.get(r + ',' + c);
-      const b = vertexIndex.get(r + ',' + (c + 1));
-      const cIdx = vertexIndex.get((r + 1) + ',' + c);
-      const d = vertexIndex.get((r + 1) + ',' + (c + 1));
-      // Only emit a quad (as two triangles) when all four corners are
-      // real data — this is what makes the mesh's silhouette trace the
-      // actual plot boundary instead of a rectangle.
-      if(a == null || b == null || cIdx == null || d == null) continue;
-      indices.push(a, cIdx, b);
-      indices.push(b, cIdx, d);
-    }
-  }
+  for(const face of faces) indices.push(face[0], face[1], face[2]);
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -223,20 +211,45 @@ function buildScene(mesh){
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
-  const material = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: false, roughness: 0.9, metalness: 0 });
-  const terrainMesh = new THREE.Mesh(geometry, material);
-  scene.add(terrainMesh);
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.9, metalness: 0 });
+  scene.add(new THREE.Mesh(geometry, material));
 
-  // A faint wireframe on top helps read the grid/shape at a glance,
-  // especially useful right at the plot's jagged clipped edge.
-  const wireGeo = new THREE.WireframeGeometry(geometry);
-  const wireMat = new THREE.LineBasicMaterial({ color: 0x1f4237, transparent: true, opacity: 0.15 });
-  scene.add(new THREE.LineSegments(wireGeo, wireMat));
+  // Buildings (OpenStreetMap, via buildings.py) — merged into one shared
+  // geometry (typically only a handful per site, but one draw call either
+  // way). Each building's OWN vertex z is HEIGHT ABOVE ITS OWN GROUND (0 =
+  // base ring, height_m = roof ring), not an absolute elevation — see
+  // elevation._extrude_building()'s comment for why: its base sits at
+  // terrainY(ground_elevation_m) (the exact same exaggerated surface
+  // height the terrain mesh itself has right under it), then the
+  // building's real, TRUE height is added on top UNexaggerated — so a
+  // real 6m building still looks like a real 6m building next to the
+  // deliberately-stretched slope, not 3x too tall along with it.
+  if(buildings && buildings.length){
+    const bPositions = [];
+    const bIndices = [];
+    let indexOffset = 0;
+    for(const b of buildings){
+      const groundY = terrainY(b.ground_elevation_m);
+      for(const [x, y, zRel] of b.vertices){
+        bPositions.push(x, groundY + zRel, -y);
+      }
+      for(const face of b.faces){
+        bIndices.push(face[0] + indexOffset, face[1] + indexOffset, face[2] + indexOffset);
+      }
+      indexOffset += b.vertices.length;
+    }
+    const buildingGeometry = new THREE.BufferGeometry();
+    buildingGeometry.setAttribute('position', new THREE.Float32BufferAttribute(bPositions, 3));
+    buildingGeometry.setIndex(bIndices);
+    buildingGeometry.computeVertexNormals();
+    const buildingMaterial = new THREE.MeshStandardMaterial({ color: 0xc9beae, side: THREE.DoubleSide, roughness: 0.8, metalness: 0.05 });
+    scene.add(new THREE.Mesh(buildingGeometry, buildingMaterial));
+  }
 
-  // Frame the camera based on the mesh's real size, not a fixed guess —
-  // a tiny back garden and a multi-hectare merged farm both need sane
-  // default framing.
-  const planExtent = Math.max((cols - 1) * cellSize, (rows - 1) * cellSize);
+  // Frame the camera based on the mesh's real plan size, not a fixed
+  // guess — a tiny back garden and a multi-hectare merged farm both need
+  // sane default framing.
+  const planExtent = Math.max(maxAbsX, maxAbsY) * 2;
   const verticalExtent = span * VERTICAL_EXAGGERATION;
   const distance = Math.max(planExtent, verticalExtent) * 1.3 + 10;
   camera.position.set(distance * 0.7, distance * 0.6, distance * 0.7);
