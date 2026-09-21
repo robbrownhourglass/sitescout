@@ -1224,10 +1224,16 @@ def attach_features(result: dict, buildings: Optional[list] = None, roads: Optio
 
 FLOW_CHANNEL_THRESHOLD_FRACTION = 0.005  # only draw a channel where at least this fraction of the site's own total valid area drains through it — a fixed cell-count threshold doesn't scale (confirmed live: 6 cells was fine for a small parcel's own grid but let almost every cell qualify on a bigger padded mosaic, drawing lines over ~90% of the surface instead of highlighting real channels)
 FLOW_MIN_CONTRIBUTING_CELLS_FLOOR = 4  # absolute floor so a tiny site's threshold doesn't round down to 0-1 cells
-FLOW_LINE_COLOR = (40, 110, 200)
+WATER_COLOR = (30, 90, 180)  # one shared colour for every real "this is water" layer — flow lines AND flood pools, so a line and the lake it feeds read as the same substance, not two unrelated colours
+FLOW_LINE_COLOR = WATER_COLOR
 SINK_MARKER_COLOR = (200, 40, 40)
+EXIT_MARKER_COLOR = (140, 140, 140)  # visually distinct from a real basin sink — "this is where our data ends", not "water pools here"
 SINK_MARKER_RADIUS_M = 1.0
 FLOW_SUPERSAMPLE = 3  # draw at 3x TEXTURE_SIZE then downsample (LANCZOS) for anti-aliased-looking lines — PIL's own line/ellipse drawing has no anti-aliasing at all
+
+
+def _channel_threshold(valid_cell_count: int) -> int:
+    return max(FLOW_MIN_CONTRIBUTING_CELLS_FLOOR, int(valid_cell_count * FLOW_CHANNEL_THRESHOLD_FRACTION))
 
 
 def _compute_flow_network(arr: np.ndarray, resolution: float) -> tuple:
@@ -1319,7 +1325,7 @@ def _draw_flow_network(draw, flow_acc: np.ndarray, flow_to: np.ndarray, arr: np.
     ext_left, ext_top = ext[0], ext[1]
     valid = arr > -9999
     max_acc = float(flow_acc[valid].max()) if valid.any() else 1.0
-    min_contributing_cells = max(FLOW_MIN_CONTRIBUTING_CELLS_FLOOR, int(valid.sum() * FLOW_CHANNEL_THRESHOLD_FRACTION))
+    min_contributing_cells = _channel_threshold(int(valid.sum()))
     log_max = np.log(max(max_acc, min_contributing_cells + 1))
     qualifies = valid & (flow_acc >= min_contributing_cells)
 
@@ -1568,7 +1574,7 @@ def _fill_and_route(arr: np.ndarray) -> tuple:
 
 
 FLOOD_EPSILON_M = 0.02  # a cell only counts as "would be flooded" if filling raised it by at least this much — keeps floating-point-noise-level non-differences from being flagged
-FLOOD_POOL_COLOR = (30, 90, 180)
+FLOOD_POOL_COLOR = WATER_COLOR  # same colour as the flow lines — a line and the lake it feeds should read as the same substance
 FLOOD_POOL_ALPHA = 120
 
 # code 1-8 = 1 + this list's own index; code 0 = a sink or NoData cell (no
@@ -1686,6 +1692,47 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
             "catchment_cells": catchment,
             "spill_elevation_m": round(spill_m, 2),
             "fill_depth_m": round(spill_m - bottom_m, 2),
+            "is_exit": False,
+        })
+
+    # Exit points: every cell where a drawn channel just runs off the
+    # edge of this mosaic's own analyzed area — asked for directly, so a
+    # channel that visibly "stops" at the texture's own boundary can be
+    # clicked to see its catchment too, same as a real basin sink.
+    # Confirmed directly what these actually are before adding them: in
+    # `_fill_and_route()`'s filled/routed graph, code 0 (`flow_to == (-1,-1)`)
+    # occurs ONLY for the cells that seeded the fill in the first place —
+    # the mosaic's own border, or cells next to a real internal NoData
+    # gap in the LIDAR data (confirmed live: 7,572 such cells at Fermoy,
+    # 698 on the literal border and the rest against internal NoData —
+    # zero "leftover" unrouted local minima, since filling connects every
+    # real basin bottom onward by construction). Only the ones actually
+    # carrying a meaningful channel (the same `_channel_threshold()` used
+    # to decide whether to draw a line there at all) are worth marking —
+    # otherwise every one of the mosaic's ~700 border pixels would get its
+    # own marker regardless of whether any real water reaches it.
+    threshold = _channel_threshold(int(valid.sum()))
+    already_marked = {(s["row"], s["col"]) for s in sinks}
+    exit_candidates = []
+    exit_rows, exit_cols = np.where(valid & (flow_to[:, :, 0] == -1) & (flow_to[:, :, 1] == -1) & (flow_acc >= threshold))
+    for r, c in zip(exit_rows.tolist(), exit_cols.tolist()):
+        if (r, c) in already_marked:
+            continue
+        exit_candidates.append((r, c, int(flow_acc[r, c])))
+    exit_candidates.sort(key=lambda t: -t[2])
+    for r, c, catchment in exit_candidates[:MAX_REPORTED_SINKS]:
+        x = ext_left + c * resolution
+        y = ext_top - r * resolution
+        sinks.append({
+            "row": r,
+            "col": c,
+            "x": round(x - center_x, 2),
+            "y": round(y - center_y, 2),
+            "elevation_m": round(float(filled[r, c]), 2),
+            "catchment_cells": catchment,
+            "spill_elevation_m": None,
+            "fill_depth_m": None,
+            "is_exit": True,
         })
 
     extent = (
@@ -1720,20 +1767,22 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     marker_r = max(2, int(round(_meters_to_pixels(SINK_MARKER_RADIUS_M, extent, TEXTURE_SIZE) * ss)))
     for s in sinks:
         px, py = _local_to_pixel(s["x"], s["y"], extent, TEXTURE_SIZE * ss)
-        draw.ellipse([px - marker_r, py - marker_r, px + marker_r, py + marker_r], fill=(*SINK_MARKER_COLOR, 230))
+        color = EXIT_MARKER_COLOR if s["is_exit"] else SINK_MARKER_COLOR
+        draw.ellipse([px - marker_r, py - marker_r, px + marker_r, py + marker_r], fill=(*color, 230))
     overlay_img = overlay_img.resize((TEXTURE_SIZE, TEXTURE_SIZE), Image.LANCZOS)
 
     buf = io.BytesIO()
     overlay_img.save(buf, format="PNG")
 
-    log.info("-> Flow analysis: %d low point(s) inside the plot boundary (showing top %d by catchment size), %d cell(s) would flood",
-              total_inside, len(sinks), int(flooded.sum()))
+    log.info("-> Flow analysis: %d low point(s) inside the plot boundary + %d channel exit point(s) (showing %d of %d total markers), %d cell(s) would flood",
+              total_inside, len(exit_candidates), len(sinks), total_inside + len(exit_candidates), int(flooded.sum()))
 
     rows, cols = arr.shape
     return {
         "found": True,
         "sinks": sinks,
         "total_sinks_found": total_inside,
+        "total_exit_points_found": len(exit_candidates),
         "flooded_area_m2": round(float(flooded.sum()) * resolution * resolution, 1),
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
         "flow_overlay_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
