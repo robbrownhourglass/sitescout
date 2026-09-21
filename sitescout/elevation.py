@@ -1117,25 +1117,77 @@ def get_terrain_mesh(
         vertex_cache[key] = idx
         return idx
 
-    # A plain, uncipped rectangular grid — every cell whose 4 real corners
-    # are valid (not NoData, and not within MESH_EDGE_TRIM_PIXELS of a
-    # NoData transition — see _erode_valid_mask()) becomes 2 triangles,
-    # full stop. No polygon test, no per-cell shapely call: dropping the
-    # exact-clip approach (see the module comment above) means this loop
-    # is now both simpler AND faster than the v2 version.
+    def emit_triangle(pa: tuple, pb: tuple, pc: tuple) -> None:
+        """One grid triangle -> 0, 1, or 2 real triangles, depending on how
+        many of its 3 corners are valid. A plain "keep the triangle only if
+        all 3 corners are valid" rule (the equivalent of the old per-QUAD
+        all-4-corners rule) draws the coverage-edge boundary at whichever
+        native pixel it happens to fall on — a real, unavoidable staircase
+        at native LIDAR resolution when that edge isn't axis-aligned
+        (confirmed live at R32 E4F8: a ~40-50deg real diagonal edge, same
+        staircase pattern at every erosion amount tried — more erosion
+        alone shifts the same jagged pattern inward, it doesn't smooth it,
+        since a symmetric erosion preserves the local edge shape).
+
+        This is the standard fix for that class of problem — a simplified,
+        per-TRIANGLE variant of marching squares (marching squares' classic
+        ambiguous "saddle" case, where two DIAGONAL corners of a quad are
+        valid and the other two aren't, can't happen here: a triangle only
+        has 3 corners, so there are just 4 clean cases, not marching
+        squares' 16). Cutting a partially-valid triangle at the MIDPOINT of
+        each edge crossing from valid to invalid roughly doubles the
+        effective edge resolution (confirmed visually: a zoomed side-by-side
+        crop shows steps at roughly half the size of the plain-rule
+        version) without needing real sub-pixel elevation data at all: a
+        cut vertex's position is a genuine geometric midpoint, but its
+        ELEVATION is always copied from the valid corner it's closest to,
+        NEVER interpolated toward the invalid corner's NoData value — the
+        same "never guess across NoData" rule this whole module already
+        follows, just applied per-triangle-corner instead of per-quad.
+        """
+        valid_pts = [p for p in (pa, pb, pc) if p[3]]
+        n_valid = len(valid_pts)
+        if n_valid == 0:
+            return
+        if n_valid == 3:
+            faces.append([add_vertex(p[0], p[1], p[2]) for p in (pa, pb, pc)])
+            return
+        invalid_pts = [p for p in (pa, pb, pc) if not p[3]]
+        if n_valid == 1:
+            v = valid_pts[0]
+            i0 = add_vertex(v[0], v[1], v[2])
+            i1 = add_vertex((v[0] + invalid_pts[0][0]) / 2, (v[1] + invalid_pts[0][1]) / 2, v[2])
+            i2 = add_vertex((v[0] + invalid_pts[1][0]) / 2, (v[1] + invalid_pts[1][1]) / 2, v[2])
+            faces.append([i0, i1, i2])
+        else:  # n_valid == 2
+            v0, v1 = valid_pts
+            inv = invalid_pts[0]
+            i0 = add_vertex(v0[0], v0[1], v0[2])
+            i1 = add_vertex(v1[0], v1[1], v1[2])
+            i2 = add_vertex((v0[0] + inv[0]) / 2, (v0[1] + inv[1]) / 2, v0[2])
+            i3 = add_vertex((v1[0] + inv[0]) / 2, (v1[1] + inv[1]) / 2, v1[2])
+            faces.append([i0, i1, i3])
+            faces.append([i0, i3, i2])
+
+    # A plain, uncipped rectangular grid of quads, each split into 2
+    # triangles — same structure as before (dropping the exact-clip
+    # approach, see the module comment above, keeps this simple) — but
+    # each triangle's own 3 corners now decide its fate individually via
+    # emit_triangle() rather than requiring all 4 of a quad's corners to
+    # be valid at once, for a smoother coverage-edge boundary (see
+    # emit_triangle()'s own docstring).
     for ri in range(nrows - 1):
         r0, r1 = row_indices[ri], row_indices[ri + 1]
         y0, y1 = grid_ys[ri], grid_ys[ri + 1]
         for ci in range(ncols - 1):
             c0, c1 = col_indices[ci], col_indices[ci + 1]
             x0, x1 = grid_xs[ci], grid_xs[ci + 1]
-            if not (valid_mask[r0, c0] and valid_mask[r0, c1] and valid_mask[r1, c0] and valid_mask[r1, c1]):
-                continue  # a real LIDAR data gap in or near this cell — never guess across NoData
-            h00, h10, h01, h11 = arr[r0, c0], arr[r0, c1], arr[r1, c0], arr[r1, c1]
-            i00, i10 = add_vertex(x0, y0, h00), add_vertex(x1, y0, h10)
-            i01, i11 = add_vertex(x0, y1, h01), add_vertex(x1, y1, h11)
-            faces.append([i00, i10, i01])
-            faces.append([i10, i11, i01])
+            p00 = (x0, y0, float(arr[r0, c0]), bool(valid_mask[r0, c0]))
+            p10 = (x1, y0, float(arr[r0, c1]), bool(valid_mask[r0, c1]))
+            p01 = (x0, y1, float(arr[r1, c0]), bool(valid_mask[r1, c0]))
+            p11 = (x1, y1, float(arr[r1, c1]), bool(valid_mask[r1, c1]))
+            emit_triangle(p00, p10, p01)
+            emit_triangle(p10, p11, p01)
 
     if not vertices:
         log.info("-> LIDAR coverage exists nearby but no cell in this padded area had valid data")

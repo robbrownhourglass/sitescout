@@ -1726,6 +1726,50 @@ app, rather than the documented-but-dead endpoints:
       only when this fraction is below ~99.9%, verified via a mock-harness
       test forcing a synthetic 62% figure.
 
+34. **Follow-up to item 33: asked directly whether the eroded coverage
+    edge could be made to look smooth/anti-aliased like the padded area's
+    other three (axis-aligned) edges, "nibbling away a tiny bit more."**
+    Checked this empirically before writing any code, since the premise
+    needed verifying: rendered R32 E4F8's real eroded valid-mask at
+    several trim amounts (0/3/6/10/15 pixels) and zoomed in — confirmed
+    the real coverage edge there is a genuine ~40-50deg diagonal, and
+    at every trim amount the SAME single-pixel-per-row staircase pattern
+    persisted, just shifted inward. This makes sense once stated plainly:
+    a symmetric erosion (or any uniform amount of it) preserves the local
+    shape of a boundary, it doesn't smooth it — "nibbling more" alone was
+    never going to produce a smooth diagonal from a hard per-pixel cutoff,
+    confirmed rather than assumed either way.
+    - **Real fix: `emit_triangle()`, a simplified per-TRIANGLE variant of
+      marching squares.** The mesh loop used to require ALL 4 corners of a
+      quad to be valid before drawing either of its 2 triangles — replaced
+      with a check per INDIVIDUAL triangle's 3 corners (since each quad is
+      already split into 2 triangles before this decision, checking 3
+      corners instead of 4 has only 4 clean cases, not marching squares'
+      16 — no ambiguous "saddle" case is possible with just 3 corners).
+      A triangle with a mix of valid/invalid corners is cut at the
+      MIDPOINT of each edge crossing from valid to invalid, roughly
+      doubling the effective edge resolution — confirmed visually with a
+      zoomed side-by-side crop (before/after) at R32 E4F8, showing
+      visibly smaller steps, not just a repositioned version of the same
+      staircase.
+    - **The cut vertices' ELEVATION is always copied from the valid corner
+      they're closest to, never interpolated toward the invalid corner** —
+      the exact same "never guess across NoData" principle this module
+      already applies everywhere else (`_median_smooth()`,
+      `_erode_valid_mask()`), just at triangle-corner granularity instead
+      of pixel or quad granularity. Only the vertex's XY POSITION is a
+      genuine geometric midpoint; no elevation value is ever fabricated
+      from a NoData pixel.
+    - Verified end-to-end, not just via the isolated geometry logic: the
+      real `/api/terrain-mesh` route was re-checked at both R32 E4F8
+      (partial coverage — vertex/face counts match a standalone prototype
+      exactly) and a fully-covered site (Fermoy — `boundary_lidar_coverage_fraction`
+      still 1.0, unaffected), plus the frontend's box/skirt/base-plane
+      logic (item 32/33) confirmed to still build without error against
+      the new triangulation shape — `findBoundaryEdges()` needed no
+      changes at all, since it only assumes a generic triangle list, not
+      a regular grid.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
