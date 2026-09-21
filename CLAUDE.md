@@ -1770,6 +1770,57 @@ app, rather than the documented-but-dead endpoints:
       changes at all, since it only assumes a generic triangle list, not
       a regular grid.
 
+35. **Follow-up to item 34: real user screenshot showed a fine, REGULAR
+    sawtooth along a coverage edge instead of the intended smoothing —
+    traced to aliasing from point-sampling, not a bug in emit_triangle()
+    itself.** Item 34's `emit_triangle()` was verified against R32 E4F8,
+    which happens to have `step == 1` (no mesh downsampling — its padded
+    area is small enough to stay under `MESH_MAX_GRID_SIZE` natively). The
+    reported site was evidently large enough to trigger `step > 1`
+    (visible road junction/fork in the screenshot), and the main loop was
+    still checking corner validity via `valid_mask[r0, c0]` — a NAIVE
+    POINT SAMPLE of the fine, native-resolution eroded mask at the coarse
+    grid's native index, not an aggregate over the coarse cell's whole
+    footprint.
+    - **Verified the mechanism with a dedicated background research task
+      before writing any fix** (a general-purpose agent ran a synthetic
+      comparison, not guessed): point-sampling a fine boolean mask at a
+      coarse stride is a real, known aliasing source, confirmed to be
+      NEVER better than block-aggregation and sometimes dramatically
+      worse — specifically for shallow-angle or near-vertical boundaries
+      (exactly where a horizontal-row coarse stride crosses the boundary
+      at a fine angle): one tested configuration showed 27 zigzag
+      direction-reversals with naive point-sampling vs 6 with block
+      aggregation (4.5x). Steep diagonal boundaries showed no meaningful
+      difference either way — consistent with why R32 E4F8's real
+      diagonal edge (and its `step == 1`) never exposed this.
+    - **Fix: `_coarse_valid_grid()`** — downsamples the eroded valid mask
+      onto the mesh's own coarse vertex grid via block-AND (a coarse point
+      is valid only if EVERY native pixel between it and the next grid
+      point is valid), not point-sampling. A no-op when `step == 1`
+      (confirmed: R32 E4F8's own vertex/face counts came back byte-for-
+      byte identical after this change) — it only changes behaviour for
+      padded areas large enough to actually get downsampled, which is
+      exactly the class of site the report came from. Directly re-verified
+      against the same synthetic near-vertical-with-jitter case used to
+      diagnose it: reversals dropped from 27 to 12 with the actual shipped
+      function (not just the standalone prototype).
+    - `emit_triangle()`'s own sub-pixel cutting (item 34) is precisely
+      what made this aliasing so visible in the first place — it
+      faithfully turns every alias "blip" into a real geometric notch
+      rather than just omitting a whole ambiguous quad the way the old
+      all-4-corners rule did, which smooths a genuinely smooth edge
+      nicely but also renders noise that was never really part of the
+      true boundary shape in fine, ugly detail. Fixing the underlying
+      aliasing (this item) rather than dialing back the smoothing (item
+      34) was the right layer to fix it at — both are real, complementary
+      improvements, not alternatives to each other.
+    - `boundary_lidar_coverage_fraction` (item 33) now also samples
+      `coarse_valid` instead of a separate point-sampled array, for the
+      same reason and by the same fix — it should reflect exactly what's
+      actually rendered, which this aliasing bug meant it technically
+      wasn't doing with full precision on a large, downsampled site.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
