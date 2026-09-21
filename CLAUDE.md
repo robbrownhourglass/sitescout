@@ -1040,6 +1040,26 @@ app, rather than the documented-but-dead endpoints:
       subtracting `BUILDING_EMBED_M` (0.75m) below that — the base now
       plants firmly into the terrain everywhere under the footprint, not
       just barely touching at its single lowest real sample.
+23. **Follow-up to item 22: jagged "tearing" along the rendered terrain's
+    outer edge, in a real screenshot.** Real LIDAR data can have a handful
+    of genuinely noisy/outlier pixels (sensor edge effects, water-surface
+    returns) that are invisible in a single point reading or a flat
+    top-down colour-mapped image (`get_precise_elevation()`/
+    `render_dtm_image()` — neither changed here) but show up as sharp
+    spikes once that same raw pixel is part of a LIT, rotatable 3D
+    surface — more likely to actually be reached now that item 22 renders
+    a much wider padded area rather than a tight clip. Fixed with a 3x3
+    median filter (`_median_smooth()`, plain numpy — no new dependency)
+    applied to the array only inside `get_terrain_mesh()`, right before
+    meshing. Median, not mean/Gaussian: the standard, textbook tool for
+    outlier/spike noise specifically, verified directly against a
+    synthetic single-pixel spike before use (removed exactly, left an
+    unrelated pixel untouched). NoData is excluded from every filter
+    window: a pixel whose neighbourhood contains ANY NoData is left at its
+    own raw value, untouched — confirmed directly that a pixel one column
+    from a NoData region stayed exactly at its original value rather than
+    blending toward -9999, since blending real elevation with "no data
+    here" would be a worse bug than the noise being fixed.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
