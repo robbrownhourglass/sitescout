@@ -6,3 +6,4 @@ tifffile>=2024.1
 numpy>=1.26
 pyproj>=3.6
 Pillow>=10.0
+shapely>=2.1  # needs constrained_delaunay_triangles() — confirmed present in 2.1.2, not verified further back

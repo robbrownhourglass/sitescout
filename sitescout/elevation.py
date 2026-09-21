@@ -90,9 +90,12 @@ from typing import Optional
 
 import numpy as np
 import requests
+import shapely
 import tifffile
 from PIL import Image
 from pyproj import Transformer
+from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 
 from . import config
 from .arcgis import point_query, point_query_full
@@ -530,141 +533,312 @@ def get_terrain(lat: float, lon: float) -> dict:
 # Everything above answers "how high is this site" with a single number or
 # a picture of a fixed square area around it. This answers a different
 # question: "what does the ground under this specific plot actually look
-# like" — a height grid clipped to the plot's own boundary shape (not a
-# bounding rectangle), for the browser to render as a rotatable 3D mesh.
+# like" — a real mesh clipped to the plot's own boundary shape (not a
+# bounding rectangle, and not a blocky grid staircase either — see below),
+# for the browser to render as a rotatable 3D surface.
 #
-# Clipping needs a point-in-polygon test. This app has deliberately never
-# added a real geometry library (see karst.py/contour decisions elsewhere
-# not to hand-roll coordinate reprojection without one) — but point-in-
-# polygon is a different class of problem: a simple, textbook, easily
-# verified algorithm (ray casting / crossing-number test), not something
-# that risks silently-wrong results the way guessing at a map projection
-# would. Verified directly against known cases before use here, including
-# a concave (L-shaped) polygon, not just a simple square.
-
-Ring = list  # a ring: list of [lon, lat] pairs (or [x, y] in any consistent planar CRS)
-RingSet = list  # a ring-set: [outer_ring, hole_ring, hole_ring, ...] — cadastral.py's convention
-
-
-def _point_in_ring(x: float, y: float, ring: Ring) -> bool:
-    """Standard ray-casting point-in-polygon test. `ring` need not be
-    explicitly closed (last point == first) — this works either way.
-    """
-    inside = False
-    n = len(ring)
-    x1, y1 = ring[0]
-    for i in range(1, n + 1):
-        x2, y2 = ring[i % n]
-        if (y1 > y) != (y2 > y):
-            x_intersect = (x2 - x1) * (y - y1) / (y2 - y1) + x1
-            if x < x_intersect:
-                inside = not inside
-        x1, y1 = x2, y2
-    return inside
-
-
-def _point_in_polygon(x: float, y: float, ring_sets: list) -> bool:
-    """`ring_sets` — cadastral.py's `polygon_ring_sets_wgs84` convention: a
-    list of ring-sets (one per selected/merged parcel), each a list of
-    rings (first = outer boundary, rest = holes). True if (x, y) falls
-    inside any ring-set's outer ring and not inside any of its holes —
-    i.e. inside the UNION of the selected parcels, matching how
-    cadastral.summarise_selected_parcels() already treats "join into one"
-    (drawing each parcel's own outline, not a true geometric union).
-    """
-    for rings in ring_sets:
-        if not rings:
-            continue
-        if _point_in_ring(x, y, rings[0]) and not any(_point_in_ring(x, y, hole) for hole in rings[1:]):
-            return True
-    return False
-
+# First version of this clipped the elevation GRID by testing each cell's
+# corner with a hand-rolled point-in-polygon (ray casting) and discarding
+# any cell that wasn't fully inside — correct, but visibly blocky/jagged at
+# the boundary, since the edge could only ever land on a grid line, never
+# on the plot's own real boundary point. Fixed by switching to `shapely`
+# (GEOS) for real polygon geometry: boundary-straddling grid cells are now
+# intersected against the actual plot polygon (`shapely.intersection`,
+# handles concave polygons correctly — confirmed live against a concave
+# test shape before use, exact area match) and the resulting exact-boundary
+# fragment is triangulated with `shapely.constrained_delaunay_triangles`
+# (also confirmed live: triangulates a concave test polygon with the exact
+# same total area, i.e. it respects the real boundary rather than falling
+# back to a convex-hull Delaunay). This is the same class of decision as
+# adding pyproj for the WGS84<->ITM transform above: a real, verified
+# library is the correct response once the problem outgrows what a
+# textbook hand-rolled algorithm (plain ray-casting, still fine for a
+# simple inside/outside test) can safely do — geometric clipping and
+# triangulation of an arbitrary concave polygon is a different, much
+# easier-to-get-subtly-wrong class of problem than a single-point test.
+#
+# One known, accepted, disclosed limitation: a grid cell is only tested
+# for clipping if at least one of its 4 corners is inside the plot: a
+# polygon notch narrower than one grid cell that grazes a cell's interior
+# without containing any of its 4 corners is missed. At this mesh's grid
+# spacing (native ~2m for a single small parcel, coarser only for large
+# merged multi-parcel sites) this only matters for a real cadastral
+# boundary detail finer than the LIDAR data's own resolution could
+# meaningfully render anyway.
 
 MESH_MAX_GRID_SIZE = 150  # cap the mesh at ~150x150 vertices regardless of plot size — plenty of detail, stays light in the browser
 MESH_BOUNDARY_BUFFER_M = 20  # small margin so edge-of-plot cells aren't clipped by floating-point/rounding
 
 
-def get_terrain_mesh(polygon_ring_sets_wgs84: list) -> Optional[dict]:
-    """Precise elevation grid clipped to a plot boundary's own shape, for a
-    3D rendering — not a bounding rectangle. Reuses the same
-    _mosaic_dtm() tile-stitching as the 2D terrain image, sized to the
-    polygon's own bounding box (plus a small buffer) rather than a fixed
-    1km radius, since a plot is usually much smaller than that (and
-    occasionally, for a large merged multi-parcel site, could be bigger).
+def _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84: list):
+    """cadastral.py's polygon_ring_sets_wgs84 convention (a list of ring-sets,
+    each [outer_ring, hole_ring, ...] of [lon, lat] pairs) -> one shapely
+    (Multi)Polygon in ITM metres. Unions the ring-sets together — matching
+    cadastral.summarise_selected_parcels()'s "join into one" semantics
+    (each parcel's own outline, not a true dissolve) closely enough for
+    this purpose: only used to test which real elevation grid points fall
+    inside the union of whatever the user selected.
+    """
+    polys = []
+    for rings in polygon_ring_sets_wgs84:
+        if not rings:
+            continue
+        outer = [_to_itm.transform(lon, lat) for lon, lat in rings[0]]
+        holes = [[_to_itm.transform(lon, lat) for lon, lat in hole] for hole in rings[1:]]
+        poly = Polygon(outer, holes)
+        if not poly.is_valid:
+            poly = poly.buffer(0)  # standard shapely fix for minor self-intersecting input
+        if not poly.is_empty:
+            polys.append(poly)
+    if not polys:
+        return None
+    return unary_union(polys)
+
+
+def mesh_center_and_radius(polygon_ring_sets_wgs84: list) -> Optional[tuple]:
+    """(center_lon, center_lat, radius_m) for a plot boundary's own bounding
+    box (+ MESH_BOUNDARY_BUFFER_M) — the exact sizing get_terrain_mesh()
+    uses to build its LIDAR mosaic. Exposed separately so webapp.py can
+    size the nearby-buildings search around the same real area (a genuine
+    pyproj-based metre measurement, not a rough degrees-to-metres guess).
     """
     all_points = [pt for ring_set in polygon_ring_sets_wgs84 for ring in ring_set for pt in ring]
     if not all_points:
         return None
-
     lons = [p[0] for p in all_points]
     lats = [p[1] for p in all_points]
     center_lon = (min(lons) + max(lons)) / 2
     center_lat = (min(lats) + max(lats)) / 2
     center_x, center_y = _to_itm.transform(center_lon, center_lat)
-
     itm_points = [_to_itm.transform(lon, lat) for lon, lat in all_points]
     half_width = max(abs(x - center_x) for x, y in itm_points)
     half_height = max(abs(y - center_y) for x, y in itm_points)
     radius_m = max(half_width, half_height) + MESH_BOUNDARY_BUFFER_M
+    return center_lon, center_lat, radius_m
+
+
+def _sample_elevation(arr, ext, resolution, itm_x, itm_y) -> Optional[float]:
+    """Nearest-pixel elevation lookup at an arbitrary ITM point within an
+    already-loaded mosaic array — used to find the real ground level under
+    a building footprint. None if the point falls outside the mosaic's own
+    extent, or lands on a real NoData pixel.
+    """
+    ext_left, ext_top, ext_right, ext_bottom = ext
+    col = int(round((itm_x - ext_left) / resolution))
+    row = int(round((ext_top - itm_y) / resolution))
+    h, w = arr.shape
+    if not (0 <= row < h and 0 <= col < w):
+        return None
+    v = arr[row, col]
+    return None if v <= -9999 else float(v)
+
+
+def _extrude_building(building: dict, center_x: float, center_y: float, arr, ext, resolution) -> Optional[dict]:
+    """One OSM building footprint -> a flat-roofed 3D prism (vertical walls
+    + a triangulated roof cap, same shapely triangulation used for the
+    terrain boundary above), sitting at the real ground elevation sampled
+    under its own footprint centroid. A real, disclosed simplification —
+    actual roofs aren't flat, and a sloped site means a real building's
+    floor isn't perfectly level either — this is a site-scouting visual
+    aid, not a survey-grade building model.
+    """
+    ring_itm = [_to_itm.transform(lon, lat) for lon, lat in building["footprint_wgs84"]]
+    centroid_x = sum(x for x, y in ring_itm) / len(ring_itm)
+    centroid_y = sum(y for x, y in ring_itm) / len(ring_itm)
+    ground_m = _sample_elevation(arr, ext, resolution, centroid_x, centroid_y)
+    if ground_m is None:
+        return None  # outside this mosaic's own coverage, or a real LIDAR data gap under this building — skip rather than guess
+
+    footprint = Polygon(ring_itm)
+    if not footprint.is_valid:
+        footprint = footprint.buffer(0)
+    if footprint.is_empty:
+        return None
+
+    # Vertex z is HEIGHT ABOVE THIS BUILDING'S OWN GROUND (0 for the base
+    # ring, height_m for the roof ring) rather than an absolute elevation —
+    # deliberately, so the frontend can place the base on the terrain's
+    # own (vertically-exaggerated, see terrain3d.html) surface via
+    # ground_elevation_m below, then add the building's real, TRUE height
+    # on top without it also getting stretched by that same exaggeration.
+    # A real 6m building should look like a real 6m building next to a
+    # deliberately-exaggerated slope, not get 3x taller along with it.
+    height_m = building["height_m"]
+    vertices: list = []
+    faces: list = []
+
+    def add_vertex(x: float, y: float, z: float) -> int:
+        vertices.append([round(x - center_x, 2), round(y - center_y, 2), round(z, 2)])
+        return len(vertices) - 1
+
+    coords = list(footprint.exterior.coords)  # shapely always returns a closed ring (first == last)
+    for i in range(len(coords) - 1):
+        x0, y0 = coords[i]
+        x1, y1 = coords[i + 1]
+        bl, br = add_vertex(x0, y0, 0.0), add_vertex(x1, y1, 0.0)
+        tl, tr = add_vertex(x0, y0, height_m), add_vertex(x1, y1, height_m)
+        faces.append([bl, br, tr])
+        faces.append([bl, tr, tl])
+
+    try:
+        roof_tris = shapely.constrained_delaunay_triangles(footprint)
+    except Exception:
+        roof_tris = None
+    if roof_tris is not None:
+        for tri in roof_tris.geoms:
+            faces.append([add_vertex(x, y, height_m) for x, y in list(tri.exterior.coords)[:3]])
+
+    return {
+        "name": building.get("name"),
+        "height_m": building["height_m"],
+        "height_is_estimated": building["height_is_estimated"],
+        "ground_elevation_m": round(ground_m, 2),
+        "vertices": vertices,
+        "faces": faces,
+    }
+
+
+def get_terrain_mesh(polygon_ring_sets_wgs84: list, buildings: Optional[list] = None) -> Optional[dict]:
+    """A real triangle mesh (vertices + faces, not a height grid) of the
+    plot's own real LIDAR elevation, exactly clipped to its boundary shape
+    (see the module comment above for the shapely-based clipping/
+    triangulation approach). `buildings` — see buildings.get_nearby_buildings()
+    — is optional; when given, each footprint is extruded (_extrude_building())
+    and returned as its own small mesh, grounded on this SAME elevation
+    mosaic and placed in this SAME local (x, y) coordinate frame (metres
+    east/north of `origin_lon`/`origin_lat`, returned so callers can
+    reproduce the exact frame if needed) so terrain and buildings align
+    without the browser needing to know anything about ITM or WGS84.
+    """
+    center = mesh_center_and_radius(polygon_ring_sets_wgs84)
+    if not center:
+        return None
+    center_lon, center_lat, radius_m = center
+    center_x, center_y = _to_itm.transform(center_lon, center_lat)
 
     mosaic = _mosaic_dtm(center_lat, center_lon, radius_m)
     if not mosaic:
         log.info("-> No precise LIDAR coverage for this plot boundary")
         return None
 
+    plot_geom = _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84)
+    if plot_geom is None or plot_geom.is_empty:
+        return None
+
     arr = mosaic["array"]
-    ext_left, ext_top, ext_right, ext_bottom = mosaic["ext"]
+    ext = mosaic["ext"]
+    ext_left, ext_top, ext_right, ext_bottom = ext
     resolution = mosaic["resolution"]
     height, width = arr.shape
 
     step = max(1, int(np.ceil(max(height, width) / MESH_MAX_GRID_SIZE)))
     row_indices = list(range(0, height, step))
     col_indices = list(range(0, width, step))
-
-    # Convert the sampled grid's ITM coordinates back to WGS84 in one
-    # batched pyproj call (not one Python-level .transform() per cell —
-    # significant for a 150x150 = up to 22,500-point grid) for the
-    # point-in-polygon test below, which needs lon/lat to match how the
-    # boundary itself is expressed.
     grid_xs = [ext_left + c * resolution for c in col_indices]
     grid_ys = [ext_top - r * resolution for r in row_indices]
+    nrows, ncols = len(row_indices), len(col_indices)
+
+    # Every grid vertex's inside/outside status, computed once as a single
+    # vectorized shapely call (not up to 4 Point()+covers() calls per quad,
+    # which would repeat the same corner point's test up to 4x since
+    # adjacent quads share corners).
     xx, yy = np.meshgrid(grid_xs, grid_ys)
-    lon_grid, lat_grid = _from_itm.transform(xx.ravel(), yy.ravel())
-    lon_grid = lon_grid.reshape(xx.shape)
-    lat_grid = lat_grid.reshape(xx.shape)
+    inside = shapely.covers(plot_geom, shapely.points(xx.ravel(), yy.ravel())).reshape(xx.shape)
 
-    heights = []
-    valid_heights = []
-    for ri, r in enumerate(row_indices):
-        row_vals = []
-        for ci, c in enumerate(col_indices):
-            v = arr[r, c]
-            lon, lat = lon_grid[ri, ci], lat_grid[ri, ci]
-            if v <= -9999 or not _point_in_polygon(lon, lat, polygon_ring_sets_wgs84):
-                row_vals.append(None)
-            else:
-                row_vals.append(round(float(v), 2))
-                valid_heights.append(float(v))
-        heights.append(row_vals)
+    vertices: list = []
+    faces: list = []
+    valid_heights: list = []
+    vertex_cache: dict = {}
 
-    if not valid_heights:
+    def add_vertex(itm_x: float, itm_y: float, elev: float) -> int:
+        key = (round(itm_x, 3), round(itm_y, 3))
+        idx = vertex_cache.get(key)
+        if idx is not None:
+            return idx
+        idx = len(vertices)
+        vertices.append([round(itm_x - center_x, 2), round(itm_y - center_y, 2), round(float(elev), 2)])
+        valid_heights.append(float(elev))
+        vertex_cache[key] = idx
+        return idx
+
+    for ri in range(nrows - 1):
+        r0, r1 = row_indices[ri], row_indices[ri + 1]
+        y0, y1 = grid_ys[ri], grid_ys[ri + 1]  # y0 > y1 (north to south)
+        for ci in range(ncols - 1):
+            c0, c1 = col_indices[ci], col_indices[ci + 1]
+            x0, x1 = grid_xs[ci], grid_xs[ci + 1]
+
+            h00, h10, h01, h11 = arr[r0, c0], arr[r0, c1], arr[r1, c0], arr[r1, c1]
+            if h00 <= -9999 or h10 <= -9999 or h01 <= -9999 or h11 <= -9999:
+                continue  # a real LIDAR data gap in this cell — never guess across NoData
+
+            in00, in10, in01, in11 = inside[ri, ci], inside[ri, ci + 1], inside[ri + 1, ci], inside[ri + 1, ci + 1]
+
+            if in00 and in10 and in01 and in11:
+                # Fast path: whole cell inside, no clipping needed — this
+                # is the overwhelming majority of cells for any real plot,
+                # so skipping the shapely call here (only used at the
+                # boundary below) matters for performance.
+                i00, i10 = add_vertex(x0, y0, h00), add_vertex(x1, y0, h10)
+                i01, i11 = add_vertex(x0, y1, h01), add_vertex(x1, y1, h11)
+                faces.append([i00, i10, i01])
+                faces.append([i10, i11, i01])
+                continue
+            if not (in00 or in10 or in01 or in11):
+                continue  # no corner inside — see the module comment above on the one known edge case this misses
+
+            quad = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+            clipped = quad.intersection(plot_geom)
+            if clipped.is_empty:
+                continue
+            fragments = clipped.geoms if isinstance(clipped, MultiPolygon) else [clipped]
+            for frag in fragments:
+                if frag.is_empty or frag.geom_type != "Polygon" or frag.area < 1e-6:
+                    continue
+                try:
+                    tris = shapely.constrained_delaunay_triangles(frag)
+                except Exception:
+                    continue
+                for tri in tris.geoms:
+                    idxs = []
+                    for vx, vy in list(tri.exterior.coords)[:3]:
+                        # Bilinear interpolation within this cell's own 4
+                        # real corner heights — exact at the corners
+                        # themselves (u/v snap to 0 or 1), a standard,
+                        # well-defined estimate anywhere else inside it.
+                        u = 0.0 if x1 == x0 else min(1.0, max(0.0, (vx - x0) / (x1 - x0)))
+                        v = 0.0 if y0 == y1 else min(1.0, max(0.0, (y0 - vy) / (y0 - y1)))
+                        elev = (1 - u) * (1 - v) * h00 + u * (1 - v) * h10 + (1 - u) * v * h01 + u * v * h11
+                        idxs.append(add_vertex(vx, vy, elev))
+                    faces.append(idxs)
+
+    if not vertices:
         log.info("-> LIDAR coverage exists nearby but no grid cell fell inside the plot boundary")
         return None
 
+    building_meshes = []
+    for b in buildings or []:
+        mesh = _extrude_building(b, center_x, center_y, arr, ext, resolution)
+        if mesh:
+            building_meshes.append(mesh)
+    if buildings:
+        log.info("-> %d/%d nearby building(s) placed on this terrain mesh (rest fell outside this mosaic's own coverage)",
+                  len(building_meshes), len(buildings))
+
     log.info(
-        "-> Terrain mesh: %dx%d grid (%.1fm cells), %d/%d cells inside plot, %.1f-%.1fm",
-        len(row_indices), len(col_indices), resolution * step,
-        len(valid_heights), len(row_indices) * len(col_indices),
-        min(valid_heights), max(valid_heights),
+        "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, exact-clipped to plot boundary), %.1f-%.1fm",
+        len(vertices), len(faces), resolution * step, min(valid_heights), max(valid_heights),
     )
     return {
         "found": True,
-        "rows": len(row_indices),
-        "cols": len(col_indices),
-        "cell_size_m": resolution * step,
-        "heights": heights,
+        "vertices": vertices,
+        "faces": faces,
         "min_elevation_m": round(min(valid_heights), 2),
         "max_elevation_m": round(max(valid_heights), 2),
+        "cell_size_m": resolution * step,
         "resolution_m": resolution,
         "source": f"OPW LIDAR ({mosaic['source_label']})",
+        "origin_lon": center_lon,
+        "origin_lat": center_lat,
+        "buildings": building_meshes,
     }
