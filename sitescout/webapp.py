@@ -181,6 +181,44 @@ def api_terrain_image():
     return Response(result["png_bytes"], mimetype="image/png")
 
 
+@app.post("/api/terrain-mesh")
+def api_terrain_mesh():
+    """A precise elevation grid clipped to a plot boundary's own shape
+    (not a bounding rectangle) — see elevation.get_terrain_mesh() — for
+    the /terrain-3d page's rotatable 3D rendering. POST, not GET, since
+    the boundary (the confirmed plot selection's own ring geometry) is
+    the actual query, not a couple of scalar params like everywhere else.
+    """
+    body = request.get_json(silent=True) or {}
+    ring_sets = body.get("polygon_ring_sets_wgs84")
+    if not ring_sets:
+        return _error("polygon_ring_sets_wgs84 is required", 400)
+
+    try:
+        result = elevation.get_terrain_mesh(ring_sets)
+    except Exception as exc:
+        log.error("Terrain mesh build failed: %s", exc)
+        return _error(f"terrain mesh build failed: {exc}", 502)
+
+    if not result:
+        return _error("no precise LIDAR coverage for this plot boundary", 404)
+
+    return jsonify({"status": "ok", "data": result})
+
+
+@app.get("/terrain-3d")
+def terrain_3d():
+    """A standalone page (opened in a new tab from the Terrain & elevation
+    card) showing the confirmed plot's own real LIDAR elevation as a
+    rotatable 3D surface — literally the site's shape, bent the way the
+    real ground is. The boundary itself travels in the URL (as JSON in a
+    query param, not session/local storage) so this page is self-
+    contained and shareable via its own link, same spirit as every other
+    page in this app only ever depending on its own URL, not hidden state.
+    """
+    return render_template("terrain3d.html")
+
+
 def _slim_options(options: list[dict]) -> list[dict]:
     """Strips Autoaddress options down to what the picker UI needs, and
     drops any option with no follow-up link (nothing the UI could do with

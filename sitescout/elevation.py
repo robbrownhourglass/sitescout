@@ -523,3 +523,148 @@ def get_terrain(lat: float, lon: float) -> dict:
             "this app has no way to compute true point-to-contour distance."
         ),
     }
+
+
+# --- 3D terrain mesh, clipped to the site's own confirmed boundary shape ---
+#
+# Everything above answers "how high is this site" with a single number or
+# a picture of a fixed square area around it. This answers a different
+# question: "what does the ground under this specific plot actually look
+# like" — a height grid clipped to the plot's own boundary shape (not a
+# bounding rectangle), for the browser to render as a rotatable 3D mesh.
+#
+# Clipping needs a point-in-polygon test. This app has deliberately never
+# added a real geometry library (see karst.py/contour decisions elsewhere
+# not to hand-roll coordinate reprojection without one) — but point-in-
+# polygon is a different class of problem: a simple, textbook, easily
+# verified algorithm (ray casting / crossing-number test), not something
+# that risks silently-wrong results the way guessing at a map projection
+# would. Verified directly against known cases before use here, including
+# a concave (L-shaped) polygon, not just a simple square.
+
+Ring = list  # a ring: list of [lon, lat] pairs (or [x, y] in any consistent planar CRS)
+RingSet = list  # a ring-set: [outer_ring, hole_ring, hole_ring, ...] — cadastral.py's convention
+
+
+def _point_in_ring(x: float, y: float, ring: Ring) -> bool:
+    """Standard ray-casting point-in-polygon test. `ring` need not be
+    explicitly closed (last point == first) — this works either way.
+    """
+    inside = False
+    n = len(ring)
+    x1, y1 = ring[0]
+    for i in range(1, n + 1):
+        x2, y2 = ring[i % n]
+        if (y1 > y) != (y2 > y):
+            x_intersect = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+            if x < x_intersect:
+                inside = not inside
+        x1, y1 = x2, y2
+    return inside
+
+
+def _point_in_polygon(x: float, y: float, ring_sets: list) -> bool:
+    """`ring_sets` — cadastral.py's `polygon_ring_sets_wgs84` convention: a
+    list of ring-sets (one per selected/merged parcel), each a list of
+    rings (first = outer boundary, rest = holes). True if (x, y) falls
+    inside any ring-set's outer ring and not inside any of its holes —
+    i.e. inside the UNION of the selected parcels, matching how
+    cadastral.summarise_selected_parcels() already treats "join into one"
+    (drawing each parcel's own outline, not a true geometric union).
+    """
+    for rings in ring_sets:
+        if not rings:
+            continue
+        if _point_in_ring(x, y, rings[0]) and not any(_point_in_ring(x, y, hole) for hole in rings[1:]):
+            return True
+    return False
+
+
+MESH_MAX_GRID_SIZE = 150  # cap the mesh at ~150x150 vertices regardless of plot size — plenty of detail, stays light in the browser
+MESH_BOUNDARY_BUFFER_M = 20  # small margin so edge-of-plot cells aren't clipped by floating-point/rounding
+
+
+def get_terrain_mesh(polygon_ring_sets_wgs84: list) -> Optional[dict]:
+    """Precise elevation grid clipped to a plot boundary's own shape, for a
+    3D rendering — not a bounding rectangle. Reuses the same
+    _mosaic_dtm() tile-stitching as the 2D terrain image, sized to the
+    polygon's own bounding box (plus a small buffer) rather than a fixed
+    1km radius, since a plot is usually much smaller than that (and
+    occasionally, for a large merged multi-parcel site, could be bigger).
+    """
+    all_points = [pt for ring_set in polygon_ring_sets_wgs84 for ring in ring_set for pt in ring]
+    if not all_points:
+        return None
+
+    lons = [p[0] for p in all_points]
+    lats = [p[1] for p in all_points]
+    center_lon = (min(lons) + max(lons)) / 2
+    center_lat = (min(lats) + max(lats)) / 2
+    center_x, center_y = _to_itm.transform(center_lon, center_lat)
+
+    itm_points = [_to_itm.transform(lon, lat) for lon, lat in all_points]
+    half_width = max(abs(x - center_x) for x, y in itm_points)
+    half_height = max(abs(y - center_y) for x, y in itm_points)
+    radius_m = max(half_width, half_height) + MESH_BOUNDARY_BUFFER_M
+
+    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m)
+    if not mosaic:
+        log.info("-> No precise LIDAR coverage for this plot boundary")
+        return None
+
+    arr = mosaic["array"]
+    ext_left, ext_top, ext_right, ext_bottom = mosaic["ext"]
+    resolution = mosaic["resolution"]
+    height, width = arr.shape
+
+    step = max(1, int(np.ceil(max(height, width) / MESH_MAX_GRID_SIZE)))
+    row_indices = list(range(0, height, step))
+    col_indices = list(range(0, width, step))
+
+    # Convert the sampled grid's ITM coordinates back to WGS84 in one
+    # batched pyproj call (not one Python-level .transform() per cell —
+    # significant for a 150x150 = up to 22,500-point grid) for the
+    # point-in-polygon test below, which needs lon/lat to match how the
+    # boundary itself is expressed.
+    grid_xs = [ext_left + c * resolution for c in col_indices]
+    grid_ys = [ext_top - r * resolution for r in row_indices]
+    xx, yy = np.meshgrid(grid_xs, grid_ys)
+    lon_grid, lat_grid = _from_itm.transform(xx.ravel(), yy.ravel())
+    lon_grid = lon_grid.reshape(xx.shape)
+    lat_grid = lat_grid.reshape(xx.shape)
+
+    heights = []
+    valid_heights = []
+    for ri, r in enumerate(row_indices):
+        row_vals = []
+        for ci, c in enumerate(col_indices):
+            v = arr[r, c]
+            lon, lat = lon_grid[ri, ci], lat_grid[ri, ci]
+            if v <= -9999 or not _point_in_polygon(lon, lat, polygon_ring_sets_wgs84):
+                row_vals.append(None)
+            else:
+                row_vals.append(round(float(v), 2))
+                valid_heights.append(float(v))
+        heights.append(row_vals)
+
+    if not valid_heights:
+        log.info("-> LIDAR coverage exists nearby but no grid cell fell inside the plot boundary")
+        return None
+
+    log.info(
+        "-> Terrain mesh: %dx%d grid (%.1fm cells), %d/%d cells inside plot, %.1f-%.1fm",
+        len(row_indices), len(col_indices), resolution * step,
+        len(valid_heights), len(row_indices) * len(col_indices),
+        min(valid_heights), max(valid_heights),
+    )
+    return {
+        "found": True,
+        "rows": len(row_indices),
+        "cols": len(col_indices),
+        "cell_size_m": resolution * step,
+        "heights": heights,
+        "min_elevation_m": round(min(valid_heights), 2),
+        "max_elevation_m": round(max(valid_heights), 2),
+        "resolution_m": resolution,
+        "source": f"OPW LIDAR ({mosaic['source_label']})",
+    }
