@@ -699,6 +699,103 @@ app, rather than the documented-but-dead endpoints:
     — an accepted, harmless over-fetch (cached either way) in exchange
     for a real correctness guarantee, not a hand-tuned "seems to work"
     radius.
+18. **User-reported clipping at R32 E4F8 was investigated and confirmed to
+    be a real data-coverage edge, not a bug.** Screenshot showed a hard
+    vertical line on the terrain image overlay, most of the visible map
+    with no data. Confirmed directly: NASC's real survey coverage at this
+    location starts exactly at ITM x=634,000; the site itself sits at
+    x=634,445 (only 445m inside covered territory), while the 1km-radius
+    crop needs to reach back to x=633,445 — 555m past where the real
+    survey data physically ends (`point_query` returned two real tiles,
+    `OPW_2004`/`OPW_2005`, stacked north-south with nothing further west).
+    Checked the other source ("OPW pre-NASC") too, in case the wrong
+    source had been picked — confirmed it has zero coverage here either,
+    ruling that out. Also hit (and diagnosed as unrelated) two separate
+    GSI server quirks along the way: transient `503`/timeout errors on
+    first attempts (the same known GSI flakiness noted elsewhere in this
+    doc — retries succeed), and a persistent `ArcGIS service error` from
+    the pre-NASC service specifically at this location when queried with
+    `distance_m` >= ~1000-1500m (works fine at 500m, and works fine at
+    other locations even at large radii) — a real, location-specific
+    server-side issue, harmless here since that source has no coverage
+    regardless. Bottom line: item 17's square/circle fix was already live
+    and correct; this clipping is what "no OPW survey data available"
+    genuinely looks like at a real coastal/inland coverage boundary, same
+    honest gap this whole feature has documented from the start (item 14).
+19. **3D terrain rendering — a new page, not a new data source.** Asked
+    whether the real LIDAR elevation data already being fetched could be
+    shown as a mouse-rotatable 3D model of a confirmed plot's own shape
+    (not a bounding box). Broken into two genuinely separate problems:
+    - **Clipping the elevation grid to the plot's real boundary shape.**
+      `cadastral.py`'s web-UI boundary convention
+      (`polygon_ring_sets_wgs84` — a LIST of ring-sets, one per
+      selected/merged parcel, each itself Esri's own `rings` structure:
+      first ring = outer boundary, rest = holes) already exists and is
+      exactly what's needed. Added a textbook ray-casting
+      point-in-polygon test (`_point_in_ring`/`_point_in_polygon` in
+      `elevation.py`) — unit-tested directly against a square and a
+      concave L-shape before use. This is a deliberately different risk
+      class from the karst-features ITM-transform situation documented
+      above (where hand-rolling was correctly avoided): ray-casting is a
+      simple, standard, easily-verified algorithm operating on
+      coordinates already in the right frame, not an unverified
+      projection that could silently shift every point. `get_terrain_mesh()`
+      reuses the existing `_mosaic_dtm()` (sized to the boundary's own
+      bounding box + a margin, not a fixed radius), downsamples to a
+      max ~150x150 grid for a reasonable payload/mesh size, and marks any
+      cell outside the polygon (or NoData) as `null`. Verified against a
+      real cadastral boundary at Fermoy, Co. Cork (2.447 ha leasehold
+      parcel): 146x145 grid, 28.9% of the bounding-box cells valid,
+      elevation 21.5-25.9m — then rendered a quick standalone PNG of just
+      the clipped cells and visually confirmed a genuine irregular parcel
+      outline (not a rectangle, not garbled), cleaned up afterward.
+    - **Rendering it as a rotatable 3D model.** New page
+      (`GET /terrain-3d`, `sitescout/templates/terrain3d.html`) using
+      Three.js loaded from jsDelivr as ES modules — confirmed live before
+      use (`three@0.160.0/build/three.module.min.js` and
+      `.../examples/jsm/controls/OrbitControls.js` both HTTP 200; note
+      cdnjs only mirrors Three's `dist/` folder, no `OrbitControls` there
+      at any recent version, so jsDelivr is the only option for it). This
+      app's own Flask template pages aren't bound by the Artifact tool's
+      CDN allowlist — that restriction is specific to the sandboxed
+      Artifact tool, not this codebase. One vertex per real (non-null)
+      grid cell; a quad's two triangles are only emitted when all four
+      corners are real data, which is what makes the mesh's own silhouette
+      trace the plot's actual boundary instead of a filled rectangle.
+      Real-world elevation differences are usually subtle relative to a
+      site's horizontal extent, so the model applies a disclosed 3x
+      vertical exaggeration (labelled on-page, not hidden) so the
+      "bending" the user asked to see is actually visible. Vertex colours
+      reuse the same 4-stop hypsometric scale as the 2D image
+      overlay/legend (`_COLOR_STOPS` in `elevation.py`), hand-kept in sync
+      in the page's own JS — small and stable enough not to warrant a
+      round-trip. `POST /api/terrain-mesh` takes `polygon_ring_sets_wgs84`
+      as JSON body (not query params — a boundary's ring geometry is a
+      real payload, not a couple of scalars). The boundary itself travels
+      in the new page's own URL as a JSON query param (`/terrain-3d?boundary=...`),
+      not session/local storage, so the page is self-contained and
+      shareable via its own link — same principle as the rest of this app
+      never depending on hidden state. The "View 3D terrain" link only
+      appears in the Terrain & elevation card once a plot is actually
+      confirmed (`plotConfirmed` + `sectionData.boundary.polygon_ring_sets_wgs84`)
+      *and* precise LIDAR coverage exists there — checked fresh every time
+      the card is rebuilt (`openDetail()` re-calls `build()` on every
+      open), not cached from first render, so confirming a plot after
+      first opening the tile still surfaces the link on reopen.
+    - No new Python dependency — Three.js is pure client-side JS. Verified
+      the mesh-generation math (vertex/index buffers, null-clipping,
+      legend population, the fetch → `/api/terrain-mesh` wiring) via a
+      manual Node harness with mocked Three.js classes (no real jsdom/GL
+      context available for this one — WebGL needs a real GPU context
+      jsdom doesn't provide) — confirmed correct vertex/triangle counts
+      for a grid with a deliberately null diagonal region, and confirmed
+      the exact same Fermoy boundary produces the exact same 146x145/
+      28.9%/21.5-25.9m result through the live Flask route as it did
+      in the standalone Python check. The three link-gating scenarios
+      (confirmed+found, not yet confirmed, confirmed but no LIDAR here)
+      were verified by extracting `terrainCard()` straight out of
+      `index.html` into a small VM sandbox and calling it directly with
+      each combination of `plotConfirmed`/`sectionData`/`precise.found`.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
