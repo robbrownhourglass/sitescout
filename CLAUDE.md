@@ -97,8 +97,16 @@ sitescout/
                              (render_dtm_image(), served by webapp.py's /api/terrain-image route,
                              fetched by the map's imageOverlay only when that layer's toggled on)
                              — every pixel is a genuine LIDAR elevation value, not a hillshade or a
-                             point sample. New deps: tifffile, numpy, pyproj, Pillow (see
-                             requirements.txt) — the only module using them.
+                             point sample. New deps: tifffile, numpy, pyproj, Pillow, shapely (see
+                             requirements.txt) — the only module using them. get_terrain_mesh()
+                             builds a real triangle mesh (not a height grid) exactly clipped to a
+                             confirmed plot's own boundary shape via shapely polygon
+                             intersection + constrained Delaunay triangulation, for the
+                             /terrain-3d rotatable 3D page (webapp.py); optionally grounds and
+                             extrudes nearby buildings.py footprints onto that same mesh.
+  buildings.py              nearby building footprints from OpenStreetMap (Overpass API) — used
+                             only by the /terrain-3d page's elevation.get_terrain_mesh(), not a
+                             pipeline.py SECTION_SPECS entry (nothing to do with the report itself)
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
                              CFRAM via wms.py — fluvial/coastal/pluvial x current/mid-future/
@@ -796,6 +804,98 @@ app, rather than the documented-but-dead endpoints:
       were verified by extracting `terrainCard()` straight out of
       `index.html` into a small VM sandbox and calling it directly with
       each combination of `plotConfirmed`/`sectionData`/`precise.found`.
+20. **The 3D page shipped broken (silently), then got a real boundary fix
+    and OSM buildings.** Three separate follow-ups after item 19 shipped:
+    - **Fix: `/terrain-3d` hung on "Loading terrain" forever, no request
+      ever reached the server.** Root cause: `OrbitControls.js` (loaded
+      from jsDelivr) itself does `import { ... } from 'three'` — a bare
+      module specifier, which browsers can't resolve without an import
+      map. Confirming the file's own URL returns 200 (done before
+      shipping item 19) is NOT the same as confirming its *own imports*
+      will resolve — that gap is exactly what let this ship broken. A
+      bare-specifier import failure kills the whole ES module graph
+      silently: no console error, no network request, `main()` never
+      runs. Fixed with a standard `<script type="importmap">` mapping
+      `"three"` to the real URL, and switched the page's own `THREE`
+      import to the same bare specifier so both resolve to one identical
+      module instance. Lesson for any future CDN-loaded ES module: check
+      what IT imports, not just that its own URL is live.
+    - **Fix: the clipped boundary was blocky ("Minecraft stairs"), not
+      smooth.** Root cause: the elevation grid was clipped by testing each
+      cell's 4 corners with a hand-rolled point-in-polygon test and
+      discarding any cell not fully inside — geometrically correct but
+      the edge could only ever land on a grid line, never on the plot's
+      real boundary point. Fixed by adding `shapely` (GEOS) as a real,
+      verified dependency — the same class of decision as adding `pyproj`
+      for the WGS84<->ITM transform (see item 14): a textbook hand-rolled
+      algorithm (plain ray-casting) is fine for a simple inside/outside
+      test, but real polygon clipping and triangulation of an arbitrary
+      *concave* shape is a different, much easier-to-get-subtly-wrong
+      problem, and the correct response is a verified library, not a
+      bigger hand-rolled algorithm. Confirmed live before use: `shapely
+      2.1.2`'s `.intersection()` correctly clips a concave test polygon
+      (exact area match), and `shapely.constrained_delaunay_triangles()`
+      correctly triangulates a concave polygon *respecting its real
+      boundary* (also exact area match) rather than falling back to a
+      convex-hull Delaunay. `elevation.get_terrain_mesh()` was rewritten
+      around this: boundary-straddling grid cells are now intersected
+      against the real plot polygon and the resulting exact-boundary
+      fragment is triangulated, with new boundary vertices' elevation
+      bilinear-interpolated from that cell's own 4 real corner heights
+      (exact at the corners themselves, a standard well-defined estimate
+      elsewhere in the cell). Fully-interior cells skip the shapely call
+      entirely (a plain vectorized `shapely.covers()` over the whole grid
+      decides corner in/out status once, not per-quad) — this matters
+      since interior cells vastly outnumber boundary ones and a shapely
+      call per corner would be needless overhead for cells nothing is
+      being clipped against. **This also changed the API contract**:
+      `/api/terrain-mesh` now returns an explicit vertex+face mesh
+      (`vertices`: `[x, y, elevation_m]` in metres east/north of the
+      mesh's own origin; `faces`: triangle index triples) instead of a
+      2D `heights` grid — the frontend (`terrain3d.html`) got simpler as
+      a result: it no longer does any clipping/quad logic itself, just
+      consumes the backend's already-built mesh directly. Verified the
+      new mesh has zero degenerate (near-zero-area) triangles and no
+      NaN/Inf vertices before shipping, and that the reported elevation
+      range still matched the pre-shapely version exactly (21.5-25.9m at
+      the same Fermoy test parcel).
+    - **Add: nearby buildings (OpenStreetMap), asked for directly** ("we
+      have buildings there in the OSM view, can we add them"). New
+      `buildings.py` queries the public Overpass API
+      (`overpass-api.de/api/interpreter`) for `way["building"]` within the
+      mesh's own area — confirmed live before use (55 real footprints near
+      Fermoy). Two real gotchas found in that same test: (1) the default
+      `python-requests` User-Agent gets a plain `406 Not Acceptable` from
+      this server — a custom, descriptive UA fixes it; (2) the free public
+      instance genuinely times out under load (`504`, or a hard
+      read-timeout) unpredictably, confirmed by seeing both on the exact
+      same query that then succeeded on a later retry — handled with a
+      few retries, not a fallback data source (no widely-used free
+      alternative exists for this). **Confirmed, not assumed: most OSM
+      buildings here carry no real height data** — only 8/55 in that test
+      had a `building:levels` tag, none had `height`. A disclosed default
+      (`DEFAULT_BUILDING_HEIGHT_M = 6.0`, ~2 storeys) is therefore doing
+      real work for most buildings shown, not covering some rare edge
+      case — every building carries its own `height_is_estimated` flag,
+      surfaced in the 3D page's own legend text, not just in code
+      comments. Each footprint is extruded (`elevation._extrude_building()`)
+      into a flat-roofed prism — walls as simple quads, roof triangulated
+      with the SAME `constrained_delaunay_triangles()` already added
+      above — and grounded at the real elevation sampled from the SAME
+      terrain mosaic under its own footprint centroid (skipped, not
+      guessed, if that falls outside the mosaic's own coverage or on a
+      real LIDAR data gap). **A real building shouldn't get 3x taller
+      just because the terrain's vertical relief is exaggerated 3x for
+      visibility** — so each building's own vertices are sent as height
+      ABOVE ITS OWN GROUND (0 for the base ring, `height_m` for the roof
+      ring), not an absolute elevation; the frontend places the base at
+      `terrainY(ground_elevation_m)` (the same exaggerated surface height
+      the terrain mesh has right under it) and adds the building's real,
+      UNexaggerated height on top — deliberately different treatment from
+      the terrain mesh's own vertices, verified directly (a mock Node
+      harness confirmed vertex/index buffer sizes and the accumulated
+      index-offset math across multiple merged buildings are all correct
+      before shipping).
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
