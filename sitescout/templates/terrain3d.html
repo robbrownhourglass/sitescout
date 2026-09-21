@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>3D Terrain — Ireland Site Scout</title>
+<style>
+  :root {
+    --ink:#1b2a24; --paper:#f6f4ee; --muted:#6b7570; --moss:#2f5d4f; --moss-dark:#1f4237; --line:#e2ddd0;
+  }
+  html, body { margin:0; height:100%; background:#0e1512; color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  #canvasHost { position:fixed; inset:0; }
+  #canvasHost canvas { display:block; }
+  .panel {
+    position:fixed; z-index:10; background:rgba(246,244,238,.94); border:1px solid var(--line);
+    border-radius:10px; padding:14px 16px; box-shadow:0 4px 18px rgba(0,0,0,.18); max-width:340px;
+  }
+  #topPanel { top:16px; left:16px; }
+  #topPanel h1 { font-size:15px; margin:0 0 6px; }
+  #topPanel .muted { color:var(--muted); font-size:12.5px; line-height:1.4; }
+  #backLink { display:inline-block; margin-top:10px; font-size:12.5px; color:var(--moss); text-decoration:none; }
+  #backLink:hover { text-decoration:underline; }
+  #legendPanel { bottom:16px; left:16px; font-size:12px; }
+  #legendBar { height:14px; border-radius:3px; margin:6px 0 4px; background:linear-gradient(to right, rgb(46,139,60) 0%, rgb(154,205,50) 35%, rgb(222,165,62) 65%, rgb(255,255,255) 100%); }
+  #legendLabels { display:flex; justify-content:space-between; color:var(--muted); }
+  #statusPanel { top:16px; right:16px; font-size:13px; text-align:right; }
+  #statusPanel.err { color:#a4472d; }
+  .spinner {
+    display:inline-block; width:14px; height:14px; border:2px solid rgba(0,0,0,.15);
+    border-top-color:var(--moss); border-radius:50%; animation:spin .8s linear infinite; vertical-align:middle; margin-right:6px;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  #hint { position:fixed; bottom:16px; right:16px; z-index:10; font-size:12px; color:rgba(246,244,238,.75); }
+</style>
+</head>
+<body>
+
+<div id="canvasHost"></div>
+
+<div id="topPanel" class="panel">
+  <h1>3D terrain — this site's own shape</h1>
+  <div class="muted">Real OPW LIDAR elevation (~2m grid), clipped to the confirmed plot boundary — not a bounding box. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible; drag to rotate, scroll to zoom.</div>
+  <a id="backLink" href="/">&larr; Back to site report</a>
+</div>
+
+<div id="statusPanel" class="panel"><span class="spinner"></span>Loading terrain…</div>
+
+<div id="legendPanel" class="panel" style="display:none">
+  <div id="legendMeta" class="muted"></div>
+  <div id="legendBar"></div>
+  <div id="legendLabels"><span id="legendMin"></span><span id="legendMax"></span></div>
+</div>
+
+<div id="hint">Drag = rotate &middot; Scroll = zoom &middot; Right-drag = pan</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+
+const VERTICAL_EXAGGERATION = 3;
+document.getElementById('exaggerationLabel').textContent = VERTICAL_EXAGGERATION + '×';
+
+const statusEl = document.getElementById('statusPanel');
+function setStatus(html, isErr){
+  statusEl.innerHTML = html;
+  statusEl.className = 'panel' + (isErr ? ' err' : '');
+}
+
+// Same 4-stop hypsometric tint as elevation.py's _COLOR_STOPS and the
+// Terrain & elevation card's legend bar — kept in sync by hand (small,
+// stable, not worth a round-trip to fetch this from the backend).
+const COLOR_STOPS = [
+  [0.00, [46, 139, 60]],
+  [0.35, [154, 205, 50]],
+  [0.65, [222, 165, 62]],
+  [1.00, [255, 255, 255]],
+];
+function elevationColor(t){
+  for(let i = 0; i < COLOR_STOPS.length - 1; i++){
+    const [t0, c0] = COLOR_STOPS[i], [t1, c1] = COLOR_STOPS[i + 1];
+    if(t >= t0 && t <= t1){
+      const localT = (t - t0) / (t1 - t0);
+      return [
+        (c0[0] + (c1[0] - c0[0]) * localT) / 255,
+        (c0[1] + (c1[1] - c0[1]) * localT) / 255,
+        (c0[2] + (c1[2] - c0[2]) * localT) / 255,
+      ];
+    }
+  }
+  return [1, 1, 1];
+}
+
+function readBoundaryFromUrl(){
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get('boundary');
+  if(!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch(e) {
+    return null;
+  }
+}
+
+async function main(){
+  const ringSets = readBoundaryFromUrl();
+  if(!ringSets){
+    setStatus('No plot boundary in the URL — open this page from the "Terrain & elevation" card after confirming your plot.', true);
+    return;
+  }
+
+  let mesh;
+  try {
+    const resp = await fetch('/api/terrain-mesh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ polygon_ring_sets_wgs84: ringSets }),
+    });
+    const body = await resp.json().catch(() => ({}));
+    if(!resp.ok || body.status !== 'ok'){
+      setStatus((body && body.message) || 'No precise LIDAR coverage for this plot — OPW\'s survey concentrates on rivers, floodplains, and coasts.', true);
+      return;
+    }
+    mesh = body.data;
+  } catch(err) {
+    setStatus('Request failed: ' + err.message, true);
+    return;
+  }
+
+  statusEl.style.display = 'none';
+  buildScene(mesh);
+}
+
+function buildScene(mesh){
+  const { rows, cols, cell_size_m: cellSize, heights, min_elevation_m: minEl, max_elevation_m: maxEl, source } = mesh;
+  const span = Math.max(maxEl - minEl, 0.01);
+
+  // Legend
+  document.getElementById('legendPanel').style.display = 'block';
+  document.getElementById('legendMeta').textContent = `${source} — ${rows}×${cols} grid, ${cellSize}m cells`;
+  document.getElementById('legendMin').textContent = minEl.toFixed(1) + 'm';
+  document.getElementById('legendMax').textContent = maxEl.toFixed(1) + 'm';
+
+  const host = document.getElementById('canvasHost');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0e1512);
+
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100000);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  host.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+  sun.position.set(1, 1.6, 0.8);
+  scene.add(sun);
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+  fillLight.position.set(-1, 0.6, -0.8);
+  scene.add(fillLight);
+
+  // One vertex per grid cell that has a real height (row/col index maps
+  // directly to a vertex index; cells with height === null get no vertex
+  // and every quad touching them is skipped below) — the resulting mesh's
+  // own outline IS the plot boundary, not a filled rectangle with a
+  // colored/blanked-out region. Centered on its own bounding box and
+  // shifted so the lowest point sits near y=0, purely so the default
+  // camera framing looks reasonable regardless of the site's real-world
+  // elevation (e.g. 3m vs 300m above sea level shouldn't change how far
+  // away the camera needs to start).
+  const halfWidth = (cols - 1) * cellSize / 2;
+  const halfDepth = (rows - 1) * cellSize / 2;
+
+  const vertexIndex = new Map(); // "r,c" -> position in the vertex arrays
+  const positions = [];
+  const colors = [];
+  for(let r = 0; r < rows; r++){
+    for(let c = 0; c < cols; c++){
+      const h = heights[r][c];
+      if(h == null) continue;
+      const x = c * cellSize - halfWidth;
+      const z = r * cellSize - halfDepth;
+      const y = (h - minEl) * VERTICAL_EXAGGERATION;
+      vertexIndex.set(r + ',' + c, positions.length / 3);
+      positions.push(x, y, z);
+      const [cr, cg, cb] = elevationColor((h - minEl) / span);
+      colors.push(cr, cg, cb);
+    }
+  }
+
+  const indices = [];
+  for(let r = 0; r < rows - 1; r++){
+    for(let c = 0; c < cols - 1; c++){
+      const a = vertexIndex.get(r + ',' + c);
+      const b = vertexIndex.get(r + ',' + (c + 1));
+      const cIdx = vertexIndex.get((r + 1) + ',' + c);
+      const d = vertexIndex.get((r + 1) + ',' + (c + 1));
+      // Only emit a quad (as two triangles) when all four corners are
+      // real data — this is what makes the mesh's silhouette trace the
+      // actual plot boundary instead of a rectangle.
+      if(a == null || b == null || cIdx == null || d == null) continue;
+      indices.push(a, cIdx, b);
+      indices.push(b, cIdx, d);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: false, roughness: 0.9, metalness: 0 });
+  const terrainMesh = new THREE.Mesh(geometry, material);
+  scene.add(terrainMesh);
+
+  // A faint wireframe on top helps read the grid/shape at a glance,
+  // especially useful right at the plot's jagged clipped edge.
+  const wireGeo = new THREE.WireframeGeometry(geometry);
+  const wireMat = new THREE.LineBasicMaterial({ color: 0x1f4237, transparent: true, opacity: 0.15 });
+  scene.add(new THREE.LineSegments(wireGeo, wireMat));
+
+  // Frame the camera based on the mesh's real size, not a fixed guess —
+  // a tiny back garden and a multi-hectare merged farm both need sane
+  // default framing.
+  const planExtent = Math.max((cols - 1) * cellSize, (rows - 1) * cellSize);
+  const verticalExtent = span * VERTICAL_EXAGGERATION;
+  const distance = Math.max(planExtent, verticalExtent) * 1.3 + 10;
+  camera.position.set(distance * 0.7, distance * 0.6, distance * 0.7);
+  camera.lookAt(0, verticalExtent / 2, 0);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, verticalExtent / 2, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = Math.max(planExtent * 0.05, 2);
+  controls.maxDistance = distance * 6;
+  controls.update();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  (function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+}
+
+main();
+</script>
+
+</body>
+</html>

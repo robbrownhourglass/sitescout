@@ -1911,6 +1911,20 @@ function terrainCard(t){
 
   html += `<div style="margin-top:10px" class="muted">Contour lines are also available as a map layer — "Elevation contours (EPA)" in the layer switcher, off by default.</div>`;
 
+  // Only offered once a plot is confirmed — the 3D mesh is clipped to the
+  // plot's own boundary shape (see elevation.get_terrain_mesh()), not a
+  // bounding box, so it needs real ring geometry to exist yet, not just a
+  // point. Built fresh here (rather than cached) because openDetail() calls
+  // this build() function again every time the tile is reopened, so it
+  // naturally reflects plotConfirmed's latest value.
+  const ringSets = plotConfirmed && sectionData.boundary && sectionData.boundary.polygon_ring_sets_wgs84;
+  if(ringSets && ringSets.length && p.found){
+    const boundaryUrl = '/terrain-3d?boundary=' + encodeURIComponent(JSON.stringify(ringSets));
+    html += `<div style="margin-top:10px"><a href="${boundaryUrl}" target="_blank" style="display:inline-block;font-weight:600;color:var(--moss);text-decoration:none;border:1px solid var(--moss);border-radius:6px;padding:6px 12px">View 3D terrain &rarr;</a> <span class="muted">rotatable 3D model of this plot's own real elevation, clipped to its confirmed boundary</span></div>`;
+  } else if(p.found){
+    html += `<div style="margin-top:10px" class="muted">Confirm a plot boundary above to unlock a rotatable 3D terrain model of this site.</div>`;
+  }
+
   return card('Terrain & elevation', verdictCls, p.found ? 'Live' : 'Live (approx.)', 'live', html,
     'Sources: OPW LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
 }
