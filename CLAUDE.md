@@ -99,13 +99,14 @@ sitescout/
                              — every pixel is a genuine LIDAR elevation value, not a hillshade or a
                              point sample. New deps: tifffile, numpy, pyproj, Pillow, shapely (see
                              requirements.txt) — the only module using them. get_terrain_mesh()
-                             builds a real triangle mesh (not a height grid) exactly clipped to a
-                             confirmed plot's own boundary shape via shapely polygon
-                             intersection + constrained Delaunay triangulation, for the
-                             /terrain-3d rotatable 3D page (webapp.py); optionally grounds and
-                             extrudes nearby buildings.py buildings/roads onto that same mesh
-                             (get_terrain_mesh() and the OSM fetch run concurrently in webapp.py,
-                             joined via attach_features() — see CLAUDE.md item 21).
+                             builds a real triangle mesh (not a height grid) over a padded area
+                             around a confirmed plot (not clipped to its exact boundary — see
+                             CLAUDE.md item 22 for why that was reverted), with the plot boundary
+                             and nearby roads painted onto it as a texture (not built as
+                             geometry) and nearby buildings.py buildings extruded as real 3D
+                             objects, for the /terrain-3d rotatable 3D page (webapp.py) —
+                             get_terrain_mesh() and the OSM fetch run concurrently in webapp.py,
+                             joined via attach_features() (see CLAUDE.md item 21).
   buildings.py              nearby building footprints AND roads/tracks, from OpenStreetMap in one
                              combined Overpass query (get_nearby_features(), on-disk cached) — used
                              only by the /terrain-3d page's elevation.get_terrain_mesh(), not a
@@ -969,6 +970,76 @@ app, rather than the documented-but-dead endpoints:
       Node harness as buildings: vertex/index buffer sizes for all three
       geometries (terrain/buildings/roads) matched exactly against a real
       captured response (2 buildings, 3 road segments) before shipping.
+22. **Real user report with a screenshot, exposing that items 19-21's whole
+    approach for the boundary/roads was wrong in an instructive way — not
+    just buggy.** The screenshot showed: (a) the road ribbon visibly
+    blocky/discontinuous at corners (no mitring between per-segment
+    quads); (b) two buildings floating fully disconnected in empty black
+    space, nowhere near the rendered terrain island. (b) was the more
+    important tell — it meant the exact-polygon-clip approach (item 19-20)
+    was fundamentally the wrong shape for this problem: any building or
+    road just outside the tight clip (a real, relevant part of a site's
+    context) had nothing to render on top of, because the terrain literally
+    didn't exist there. No amount of further polishing the clip or the
+    road-ribbon mitring would fix that — the boundary/roads needed to stop
+    being geometry matched to a location on a small clipped island and
+    become part of a much larger, plain terrain surface instead.
+    - **Terrain**: dropped the exact shapely clip entirely (items 19-20)
+      in favour of a plain, uncipped rectangular grid over the plot's
+      bounding box + `MESH_CONTEXT_BUFFER_M` (50m) of real surrounding
+      context — not just to the plot's own edge. This is a genuine
+      simplification, not a workaround: `get_terrain_mesh()`'s main loop
+      no longer needs shapely at all for the terrain itself (no more
+      per-cell `covers()`/`intersection()`/`constrained_delaunay_triangles()`
+      calls), just "does this cell have 4 real (non-NoData) corners" — 2
+      triangles if so. `shapely` stays a real dependency, just narrower in
+      scope now: building the boundary polygon (for the texture below) and
+      triangulating building roofs.
+    - **Boundary + roads: painted onto the terrain as a texture, not built
+      as geometry** — literally what was asked for, and it directly fixes
+      both screenshot problems at once, not by coincidence: a texture is
+      "ink on the surface" that can never be positioned wrong relative to
+      the surface it's drawn on (no clipping to misalign, no ribbon
+      segments to have joints at all). `get_terrain_mesh()` now generates
+      an `overlay_texture_png_base64` (PIL, white background, the plot
+      boundary + any roads stroked on top in real-world-proportional pixel
+      widths, `ROAD_WIDTH_M`/`BOUNDARY_LINE_WIDTH_M`) applied as the mesh's
+      own `THREE.MeshStandardMaterial.map`, multiplied together with the
+      existing per-vertex hypsometric elevation tint (`vertexColors`) —
+      confirmed live this multiply-composition is exactly what
+      `MeshStandardMaterial` does with both set simultaneously. Each
+      vertex's UV is computed directly from `grid_extent` (the mesh's own
+      local-coordinate bounds, also returned in the response) using the
+      SAME mapping the backend used to place ink on the texture
+      (`_local_to_pixel()`), so the two are guaranteed pixel-aligned by
+      construction rather than by two independently-tuned coordinate
+      systems happening to agree. Confirmed Three.js's default
+      `texture.flipY = true` needs no extra correction: v increasing with
+      real-world north correctly samples the PNG's own top row (drawn as
+      the north edge), verified by rendering and visually inspecting the
+      overlay PNG directly (a real, correctly-shaped, non-mirrored
+      Fermoy parcel outline with real nearby roads, clean and continuous).
+      Since roads/boundary fetch (buildings.py, concurrent with the mesh
+      build — item 21) may land AFTER the mesh's own texture is first
+      drawn, `attach_features()` keeps the live, not-yet-encoded PIL
+      `Image` object in `_raw` and draws roads onto that SAME image
+      in-place, re-encoding to PNG only once both passes are done —
+      avoiding two independently-drawn textures that would need
+      reconciling. `_extrude_road()`/3D road ribbons are deleted entirely,
+      not just unused — there's no reason to keep two code paths for the
+      same information once one of them is both correct and simpler.
+    - **Buildings: stayed real 3D objects** (the user explicitly
+      distinguished them from roads/boundary: a building is a genuine 3D
+      volume, not a marking on the ground) — but fixed the OTHER real
+      problem the screenshot showed indirectly (floating/gapping against
+      sloped ground): `_extrude_building()` previously sampled elevation
+      at only the footprint's centroid, so any part of a real (non-flat)
+      footprint that sat higher than that one point would show the base
+      floating above the visible terrain. Fixed by sampling elevation at
+      EVERY footprint vertex plus the centroid, taking the minimum, and
+      subtracting `BUILDING_EMBED_M` (0.75m) below that — the base now
+      plants firmly into the terrain everywhere under the footprint, not
+      just barely touching at its single lowest real sample.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
