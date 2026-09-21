@@ -1617,6 +1617,60 @@ app, rather than the documented-but-dead endpoints:
       the stacking stays sensible: satellite as a ground-truth base, flow
       analysis on top of that, catchment selection on top of everything.
 
+32. **A solid black "block diagram" box under the /terrain-3d mesh — asked
+    for directly** ("a black flat surface underneath, level with the
+    lowest other object, with black edges coming up from each side... to
+    meet the edge of the terrain surface"). Entirely a `terrain3d.html`
+    frontend addition — no backend/API change, since everything needed
+    (vertex positions, face indices, `grid_extent`) was already in the
+    existing `/api/terrain-mesh` response.
+    - **Walls trace the mesh's REAL silhouette, not an assumed rectangle**:
+      `findBoundaryEdges()` — a standard, well-defined technique for any
+      triangulated surface (not invented for this project): build an
+      edge -> triangle-count map from the face list; an edge used by
+      exactly ONE triangle is on the mesh's own outer boundary, one used
+      by two is shared/interior. This was deliberately chosen over
+      assuming the padded mesh is always a perfect rectangle, because it
+      isn't always (see item 18's real coverage-edge clipping case) — this
+      way the wall automatically follows wherever the real terrain data
+      actually ends, with no separate case-handling needed for a partial
+      NoData gap right at the mesh's own edge. Verified directly with a
+      synthetic 2x3-vertex two-quad grid before use: the one shared
+      internal edge was correctly excluded, all 6 real perimeter edges
+      correctly found.
+    - **Base level tracks the true lowest point of everything rendered,
+      not just the terrain's own minimum** — asked for directly ("level
+      with the lowest OTHER object"). The terrain's own lowest vertex is
+      exactly Y=0 by construction (`terrainY()` is defined relative to
+      `minEl`), but a building's base can genuinely dip below that: an
+      OSM building's ground level is `min(sampled elevations under its
+      footprint) - BUILDING_EMBED_M` (0.75m, item 22), and unlike the
+      terrain's own Y values, that offset is added AFTER `terrainY()`
+      rather than being derived from it — so if a building happens to sit
+      at the terrain's own single lowest sampled point, its base can end
+      up up to `0.75 * VERTICAL_EXAGGERATION` (2.25 at the default 3x)
+      below Y=0. `minSceneY` is tracked across the building loop
+      specifically to catch this. Verified both ways: the real captured
+      Fermoy fixture (22 real buildings, none happening to dip below the
+      terrain's own minimum) gives `minSceneY = 0` as expected, and a
+      synthetic case forcing one building's ground level 2m below the
+      terrain minimum correctly produces `minSceneY = -6` (2m x 3x
+      exaggeration) with both the skirt walls' bottom edge and the base
+      plane landing exactly there.
+    - **Base plane uses the simple bounding rectangle (`grid_extent`), not
+      the traced silhouette** — a deliberate simplification: the two
+      coincide exactly whenever the mesh has no real NoData gap at its own
+      edge (the common case, and the only case the walls form a fully
+      closed rectangle to begin with), and clipping the base plane to an
+      arbitrary traced silhouette would need real 2D polygon triangulation
+      for a purely cosmetic surface nobody sees from outside the box
+      anyway (it's always below/behind the walls).
+    - Both the walls and the base use a plain unlit `MeshBasicMaterial`
+      (not `MeshStandardMaterial`) specifically so they read as pure,
+      flat black regardless of scene lighting — matching "black" as an
+      absolute description, not "dark gray under the sun/fill lights"
+      other objects in the scene get.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

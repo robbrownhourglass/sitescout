@@ -262,12 +262,23 @@ function buildScene(mesh, ringSets){
   // building's real, TRUE height is added on top UNexaggerated — so a
   // real 6m building still looks like a real 6m building next to the
   // deliberately-stretched slope, not 3x too tall along with it.
+  // Terrain's own lowest vertex is exactly Y=0 by construction (terrainY()
+  // is defined relative to minEl) — but a building's base can dip up to
+  // BUILDING_EMBED_M (0.75m, amplified by VERTICAL_EXAGGERATION since it's
+  // added to an already-exaggerated terrainY()) below that, if it happens
+  // to sit at the terrain's own lowest sampled point (see
+  // elevation._extrude_building()). Tracked here so the box below sits
+  // level with the true lowest point of everything actually rendered, not
+  // just the terrain's own minimum.
+  let minSceneY = 0;
+
   if(buildings && buildings.length){
     const bPositions = [];
     const bIndices = [];
     let indexOffset = 0;
     for(const b of buildings){
       const groundY = terrainY(b.ground_elevation_m);
+      minSceneY = Math.min(minSceneY, groundY);
       for(const [x, y, zRel] of b.vertices){
         bPositions.push(x, groundY + zRel, -y);
       }
@@ -289,6 +300,73 @@ function buildScene(mesh, ringSets){
   // (see elevation.py's module comment for why: as real 3D ribbon
   // objects they looked visibly blocky/discontinuous at corners, a real
   // user report with a screenshot).
+
+  // A solid black "box" under the terrain — asked for directly: a flat
+  // base plane level with the lowest point in the scene, with vertical
+  // walls closing the gap up to the terrain surface's own real outer
+  // edge, the standard "block diagram" look for a terrain visualization.
+  // The walls trace the mesh's ACTUAL silhouette via boundary-edge
+  // detection (an edge used by exactly one triangle is on the mesh's own
+  // outer boundary — a standard, well-defined way to find a triangulated
+  // surface's outline) rather than assuming a perfect rectangle, so this
+  // also correctly follows any real NoData gap at the mesh's own edge
+  // (see CLAUDE.md item 18) instead of leaving a visible gap between the
+  // wall and the terrain there. A real NoData hole fully INSIDE the mesh
+  // (not touching its outer edge) would also get walled the same way — a
+  // rare, accepted simplification for a typical confirmed plot's own
+  // padded working area, not specially detected/excluded.
+  function findBoundaryEdges(idx){
+    const count = new Map();
+    const verts = new Map();
+    for(let i = 0; i < idx.length; i += 3){
+      const tri = [idx[i], idx[i + 1], idx[i + 2]];
+      for(let k = 0; k < 3; k++){
+        const a = tri[k], b = tri[(k + 1) % 3];
+        const key = a < b ? a + '_' + b : b + '_' + a;
+        count.set(key, (count.get(key) || 0) + 1);
+        if(!verts.has(key)) verts.set(key, [a, b]);
+      }
+    }
+    const boundary = [];
+    for(const [key, c] of count) if(c === 1) boundary.push(verts.get(key));
+    return boundary;
+  }
+
+  const boxMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide });
+
+  const skirtPositions = [];
+  const skirtIndices = [];
+  let skirtOffset = 0;
+  for(const [i, j] of findBoundaryEdges(indices)){
+    const x1 = positions[i * 3], y1 = positions[i * 3 + 1], z1 = positions[i * 3 + 2];
+    const x2 = positions[j * 3], y2 = positions[j * 3 + 1], z2 = positions[j * 3 + 2];
+    skirtPositions.push(x1, y1, z1, x2, y2, z2, x1, minSceneY, z1, x2, minSceneY, z2);
+    const t1 = skirtOffset, t2 = skirtOffset + 1, b1 = skirtOffset + 2, b2 = skirtOffset + 3;
+    skirtIndices.push(t1, b1, b2, t1, b2, t2);
+    skirtOffset += 4;
+  }
+  if(skirtPositions.length){
+    const skirtGeometry = new THREE.BufferGeometry();
+    skirtGeometry.setAttribute('position', new THREE.Float32BufferAttribute(skirtPositions, 3));
+    skirtGeometry.setIndex(skirtIndices);
+    scene.add(new THREE.Mesh(skirtGeometry, boxMaterial));
+  }
+
+  // Base plane: a flat rectangle spanning the mesh's own bounding
+  // footprint (grid_extent), not the traced silhouette above — simpler,
+  // and the two coincide exactly whenever the mesh has no real NoData gap
+  // at its own edge (the common case for a confirmed plot's own padded
+  // area, and the only case the walls above form a closed rectangle in
+  // the first place).
+  const baseGeometry = new THREE.BufferGeometry();
+  baseGeometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    extent.x_min, minSceneY, -extent.y_min,
+    extent.x_max, minSceneY, -extent.y_min,
+    extent.x_max, minSceneY, -extent.y_max,
+    extent.x_min, minSceneY, -extent.y_max,
+  ], 3));
+  baseGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+  scene.add(new THREE.Mesh(baseGeometry, boxMaterial));
 
   // Frame the camera based on the mesh's real plan size, not a fixed
   // guess — a tiny back garden and a multi-hectare merged farm both need
