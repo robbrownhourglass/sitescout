@@ -1575,7 +1575,16 @@ def _fill_and_route(arr: np.ndarray) -> tuple:
 
 FLOOD_EPSILON_M = 0.02  # a cell only counts as "would be flooded" if filling raised it by at least this much — keeps floating-point-noise-level non-differences from being flagged
 FLOOD_POOL_COLOR = WATER_COLOR  # same colour as the flow lines — a line and the lake it feeds should read as the same substance
-FLOOD_POOL_ALPHA = 120
+# Same RGB as the flow lines isn't enough on its own for them to actually
+# LOOK the same colour — both layers get alpha-blended over the terrain's
+# own varying colour underneath, so a translucent pool and a near-opaque
+# line read as visibly different shades even with identical RGB. A real
+# user report, confirmed by checking the numbers: the pool was fixed at
+# 120/255 (~47% opaque) while a strong flow line reaches 255 (100%) — a
+# big channel looked solid and saturated right next to a pale, washed-out
+# lake. Raised to sit at the same end of the range a bold line reaches,
+# not the line's own faint-trickle end.
+FLOOD_POOL_ALPHA = 225
 
 # code 1-8 = 1 + this list's own index; code 0 = a sink or NoData cell (no
 # flow_to at all) — used to send the filled/routed flow direction grid to
