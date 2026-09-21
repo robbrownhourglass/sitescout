@@ -441,10 +441,10 @@ function buildScene(mesh, ringSets){
   }
 
   function toggleSinkSelection(sinkIndex){
-    const marker = sinkMarkers[sinkIndex].mesh;
+    const { mesh: marker, baseColor } = sinkMarkers[sinkIndex];
     if(selectedSinkIndices.has(sinkIndex)){
       selectedSinkIndices.delete(sinkIndex);
-      marker.material.color.set(0xc83030);
+      marker.material.color.set(baseColor);
       marker.scale.set(1, 1, 1);
     } else {
       selectedSinkIndices.add(sinkIndex);
@@ -515,22 +515,34 @@ function buildScene(mesh, ringSets){
     poolMembers = buildPoolMembers(flow.pool_labels);
     const markerRadius = Math.max(0.5, planExtent * 0.012);
     const markerGeom = new THREE.SphereGeometry(markerRadius, 10, 8);
+    // Real basin sinks (SINK_MARKER_COLOR, red — a place water pools) vs
+    // channel exit points (EXIT_MARKER_COLOR, gray — where a line just
+    // runs off the edge of this mosaic's own analyzed area, asked for
+    // directly so those endpoints can be clicked for their catchment too)
+    // — colours kept in sync by hand with elevation.py's own constants,
+    // same as the rest of this page's hypsometric palette.
     for(let i = 0; i < flow.sinks.length; i++){
       const s = flow.sinks[i];
-      const mat = new THREE.MeshBasicMaterial({ color: 0xc83030 });
+      const baseColor = s.is_exit ? 0x8c8c8c : 0xc83030;
+      const mat = new THREE.MeshBasicMaterial({ color: baseColor });
       const marker = new THREE.Mesh(markerGeom, mat);
       marker.position.set(s.x, terrainY(s.elevation_m) + markerRadius * 1.5, -s.y);
       scene.add(marker);
-      sinkMarkers.push({ mesh: marker, sinkIndex: i });
+      sinkMarkers.push({ mesh: marker, sinkIndex: i, baseColor });
     }
 
-    const shown = flow.sinks.length;
-    const total = flow.total_sinks_found;
+    const basinTotal = flow.total_sinks_found;
+    const basinShown = flow.sinks.filter(s => !s.is_exit).length;
+    const exitTotal = flow.total_exit_points_found;
+    const exitShown = flow.sinks.filter(s => s.is_exit).length;
     const floodedArea = Math.round(flow.flooded_area_m2 || 0).toLocaleString();
-    flowMeta.textContent = total
-      ? `${total} low point${total > 1 ? 's' : ''} found where water would pool` + (total > shown ? ` (showing the ${shown} largest)` : '') +
-        ` — shaded areas (~${floodedArea}m² total) show where each one would flood once full; lines show the overflow cascading downstream from there, thicker where more area drains through. Click a low point to see its total catchment area (click again to deselect, click more to combine).`
-      : 'No distinct low points found inside this plot boundary.';
+    const basinNote = basinTotal
+      ? `${basinTotal} low point${basinTotal > 1 ? 's' : ''} (red) where water would pool` + (basinTotal > basinShown ? ` (showing the ${basinShown} largest)` : '')
+      : 'no distinct low points inside this plot boundary';
+    const exitNote = exitTotal
+      ? `, ${exitTotal} point${exitTotal > 1 ? 's' : ''} (gray) where a channel runs off the edge of the analyzed area` + (exitTotal > exitShown ? ` (showing the ${exitShown} largest)` : '')
+      : '';
+    flowMeta.textContent = `${basinNote}${exitNote} — shaded areas (~${floodedArea}m² total) show where each low point would flood once full; lines show the overflow cascading downstream, thicker where more area drains through. Click any point to see its total catchment area (click again to deselect, click more to combine).`;
   });
 
   (function animate(){
