@@ -103,8 +103,11 @@ sitescout/
                              confirmed plot's own boundary shape via shapely polygon
                              intersection + constrained Delaunay triangulation, for the
                              /terrain-3d rotatable 3D page (webapp.py); optionally grounds and
-                             extrudes nearby buildings.py footprints onto that same mesh.
-  buildings.py              nearby building footprints from OpenStreetMap (Overpass API) — used
+                             extrudes nearby buildings.py buildings/roads onto that same mesh
+                             (get_terrain_mesh() and the OSM fetch run concurrently in webapp.py,
+                             joined via attach_features() — see CLAUDE.md item 21).
+  buildings.py              nearby building footprints AND roads/tracks, from OpenStreetMap in one
+                             combined Overpass query (get_nearby_features(), on-disk cached) — used
                              only by the /terrain-3d page's elevation.get_terrain_mesh(), not a
                              pipeline.py SECTION_SPECS entry (nothing to do with the report itself)
   planning.py               planning applications (National Planning Application Database,
@@ -896,6 +899,76 @@ app, rather than the documented-but-dead endpoints:
       harness confirmed vertex/index buffer sizes and the accumulated
       index-offset math across multiple merged buildings are all correct
       before shipping).
+21. **Real user report: /terrain-3d took ~40s to load, and buildings still
+    weren't showing.** Traced live (not guessed) to the log: three
+    consecutive Overpass `504`s eating ~38s, at a genuinely rural test
+    site that DOES have real buildings nearby (confirmed: a plain retry a
+    minute later found 10 of them in 8s) — a transient overload, not a
+    real "nothing here" case, and not something the original
+    sequential-then-blocking design handled gracefully. Fixed three ways,
+    same session as the "add roads too" follow-up below:
+    - **Concurrency**: `webapp.py`'s `/api/terrain-mesh` now runs the
+      LIDAR mesh build and the Overpass features fetch in a
+      `ThreadPoolExecutor` (the exact same pattern `pipeline.py` already
+      uses for report sections), instead of sequentially. Required
+      restructuring `elevation.get_terrain_mesh()`: it now stashes the raw
+      mosaic pieces it needs (`arr`/`ext`/`resolution`/`center_x`/`center_y`)
+      in an internal `_raw` key, and a new `elevation.attach_features()`
+      grounds/extrudes buildings and roads onto an already-built mesh
+      using that stash — so the OSM fetch no longer has to be ready at the
+      moment the mesh function itself returns. `_raw` is stripped in
+      `webapp.py` before the result is ever `jsonify()`'d.
+    - **Tighter retry budget**: 3 attempts x 30s timeout + 3s delay
+      (worst case ~99s) down to 2 attempts x 12s timeout + 1.5s delay
+      (worst case ~26s) — buildings/roads are a visual nice-to-have, not
+      core report data, so failing faster and just showing none is the
+      right trade, not chasing every possible transient failure.
+    - **On-disk cache** (`.cache/osm_features/`, same atomic-write spirit
+      as `elevation.py`'s LIDAR tile cache, keyed by a coarsely-rounded
+      lat/lon/radius so near-identical repeat requests for "the same
+      site" still hit it): confirmed live — a cached lookup for the same
+      area that took 20s+ on a cold Overpass-struggling run came back in
+      0.4s once cached. Unlike LIDAR survey data (never changes), OSM
+      buildings/roads genuinely do get edited over time, hence a 30-day
+      TTL rather than caching forever.
+    - **Checked, and deliberately did NOT add, a second Overpass mirror**
+      as a fallback: `overpass.osm.ch` responded fast (0.3-0.6s) but with
+      **zero results** at three different radii (74m/200m/500m) around a
+      point confirmed (via the primary instance, moments apart) to have
+      real buildings — a stale or incomplete mirror. A fast wrong answer
+      ("no buildings here") is worse than an honest slow timeout — exactly
+      the class of silent-failure trap this doc already warns about
+      elsewhere (the missing-`/query`-suffix gotcha) — so only the one
+      confirmed-correct instance (`overpass-api.de`) is used.
+    - **Add: roads/tracks, asked for in the same follow-up** ("roads too
+      if there are any in the property"). Rather than a second slow
+      Overpass round-trip, `buildings.py`'s query was combined into one
+      request fetching both `way["building"]` and `way["highway"]`
+      together (`get_nearby_features()`, replacing the old
+      `get_nearby_buildings()`) — deliberately, since doubling load on an
+      already-confirmed bottleneck would undo the point of the fixes
+      above. Each road is extruded (`elevation._extrude_road()`) into a
+      thin ribbon at a standard rough width by highway type
+      (`ROAD_WIDTH_M` — OSM's own `width` tag is rarely present, same
+      "confirmed sparse real data" situation as building heights).
+      **Deliberately different vertex encoding from buildings**: a
+      building has one flat floor level, so its vertices are sent as
+      height-above-its-own-ground and the frontend adds its real,
+      unexaggerated height on top of the (exaggerated) terrain surface
+      (see item 20). A road's elevation genuinely varies along its length
+      — there's no single "floor level" — so each road vertex instead
+      carries its own ABSOLUTE elevation, sampled from the same mosaic at
+      that exact point, and the frontend runs it through the *identical*
+      `terrainY()` exaggeration transform the terrain mesh itself uses:
+      the road correctly follows the same stretched slope it actually
+      sits on, rather than needing a true-scale exception the way a
+      building's height does. A road that partially leaves the mosaic's
+      own coverage is split into separate continuous on-coverage segments
+      (`_extrude_road()` returns a list, not one mesh) rather than
+      guessing an elevation across the gap. Verified via the same mock
+      Node harness as buildings: vertex/index buffer sizes for all three
+      geometries (terrain/buildings/roads) matched exactly against a real
+      captured response (2 buildings, 3 road segments) before shipping.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
