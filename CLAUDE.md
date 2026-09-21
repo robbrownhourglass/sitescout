@@ -1671,6 +1671,61 @@ app, rather than the documented-but-dead endpoints:
       absolute description, not "dark gray under the sun/fill lights"
       other objects in the scene get.
 
+33. **Partial LIDAR coverage inside the padded 3D-view area — three
+    related fixes asked for together, using R32 E4F8's own real,
+    already-documented coverage edge (item 18) as the test case.**
+    - **The black box now crops to match real coverage, instead of always
+      being a fixed rectangle.** The base plane (item 32) previously
+      spanned `grid_extent`'s full bounding rectangle regardless of
+      whether the terrain actually had data everywhere in it — fine when
+      coverage is complete, but at a real edge like R32 E4F8's, that left
+      the flat black base sticking out past where the skirt walls
+      actually were (the walls already correctly traced the mesh's real
+      silhouette via `findBoundaryEdges()`, item 32 — only the base plane
+      had the mismatch). Fixed by having the base plane reuse the
+      terrain's OWN vertex (x,z) positions and face list, just flattened
+      to `minSceneY` — the identical footprint, not a separately-computed
+      shape, so it can never disagree with the walls. Verified directly:
+      base plane vertex/face counts now exactly match the terrain mesh's
+      own (post-crop) counts, with X/Z identical at every vertex and only
+      Y flattened.
+    - **A few pixels are now trimmed back from every NoData transition
+      before meshing** — asked for directly ("there are anomalies at the
+      edge"). `_erode_valid_mask()` (`MESH_EDGE_TRIM_PIXELS = 3`): standard
+      binary erosion (same stacked-window technique `_median_smooth()`
+      already uses, so no new dependency), confirmed correct against a
+      synthetic mask with a known NoData strip before use. This targets a
+      real gap the existing 3x3 median smoothing (item 23) doesn't close:
+      that filter deliberately leaves a pixel untouched whenever ANY
+      neighbour is NoData (correct — it avoids blending real elevation
+      with "no data"), which also means a genuinely noisy real pixel
+      right at a coverage boundary survives unchanged. Confirmed live at
+      R32 E4F8: face count dropped from 19,092 to 16,720 and the rendered
+      footprint visibly pulled back a uniform margin on every side
+      (including the mosaic's own outer edge, trimmed the same way —
+      harmless given `MESH_CONTEXT_BUFFER_M`'s already-generous padding).
+    - **A new warning when the coverage gap reaches the PLOT BOUNDARY
+      ITSELF, not the wider padded context around it** — asked for
+      directly, with the exact distinction requested: "if we don't have
+      everything in the property boundary we can warn the user, if it's
+      outside the boundary then no need." `get_terrain_mesh()` now samples
+      `shapely.contains_xy(plot_geom, ...)` on the SAME row/col grid the
+      mesh itself uses, intersected with the (post-erosion) valid mask, to
+      get `boundary_lidar_coverage_fraction` — the fraction of the real
+      boundary's own area that's actually rendered, deliberately ignoring
+      any gap that only falls in the surrounding padding. Verified the
+      formula directly (not just visually) against three synthetic cases
+      (a boundary straddling a coverage edge, one fully covered, one fully
+      uncovered) before relying on it, since a live boundary landing
+      exactly on a real partial-coverage edge proved impractical to
+      engineer as a live test case; separately confirmed on R32 E4F8's
+      REAL data that the fraction correctly comes back 1.0 (no warning)
+      even though the wider padded mesh clearly has a real gap — the
+      site's own boundary itself happens to sit entirely on the covered
+      side of it. `terrain3d.html` shows a warning banner (`#coverageWarning`)
+      only when this fraction is below ~99.9%, verified via a mock-harness
+      test forcing a synthetic 62% figure.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

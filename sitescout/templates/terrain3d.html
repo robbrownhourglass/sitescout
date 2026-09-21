@@ -40,6 +40,7 @@
 <div id="topPanel" class="panel">
   <h1>3D terrain — this site's own shape</h1>
   <div class="muted">Real LIDAR elevation over the site and its surroundings, with the plot boundary and nearby roads painted onto the surface (not separate objects) and nearby buildings shown as real 3D shapes for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
+  <div id="coverageWarning" class="muted" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);color:#a4472d"></div>
   <label id="satelliteToggleRow" style="display:none;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
     <input type="checkbox" id="satelliteToggle" /> Show satellite imagery (inside boundary)
   </label>
@@ -160,8 +161,20 @@ async function main(){
 }
 
 function buildScene(mesh, ringSets){
-  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat } = mesh;
+  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat, boundary_lidar_coverage_fraction: boundaryCoverage } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
+
+  // Only warn about a coverage gap INSIDE the plot boundary itself — a gap
+  // in the wider padded context area around it is expected and normal
+  // (see elevation.get_terrain_mesh()'s own note on this) and not worth
+  // surfacing here; the black box/walls already crop back to match
+  // whatever real coverage exists regardless.
+  if(boundaryCoverage != null && boundaryCoverage < 0.999){
+    const pct = Math.round(boundaryCoverage * 100);
+    const warningEl = document.getElementById('coverageWarning');
+    warningEl.style.display = 'block';
+    warningEl.textContent = `⚠ Only ~${pct}% of your plot boundary has real LIDAR coverage in this view — the rest shows as a gap in the terrain (see the "not full national coverage" note on the Terrain & elevation card).`;
+  }
 
   // Legend
   document.getElementById('legendPanel').style.display = 'block';
@@ -352,20 +365,25 @@ function buildScene(mesh, ringSets){
     scene.add(new THREE.Mesh(skirtGeometry, boxMaterial));
   }
 
-  // Base plane: a flat rectangle spanning the mesh's own bounding
-  // footprint (grid_extent), not the traced silhouette above — simpler,
-  // and the two coincide exactly whenever the mesh has no real NoData gap
-  // at its own edge (the common case for a confirmed plot's own padded
-  // area, and the only case the walls above form a closed rectangle in
-  // the first place).
+  // Base plane: reuses the terrain mesh's OWN vertex (x,z) positions and
+  // face list — same shape as the real terrain footprint, just flattened
+  // to minSceneY — rather than a fixed rectangle spanning the padded
+  // area's full bounding box. A real site (like R32 E4F8 — see CLAUDE.md
+  // item 18) can have genuine LIDAR coverage stopping partway through the
+  // padded area; a rectangle would then stick out past where the skirt
+  // walls above actually are (which already trace the mesh's real
+  // silhouette). Reusing the exact same faces guarantees the base always
+  // matches the walls exactly, with no separate shape-tracing logic
+  // needed — it's the identical footprint, just at a different height.
+  const basePositions = new Array(positions.length);
+  for(let i = 0; i < positions.length; i += 3){
+    basePositions[i] = positions[i];
+    basePositions[i + 1] = minSceneY;
+    basePositions[i + 2] = positions[i + 2];
+  }
   const baseGeometry = new THREE.BufferGeometry();
-  baseGeometry.setAttribute('position', new THREE.Float32BufferAttribute([
-    extent.x_min, minSceneY, -extent.y_min,
-    extent.x_max, minSceneY, -extent.y_min,
-    extent.x_max, minSceneY, -extent.y_max,
-    extent.x_min, minSceneY, -extent.y_max,
-  ], 3));
-  baseGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+  baseGeometry.setAttribute('position', new THREE.Float32BufferAttribute(basePositions, 3));
+  baseGeometry.setIndex(indices);
   scene.add(new THREE.Mesh(baseGeometry, boxMaterial));
 
   // Frame the camera based on the mesh's real plan size, not a fixed

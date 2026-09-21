@@ -870,6 +870,41 @@ def _median_smooth(arr: np.ndarray, size: int = MESH_SMOOTHING_WINDOW) -> np.nda
     return np.where(valid, np.median(windows, axis=0), arr)
 
 
+MESH_EDGE_TRIM_PIXELS = 3  # see _erode_valid_mask() — real user report of anomalies right at a genuine LIDAR coverage edge
+
+
+def _erode_valid_mask(valid: np.ndarray, pixels: int) -> np.ndarray:
+    """Shrinks a boolean valid-data mask inward by `pixels` in every
+    direction (standard binary erosion — same stacked-window technique
+    _median_smooth() already uses above, so no new dependency like scipy
+    is needed for it). Used to crop the 3D mesh back a few pixels from any
+    NoData transition before meshing: a real user report found visible
+    anomalies (sensor/edge artifacts) clustering right at a genuine LIDAR
+    coverage boundary — e.g. R32 E4F8's own real coverage edge, already
+    documented in CLAUDE.md item 18 — which the existing 3x3
+    `_median_smooth()` alone doesn't fully suppress, since it deliberately
+    leaves a pixel untouched whenever ANY of its neighbours is NoData
+    (correct for avoiding blending real elevation with "no data", but that
+    also means a genuinely noisy real pixel right at the boundary survives
+    smoothing unchanged).
+
+    Treats anything outside the array's own bounds as invalid too
+    (`mode="constant", constant_values=False` padding), so this also trims
+    a few pixels off the mosaic's own outer edge uniformly — harmless and
+    unnoticeable given `get_terrain_mesh()`'s own already-generous
+    `MESH_CONTEXT_BUFFER_M` padding around the plot.
+    """
+    if pixels <= 0:
+        return valid
+    h, w = valid.shape
+    padded = np.pad(valid, pixels, mode="constant", constant_values=False)
+    eroded = np.ones((h, w), dtype=bool)
+    for dr in range(2 * pixels + 1):
+        for dc in range(2 * pixels + 1):
+            eroded &= padded[dr:dr + h, dc:dc + w]
+    return eroded
+
+
 def _sample_elevation(arr, ext, resolution, itm_x, itm_y) -> Optional[float]:
     """Nearest-pixel elevation lookup at an arbitrary ITM point within an
     already-loaded mosaic array — used to find the real ground level under
@@ -1053,6 +1088,7 @@ def get_terrain_mesh(
         return None
 
     arr = _median_smooth(mosaic["array"])  # see _median_smooth() — suppresses sensor-noise "tearing" in the lit 3D surface, not applied to the raw mosaic other callers use
+    valid_mask = _erode_valid_mask(arr > -9999, MESH_EDGE_TRIM_PIXELS)  # crops a few pixels back from any NoData transition — see _erode_valid_mask()'s own docstring for why (real sensor/edge artifacts right at a genuine coverage boundary)
     ext = mosaic["ext"]
     ext_left, ext_top, ext_right, ext_bottom = ext
     resolution = mosaic["resolution"]
@@ -1081,20 +1117,21 @@ def get_terrain_mesh(
         vertex_cache[key] = idx
         return idx
 
-    # A plain, uncipped rectangular grid — every cell whose 4 real corner
-    # values are valid (not NoData) becomes 2 triangles, full stop. No
-    # polygon test, no per-cell shapely call: dropping the exact-clip
-    # approach (see the module comment above) means this loop is now both
-    # simpler AND faster than the v2 version.
+    # A plain, uncipped rectangular grid — every cell whose 4 real corners
+    # are valid (not NoData, and not within MESH_EDGE_TRIM_PIXELS of a
+    # NoData transition — see _erode_valid_mask()) becomes 2 triangles,
+    # full stop. No polygon test, no per-cell shapely call: dropping the
+    # exact-clip approach (see the module comment above) means this loop
+    # is now both simpler AND faster than the v2 version.
     for ri in range(nrows - 1):
         r0, r1 = row_indices[ri], row_indices[ri + 1]
         y0, y1 = grid_ys[ri], grid_ys[ri + 1]
         for ci in range(ncols - 1):
             c0, c1 = col_indices[ci], col_indices[ci + 1]
             x0, x1 = grid_xs[ci], grid_xs[ci + 1]
+            if not (valid_mask[r0, c0] and valid_mask[r0, c1] and valid_mask[r1, c0] and valid_mask[r1, c1]):
+                continue  # a real LIDAR data gap in or near this cell — never guess across NoData
             h00, h10, h01, h11 = arr[r0, c0], arr[r0, c1], arr[r1, c0], arr[r1, c1]
-            if h00 <= -9999 or h10 <= -9999 or h01 <= -9999 or h11 <= -9999:
-                continue  # a real LIDAR data gap in this cell — never guess across NoData
             i00, i10 = add_vertex(x0, y0, h00), add_vertex(x1, y0, h10)
             i01, i11 = add_vertex(x0, y1, h01), add_vertex(x1, y1, h11)
             faces.append([i00, i10, i01])
@@ -1103,6 +1140,22 @@ def get_terrain_mesh(
     if not vertices:
         log.info("-> LIDAR coverage exists nearby but no cell in this padded area had valid data")
         return None
+
+    # How much of the PLOT BOUNDARY ITSELF (not the wider padded context
+    # area around it — a gap out there is expected and not worth
+    # flagging) actually has real rendered coverage — asked for directly
+    # ("if we don't have everything in the property boundary we can warn
+    # the user, if it's outside the boundary then no need"). Sampled on
+    # the SAME row/col grid the mesh itself uses (not the full-resolution
+    # array), so this reflects exactly what's actually rendered, including
+    # the edge-trim above — a strip trimmed for artifact reasons should
+    # count as "not shown", same as one that was genuinely NoData.
+    grid_x_arr, grid_y_arr = np.meshgrid(grid_xs, grid_ys)  # real ITM coordinates — plot_geom is also in ITM, no reprojection needed
+    inside_boundary = shapely.contains_xy(plot_geom, grid_x_arr, grid_y_arr)
+    valid_sampled = valid_mask[np.ix_(row_indices, col_indices)]
+    boundary_total = int(inside_boundary.sum())
+    boundary_covered = int((inside_boundary & valid_sampled).sum())
+    boundary_lidar_coverage_fraction = round(boundary_covered / boundary_total, 3) if boundary_total else None
 
     # Overlay texture: the plot boundary is drawn now (always available);
     # roads are drawn later by attach_features() once the concurrent OSM
@@ -1122,8 +1175,9 @@ def get_terrain_mesh(
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     log.info(
-        "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, %dm padded context around the plot), %.1f-%.1fm",
+        "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, %dm padded context around the plot), %.1f-%.1fm, %s%% of the plot boundary itself covered",
         len(vertices), len(faces), resolution * step, int(radius_m), min(valid_heights), max(valid_heights),
+        "?" if boundary_lidar_coverage_fraction is None else round(boundary_lidar_coverage_fraction * 100, 1),
     )
     result = {
         "found": True,
@@ -1137,6 +1191,7 @@ def get_terrain_mesh(
         "origin_lon": center_lon,
         "origin_lat": center_lat,
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
+        "boundary_lidar_coverage_fraction": boundary_lidar_coverage_fraction,
         "overlay_texture_png_base64": _encode_overlay(),
         "buildings": [],
         "road_count": 0,
