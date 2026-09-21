@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import zipfile
 from pathlib import Path
@@ -698,17 +699,92 @@ def _extrude_building(building: dict, center_x: float, center_y: float, arr, ext
     }
 
 
-def get_terrain_mesh(polygon_ring_sets_wgs84: list, buildings: Optional[list] = None) -> Optional[dict]:
+ROAD_WIDTH_M = {
+    "motorway": 10.0, "trunk": 9.0, "primary": 8.0, "secondary": 7.0, "tertiary": 6.0,
+    "residential": 5.0, "unclassified": 5.0, "living_street": 5.0,
+    "service": 3.5, "track": 2.5, "cycleway": 1.5, "footway": 1.2, "path": 1.0,
+}  # standard rough widths by OSM highway type — real `width` tags are rarely present
+DEFAULT_ROAD_WIDTH_M = 4.0
+ROAD_SURFACE_OFFSET_M = 0.15  # raised slightly above the terrain surface so it doesn't z-fight with the ground mesh underneath it
+
+
+def _extrude_road(road: dict, center_x: float, center_y: float, arr, ext, resolution) -> list:
+    """One OSM road/track way -> a thin flat ribbon (width by highway
+    type — see ROAD_WIDTH_M) draped along the real terrain surface.
+    Unlike a building (one flat floor level, a real height added on top
+    UNexaggerated — see _extrude_building()'s comment), a road's elevation
+    genuinely varies along its length: every vertex here carries its own
+    ABSOLUTE elevation (sampled from this SAME mosaic, same as the terrain
+    mesh itself) rather than a height-above-ground offset, so the frontend
+    runs it through the exact same vertical-exaggeration transform as the
+    terrain mesh — the road correctly follows the (deliberately stretched)
+    slope it actually sits on, rather than needing its own separate
+    true-scale treatment the way a building's height does.
+
+    Returns a LIST of small mesh dicts, not one: a road that partially
+    leaves this mosaic's own coverage is split into separate continuous
+    on-coverage segments rather than guessing an elevation across the gap
+    (same never-guess-across-NoData rule used everywhere else here).
+    """
+    path_itm = [_to_itm.transform(lon, lat) for lon, lat in road["path_wgs84"]]
+    elevations = [_sample_elevation(arr, ext, resolution, x, y) for x, y in path_itm]
+    half_width = ROAD_WIDTH_M.get(road.get("highway_type"), DEFAULT_ROAD_WIDTH_M) / 2
+
+    segments: list = []
+    vertices: list = []
+    faces: list = []
+
+    def flush():
+        nonlocal vertices, faces
+        if len(vertices) >= 4:
+            segments.append({"highway_type": road.get("highway_type"), "name": road.get("name"),
+                              "vertices": vertices, "faces": faces})
+        vertices = []
+        faces = []
+
+    prev = None
+    for (x, y), elev in zip(path_itm, elevations):
+        if elev is None:
+            flush()
+            prev = None
+            continue
+        if prev is not None:
+            x0, y0, e0 = prev
+            dx, dy = x - x0, y - y0
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                prev = (x, y, elev)
+                continue
+            nx, ny = -dy / length * half_width, dx / length * half_width
+            z0, z1 = e0 + ROAD_SURFACE_OFFSET_M, elev + ROAD_SURFACE_OFFSET_M
+            i0 = len(vertices); vertices.append([round(x0 - center_x + nx, 2), round(y0 - center_y + ny, 2), round(z0, 2)])
+            i1 = len(vertices); vertices.append([round(x0 - center_x - nx, 2), round(y0 - center_y - ny, 2), round(z0, 2)])
+            i2 = len(vertices); vertices.append([round(x - center_x + nx, 2), round(y - center_y + ny, 2), round(z1, 2)])
+            i3 = len(vertices); vertices.append([round(x - center_x - nx, 2), round(y - center_y - ny, 2), round(z1, 2)])
+            faces.append([i0, i1, i2])
+            faces.append([i1, i3, i2])
+        prev = (x, y, elev)
+    flush()
+    return segments
+
+
+def get_terrain_mesh(
+    polygon_ring_sets_wgs84: list,
+    buildings: Optional[list] = None,
+    roads: Optional[list] = None,
+) -> Optional[dict]:
     """A real triangle mesh (vertices + faces, not a height grid) of the
     plot's own real LIDAR elevation, exactly clipped to its boundary shape
     (see the module comment above for the shapely-based clipping/
-    triangulation approach). `buildings` — see buildings.get_nearby_buildings()
-    — is optional; when given, each footprint is extruded (_extrude_building())
-    and returned as its own small mesh, grounded on this SAME elevation
-    mosaic and placed in this SAME local (x, y) coordinate frame (metres
-    east/north of `origin_lon`/`origin_lat`, returned so callers can
-    reproduce the exact frame if needed) so terrain and buildings align
-    without the browser needing to know anything about ITM or WGS84.
+    triangulation approach). `buildings`/`roads` — see
+    buildings.get_nearby_features() — are optional; when given, each is
+    extruded (_extrude_building()/_extrude_road()) and grounded on this
+    SAME elevation mosaic, in this SAME local (x, y) coordinate frame
+    (metres east/north of `origin_lon`/`origin_lat`, returned so callers
+    can reproduce the exact frame if needed) so terrain/buildings/roads
+    all align without the browser needing to know anything about ITM or
+    WGS84. Can also be attached later via attach_features() — see there
+    for why (running the OSM fetch concurrently with this mesh build).
     """
     center = mesh_center_and_radius(polygon_ring_sets_wgs84)
     if not center:
@@ -816,20 +892,11 @@ def get_terrain_mesh(polygon_ring_sets_wgs84: list, buildings: Optional[list] = 
         log.info("-> LIDAR coverage exists nearby but no grid cell fell inside the plot boundary")
         return None
 
-    building_meshes = []
-    for b in buildings or []:
-        mesh = _extrude_building(b, center_x, center_y, arr, ext, resolution)
-        if mesh:
-            building_meshes.append(mesh)
-    if buildings:
-        log.info("-> %d/%d nearby building(s) placed on this terrain mesh (rest fell outside this mosaic's own coverage)",
-                  len(building_meshes), len(buildings))
-
     log.info(
         "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, exact-clipped to plot boundary), %.1f-%.1fm",
         len(vertices), len(faces), resolution * step, min(valid_heights), max(valid_heights),
     )
-    return {
+    result = {
         "found": True,
         "vertices": vertices,
         "faces": faces,
@@ -840,5 +907,53 @@ def get_terrain_mesh(polygon_ring_sets_wgs84: list, buildings: Optional[list] = 
         "source": f"OPW LIDAR ({mosaic['source_label']})",
         "origin_lon": center_lon,
         "origin_lat": center_lat,
-        "buildings": building_meshes,
+        "buildings": [],
+        "roads": [],
+        # Raw mosaic pieces, kept only long enough for attach_features() to
+        # ground buildings/roads onto this SAME mesh — stripped before the
+        # result ever reaches webapp.py's jsonify() (see attach_features()
+        # and api_terrain_mesh()). Not re-fetching the LIDAR tiles a second
+        # time (they're disk-cached) is the point: buildings.py's Overpass
+        # call and this mesh build now run concurrently (see webapp.py),
+        # so the buildings/roads lookup is no longer available yet at the
+        # moment this function itself returns.
+        "_raw": {"center_x": center_x, "center_y": center_y, "arr": arr, "ext": ext, "resolution": resolution},
     }
+    attach_features(result, buildings, roads)
+    return result
+
+
+def attach_features(result: dict, buildings: Optional[list] = None, roads: Optional[list] = None) -> dict:
+    """Extrudes OSM buildings/roads (buildings.py) onto an already-built
+    get_terrain_mesh() result, using its stashed `_raw` mosaic pieces —
+    lets webapp.py fetch buildings/roads CONCURRENTLY with the mesh build
+    itself (via a thread pool) rather than paying Overpass's latency
+    strictly after the mesh is already done. Safe to call with nothing to
+    attach (a no-op) or after `_raw` has already been stripped (also a
+    no-op) — always returns `result` either way.
+    """
+    raw = result.get("_raw")
+    if not raw:
+        return result
+    center_x, center_y, arr, ext, resolution = raw["center_x"], raw["center_y"], raw["arr"], raw["ext"], raw["resolution"]
+
+    if buildings:
+        placed = []
+        for b in buildings:
+            mesh = _extrude_building(b, center_x, center_y, arr, ext, resolution)
+            if mesh:
+                placed.append(mesh)
+        result["buildings"] = placed
+        log.info("-> %d/%d nearby building(s) placed on this terrain mesh (rest fell outside this mosaic's own coverage)",
+                  len(placed), len(buildings))
+
+    if roads:
+        placed = []
+        for r in roads:
+            segments = _extrude_road(r, center_x, center_y, arr, ext, resolution)
+            placed.extend(segments)
+        result["roads"] = placed
+        log.info("-> %d nearby road(s) placed on this terrain mesh (as %d continuous on-coverage segment(s))",
+                  len(roads), len(placed))
+
+    return result

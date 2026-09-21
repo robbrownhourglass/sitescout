@@ -37,6 +37,7 @@ from whatever the user confirms (cadastral.summarise_selected_parcels()).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, Response, jsonify, render_template, request
 
@@ -186,35 +187,49 @@ def api_terrain_mesh():
     """A real triangle mesh (vertices + faces) of the plot's own real LIDAR
     elevation, exactly clipped to its boundary shape (not a bounding
     rectangle, not a blocky grid staircase — see elevation.get_terrain_mesh()'s
-    module comment) plus nearby OSM building footprints extruded and
-    grounded on that same mesh (buildings.get_nearby_buildings()) — for the
+    module comment) plus nearby OSM buildings and roads extruded and
+    grounded on that same mesh (buildings.get_nearby_features()) — for the
     /terrain-3d page's rotatable 3D rendering. POST, not GET, since the
     boundary (the confirmed plot selection's own ring geometry) is the
     actual query, not a couple of scalar params like everywhere else.
+
+    The LIDAR mesh build (normally well under a second, tiles permitting)
+    and the OSM features fetch (the public Overpass API — confirmed live
+    to occasionally take 10s+ per attempt under load, see buildings.py's
+    own docstring) run CONCURRENTLY here, same ThreadPoolExecutor pattern
+    pipeline.py already uses for report sections — a real user report of
+    this page taking ~40s to load traced back to these two running
+    sequentially, with Overpass's latency sitting entirely on top of the
+    mesh build instead of overlapping it.
     """
     body = request.get_json(silent=True) or {}
     ring_sets = body.get("polygon_ring_sets_wgs84")
     if not ring_sets:
         return _error("polygon_ring_sets_wgs84 is required", 400)
 
-    nearby_buildings = []
     center = elevation.mesh_center_and_radius(ring_sets)
-    if center:
-        center_lon, center_lat, radius_m = center
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        mesh_future = pool.submit(elevation.get_terrain_mesh, ring_sets)
+        features_future = pool.submit(buildings.get_nearby_features, center[1], center[0], center[2]) if center else None
+
         try:
-            nearby_buildings = buildings.get_nearby_buildings(center_lat, center_lon, radius_m)
+            result = mesh_future.result()
         except Exception as exc:
-            log.warning("Building footprint lookup failed (continuing without buildings): %s", exc)
+            log.error("Terrain mesh build failed: %s", exc)
+            return _error(f"terrain mesh build failed: {exc}", 502)
 
-    try:
-        result = elevation.get_terrain_mesh(ring_sets, buildings=nearby_buildings)
-    except Exception as exc:
-        log.error("Terrain mesh build failed: %s", exc)
-        return _error(f"terrain mesh build failed: {exc}", 502)
+        if not result:
+            return _error("no precise LIDAR coverage for this plot boundary", 404)
 
-    if not result:
-        return _error("no precise LIDAR coverage for this plot boundary", 404)
+        if features_future:
+            try:
+                features = features_future.result()
+                elevation.attach_features(result, features.get("buildings"), features.get("roads"))
+            except Exception as exc:
+                log.warning("OSM building/road lookup failed (continuing without them): %s", exc)
 
+    result.pop("_raw", None)  # internal-only mosaic pieces — never serialize these to the client
     return jsonify({"status": "ok", "data": result})
 
 
