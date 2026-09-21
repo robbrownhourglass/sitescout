@@ -233,6 +233,34 @@ def api_terrain_mesh():
     return jsonify({"status": "ok", "data": result})
 
 
+@app.post("/api/terrain-flow")
+def api_terrain_flow():
+    """Water flow analysis for the plot's own real terrain (see
+    elevation.get_flow_analysis()) — real local minima (where water pools
+    and stays) plus a transparent overlay texture showing the drainage
+    network that feeds them, for the /terrain-3d page's own optional
+    "water flow" toggle. A separate, lazily-fetched endpoint (like
+    /api/terrain-image's map layer) rather than folded into
+    /api/terrain-mesh's own response — this is a genuinely optional
+    analysis layer, not something every 3D-view visit needs to pay for.
+    """
+    body = request.get_json(silent=True) or {}
+    ring_sets = body.get("polygon_ring_sets_wgs84")
+    if not ring_sets:
+        return _error("polygon_ring_sets_wgs84 is required", 400)
+
+    try:
+        result = elevation.get_flow_analysis(ring_sets)
+    except Exception as exc:
+        log.error("Flow analysis failed: %s", exc)
+        return _error(f"flow analysis failed: {exc}", 502)
+
+    if not result:
+        return _error("no precise LIDAR coverage for this plot boundary", 404)
+
+    return jsonify({"status": "ok", "data": result})
+
+
 @app.get("/terrain-3d")
 def terrain_3d():
     """A standalone page (opened in a new tab from the Terrain & elevation
