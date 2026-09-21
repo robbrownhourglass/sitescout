@@ -1250,7 +1250,7 @@ const SECTION_OVERLAY_BUILDERS = {
     ['Threatened species (GBIF)', buildBiodiversityLayer],
   ],
   terrain: [
-    ['Precise terrain (OPW LIDAR)', buildTerrainImageLayer],
+    ['Precise terrain (LIDAR)', buildTerrainImageLayer],
   ],
   // Elevation contours are a separate, general reference layer (not tied
   // to this section's own data) — registered in initMap()/
@@ -1868,7 +1868,7 @@ function terrainCard(t){
 
   let verdictText, verdictCls;
   if(p.found){
-    verdictText = `Ground elevation: ${p.ground_elevation_m}m (OPW LIDAR, ${p.resolution_m}m resolution)`;
+    verdictText = `Ground elevation: ${p.ground_elevation_m}m (${p.source}, ${p.resolution_m}m resolution)`;
     verdictCls = 'ok';
   } else if(c.elevation_range_m){
     verdictText = `No precise LIDAR data here — nearby contours suggest roughly ${c.elevation_range_m[0]}-${c.elevation_range_m[1]}m`;
@@ -1880,7 +1880,7 @@ function terrainCard(t){
 
   let html = verdict(verdictText, verdictCls);
 
-  html += `<div style="margin-top:10px"><strong>Precise elevation (OPW LIDAR):</strong> `;
+  html += `<div style="margin-top:10px"><strong>Precise elevation${p.found ? ' (' + p.source + ')' : ''}:</strong> `;
   if(p.found){
     html += `${p.ground_elevation_m}m ground`;
     if(p.surface_elevation_m != null){
@@ -1888,7 +1888,7 @@ function terrainCard(t){
     }
     html += ` <span class="muted">(${p.resolution_m}m grid, surveyed ${p.survey_date})</span>`;
   } else {
-    html += `<span class="muted">not available — OPW's LIDAR survey concentrates on rivers, floodplains, and coasts</span>`;
+    html += `<span class="muted">not available — real LIDAR coverage here comes from several agencies (OPW's flood-risk survey, TII's road/rail corridors, one county council) and only covers about 30% of the country</span>`;
   }
   html += '</div>';
 
@@ -1906,7 +1906,7 @@ function terrainCard(t){
     html += `<div style="margin-top:10px"><strong>Precise elevation map layer</strong> <span class="muted">(${(p.image_radius_m / 1000).toFixed(1)}km radius, ${p.image_tile_count} tile(s) stitched: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
     html += `<div style="margin-top:4px;height:14px;border-radius:3px;background:linear-gradient(to right, rgb(46,139,60) 0%, rgb(154,205,50) 35%, rgb(222,165,62) 65%, rgb(255,255,255) 100%)"></div>`;
     html += `<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px"><span>${p.image_min_elevation_m}m</span><span>${p.image_max_elevation_m}m</span></div>`;
-    html += `<div style="margin-top:6px" class="muted">Every pixel is a real 2m LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (OPW LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;
+    html += `<div style="margin-top:6px" class="muted">Every pixel is a real LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;
   }
 
   html += `<div style="margin-top:10px" class="muted">Contour lines are also available as a map layer — "Elevation contours (EPA)" in the layer switcher, off by default.</div>`;
@@ -1926,7 +1926,7 @@ function terrainCard(t){
   }
 
   return card('Terrain & elevation', verdictCls, p.found ? 'Live' : 'Live (approx.)', 'live', html,
-    'Sources: OPW LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
+    'Sources: OPW / TII / Westmeath Co Co LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
 }
 
 function mailto(to, subject, body){

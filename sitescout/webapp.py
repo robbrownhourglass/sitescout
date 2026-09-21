@@ -156,10 +156,10 @@ def api_scout_section(name: str):
 
 @app.get("/api/terrain-image")
 def api_terrain_image():
-    """Renders the OPW LIDAR DTM tile covering (lat, lon) as a real
-    per-pixel elevation image (see elevation.render_dtm_image()) — called
-    lazily by the map's "Precise terrain (OPW LIDAR)" overlay only when a
-    user actually toggles it on, same as the contour tile layer never
+    """Renders the LIDAR DTM tile covering (lat, lon) as a real per-pixel
+    elevation image (see elevation.render_dtm_image()) — called lazily by
+    the map's "Precise terrain (LIDAR)" overlay only when a user actually
+    toggles it on, same as the contour tile layer never
     hitting this app's own server at all (it calls GSI's ArcGIS `export`
     operation directly). This is the one image-producing endpoint in the
     app; every other route returns JSON.
