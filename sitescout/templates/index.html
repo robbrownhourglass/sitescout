@@ -1920,7 +1920,7 @@ function terrainCard(t){
   const ringSets = plotConfirmed && sectionData.boundary && sectionData.boundary.polygon_ring_sets_wgs84;
   if(ringSets && ringSets.length && p.found){
     const boundaryUrl = '/terrain-3d?boundary=' + encodeURIComponent(JSON.stringify(ringSets));
-    html += `<div style="margin-top:10px"><a href="${boundaryUrl}" target="_blank" style="display:inline-block;font-weight:600;color:var(--moss);text-decoration:none;border:1px solid var(--moss);border-radius:6px;padding:6px 12px">View 3D terrain &rarr;</a> <span class="muted">rotatable 3D model of this plot's own real elevation, clipped to its confirmed boundary</span></div>`;
+    html += `<div style="margin-top:10px"><a href="${boundaryUrl}" target="_blank" style="display:inline-block;font-weight:600;color:var(--moss);text-decoration:none;border:1px solid var(--moss);border-radius:6px;padding:6px 12px">View 3D terrain &rarr;</a> <span class="muted">rotatable 3D model of this plot's own real elevation, exactly clipped to its confirmed boundary, with nearby buildings and roads (OpenStreetMap)</span></div>`;
   } else if(p.found){
     html += `<div style="margin-top:10px" class="muted">Confirm a plot boundary above to unlock a rotatable 3D terrain model of this site.</div>`;
   }
