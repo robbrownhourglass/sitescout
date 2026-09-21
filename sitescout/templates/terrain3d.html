@@ -353,8 +353,10 @@ function buildScene(mesh, ringSets){
     scene.add(flowMesh);
     const shown = flow.sinks.length;
     const total = flow.total_sinks_found;
+    const floodedArea = Math.round(flow.flooded_area_m2 || 0).toLocaleString();
     flowMeta.textContent = total
-      ? `${total} low point${total > 1 ? 's' : ''} found where water would pool` + (total > shown ? ` (showing the ${shown} largest)` : '') + ' — blue lines show where it would flow to get there, thicker where more area drains through.'
+      ? `${total} low point${total > 1 ? 's' : ''} found where water would pool` + (total > shown ? ` (showing the ${shown} largest)` : '') +
+        ` — shaded areas (~${floodedArea}m² total) show where each one would flood once full; lines show the overflow cascading downstream from there, thicker where more area drains through.`
       : 'No distinct low points found inside this plot boundary.';
   });
 
