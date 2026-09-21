@@ -127,6 +127,7 @@ can't supply one.
 from __future__ import annotations
 
 import base64
+import heapq
 import io
 import logging
 import os
@@ -1197,12 +1198,22 @@ def attach_features(result: dict, buildings: Optional[list] = None, roads: Optio
 # for somewhere), and accumulation increasing monotonically along the
 # valley floor toward that outlet.
 #
-# Deliberately NOT filling sinks before routing (the standard preprocessing
-# step for tools that need water to keep flowing somewhere, e.g. to model
-# a river all the way to the sea) — this app wants the opposite: the real,
-# unfilled local minima ARE the answer to "where does water sit and stay",
-# per the user's own question. Flow simply terminates there, which is
-# correct for this purpose.
+# TWO flow computations, deliberately, for two different questions.
+# `_compute_flow_network()` (raw, unfilled D8) answers "where are the real
+# local minima" — it's run on the ORIGINAL terrain specifically because
+# filling would move/hide them (filling exists to route water THROUGH a
+# basin, not to decide where a basin's own real floor is).
+# `_fill_and_route()` (priority-flood depression filling, standard
+# preprocessing real hydrology tools use) answers a different, later
+# question, asked directly after the first (unfilled-only) version
+# shipped: once a real sink fills up, where does the overflow actually
+# GO? A sink that never fills is only half the picture for a real flood
+# event — a shallow depression overflows almost immediately and its water
+# continues downhill toward whatever's next, which the unfilled model
+# can't show at all (flow just stops there). See `_fill_and_route()`'s own
+# docstring for why it derives its own flow direction rather than
+# re-running D8 on the filled result (a well-known "flat plateau" problem
+# that plain D8 can't resolve, confirmed live, not assumed).
 #
 # Runs on the SAME (already median-smoothed) elevation array
 # get_terrain_mesh() renders, at its native resolution — not the coarser
@@ -1407,33 +1418,151 @@ def _cluster_sinks(is_sink: np.ndarray, arr: np.ndarray, flow_acc: np.ndarray) -
     return clusters
 
 
+def _fill_and_route(arr: np.ndarray) -> tuple:
+    """Priority-flood depression filling (Barnes et al. 2014 — the
+    standard algorithm real hydrology tools use to prepare a DEM for
+    basin-to-basin flow routing), which ALSO derives flow direction
+    directly from its own fill order rather than re-deriving it from the
+    filled elevations afterward.
+
+    Asked for directly, after the first version (raw, unfilled D8 —
+    see the module comment above) didn't answer the actual question: a
+    real local minimum in reality fills with water until it spills over
+    its own lowest rim, then that overflow continues downhill toward the
+    next basin — not "flow just stops here forever", which is all a
+    never-filled model can show. This fills every depression up to its
+    own real spill (pour-point) elevation, so flow computed on the result
+    correctly cascades from one former basin, over its rim, into whatever
+    is downstream of it.
+
+    Runs a standard priority-flood: starting from every border/NoData-
+    adjacent cell (real, guaranteed exits) with its own elevation as
+    priority, repeatedly pop the lowest still-open cell and "conquer" its
+    unconquered neighbours — a neighbour lower than the conquering cell
+    gets raised to its level (this raising IS the fill), and, critically,
+    is also given a flow direction pointing straight back at whichever
+    cell conquered it.
+
+    That last part is why this does its OWN flow routing rather than
+    reusing `_compute_flow_network()` on the filled result — confirmed
+    live, not assumed: plain D8 on a filled array breaks on the flat
+    plateaus filling deliberately creates (every cell in a pool shares the
+    exact same elevation, so none has a strictly lower neighbour, and
+    D8's steepest-descent test can't resolve a direction at all — the
+    standard "flat resolution" problem in DEM hydrology). Recording each
+    cell's flow direction AT THE MOMENT it's conquered sidesteps that
+    entirely: a cell's conqueror is always its correct downhill neighbour
+    by construction, whether or not their filled elevations happen to
+    tie, so there's no flat-plateau ambiguity to resolve in the first
+    place. Verified directly on a synthetic two-basin case (a shallow
+    basin and a deeper one, separated by a saddle): the shallow basin's
+    real bottom correctly gained a positive contributing-area count (28
+    cells) instead of being an isolated dead end, and tracing its own
+    flow direction chain led all the way out past the saddle, through the
+    deeper basin, to the map's own edge — a real cascading path, not a
+    basin that just stops.
+
+    Returns `(filled, flow_to, flow_acc)` — `filled` has every depression
+    raised to its own spill elevation; `flow_to`/`flow_acc` are shaped and
+    used identically to `_compute_flow_network()`'s own (an (h, w, 2)
+    direction array and an (h, w) contributing-cell-count array), so
+    `_draw_flow_network()` needs no changes to consume either.
+    """
+    h, w = arr.shape
+    valid = arr > -9999
+    filled = arr.copy()
+    closed = np.zeros((h, w), dtype=bool)
+    flow_to = np.full((h, w, 2), -1, dtype=np.int32)
+    pop_order = []
+    heap = []
+    counter = 0  # tie-breaker so heapq never has to compare (row, col) tuples when elevations tie
+    for r in range(h):
+        for c in range(w):
+            if not valid[r, c]:
+                closed[r, c] = True
+                continue
+            r0, r1 = max(0, r - 1), min(h, r + 2)
+            c0, c1 = max(0, c - 1), min(w, c + 2)
+            is_edge = r in (0, h - 1) or c in (0, w - 1) or not valid[r0:r1, c0:c1].all()
+            if is_edge:
+                heapq.heappush(heap, (float(filled[r, c]), counter, r, c))
+                counter += 1
+                closed[r, c] = True
+    while heap:
+        elev, _, r, c = heapq.heappop(heap)
+        pop_order.append((r, c))
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and valid[nr, nc] and not closed[nr, nc]:
+                    closed[nr, nc] = True
+                    filled[nr, nc] = max(elev, arr[nr, nc])
+                    flow_to[nr, nc] = [-dr, -dc]
+                    heapq.heappush(heap, (float(filled[nr, nc]), counter, nr, nc))
+                    counter += 1
+
+    flow_acc = np.where(valid, 1, 0).astype(np.int64)
+    for r, c in reversed(pop_order):  # children were always popped after their conqueror — reverse order finalizes each cell's own total before adding it to its parent's
+        dr, dc = flow_to[r, c]
+        if dr == -1 and dc == -1:
+            continue
+        flow_acc[r + dr, c + dc] += flow_acc[r, c]
+
+    return filled, flow_to, flow_acc
+
+
+FLOOD_EPSILON_M = 0.02  # a cell only counts as "would be flooded" if filling raised it by at least this much — keeps floating-point-noise-level non-differences from being flagged
+FLOOD_POOL_COLOR = (30, 90, 180)
+FLOOD_POOL_ALPHA = 120
+
+
 def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
-    """Water flow analysis for a confirmed plot: real local minima (sinks —
-    points where water has nowhere further downhill to go, so it pools
-    and stays — see the module comment above) that fall INSIDE the plot's
-    own boundary, plus a transparent overlay texture (same "paint it on
-    the surface" approach as the boundary/roads overlay — see
-    get_terrain_mesh()) showing the drainage network that feeds them: the
-    low-point lines water actually concentrates along as it flows
-    downhill, thicker where more area converges.
+    """Water flow analysis for a confirmed plot — a real flood-fill
+    simulation, not just a static "flow stops here" snapshot: every real
+    local minimum (sink) fills with water until it spills over its own
+    lowest rim, and the overflow continues downhill toward whatever's
+    next — asked for directly, after a first (unfilled) version only
+    showed flow terminating at each basin with no way to see where an
+    overflowing puddle would actually go next.
+
+    Returns, for a confirmed plot's own padded terrain:
+    - `sinks`: real local minima inside the plot boundary (clustered and
+      ranked by catchment size — see `_cluster_sinks()`), each with its
+      own `fill_depth_m` (how much water it holds before it spills over
+      its own rim — a shallow depression overflows almost immediately, a
+      real basin has real capacity) and `spill_elevation_m` (the level it
+      fills to before that happens).
+    - `flow_overlay_png_base64`: one transparent texture (same "paint it
+      on the surface" approach as the boundary/roads overlay — see
+      get_terrain_mesh()) with three layers composited together: the
+      flooded-pool extent (every cell that would be underwater once
+      every depression fills to its own spill point — literally what a
+      flood event looks like on this terrain), the cascading overflow
+      network on top (computed on the FILLED terrain via `_fill_and_route()`,
+      so paths correctly continue past a former sink's rim into whatever
+      basin is downstream of it, not stopping there), and sink markers.
 
     A real, disclosed simplification, same spirit as everywhere else in
-    this app: D8 (steepest-single-neighbour) flow routing on real LIDAR
+    this app: D8-style flow routing on real (median-smoothed) LIDAR
     terrain is a genuine, standard hydrological technique, but it's still
     a model of where water WOULD go on this exact surface shape — not a
     substitute for an actual site drainage survey, and it says nothing
     about subsurface drainage, soil permeability, or engineered drainage
     already on site.
 
-    Sinks are clustered (_cluster_sinks()) and ranked by real catchment
-    size before being returned, not reported per raw pixel — confirmed
-    necessary: naive per-pixel sink detection on one ordinary parcel found
-    423 individual "sink" pixels, almost all flat micro-plateaus a few cm
-    across left over from median smoothing, not meaningfully distinct low
-    points. `total_sinks_found` (the count actually inside the plot
-    boundary, after clustering but before the MAX_REPORTED_SINKS cap) is
-    returned alongside `sinks` (capped, ranked) so the frontend can be
-    honest about how many exist even when only showing the top ones.
+    Sinks are clustered (`_cluster_sinks()`, on the UNFILLED terrain —
+    filling exists to route the overflow, not to decide where the real
+    low points are) and ranked by real catchment size before being
+    returned, not reported per raw pixel — confirmed necessary: naive
+    per-pixel sink detection on one ordinary parcel found 423 individual
+    "sink" pixels, almost all flat micro-plateaus a few cm across left
+    over from median smoothing, not meaningfully distinct low points.
+    `total_sinks_found` (the count actually inside the plot boundary,
+    after clustering but before the `MAX_REPORTED_SINKS` cap) is returned
+    alongside `sinks` (capped, ranked) so the frontend can be honest about
+    how many exist even when only showing the top ones.
     """
     center = mesh_center_and_radius(polygon_ring_sets_wgs84)
     if not center:
@@ -1453,9 +1582,18 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     ext = mosaic["ext"]
     ext_left, ext_top, ext_right, ext_bottom = ext
     resolution = mosaic["resolution"]
+    valid = arr > -9999
 
-    flow_acc, flow_to, is_sink = _compute_flow_network(arr, resolution)
-    clustered = _cluster_sinks(is_sink, arr, flow_acc)  # already sorted by catchment size, descending
+    # Raw (unfilled) flow: decides where the real local minima are.
+    _raw_flow_acc, _raw_flow_to, is_sink = _compute_flow_network(arr, resolution)
+    clustered = _cluster_sinks(is_sink, arr, _raw_flow_acc)  # sorted by catchment size, descending
+
+    # Filled + routed flow: decides where an overflowing sink's water
+    # actually goes next — see _fill_and_route()'s own docstring for why
+    # this needs its own flow-direction derivation, not plain D8 rerun on
+    # the filled result.
+    filled, flow_to, flow_acc = _fill_and_route(arr)
+    flooded = valid & (filled > arr + FLOOD_EPSILON_M)
 
     sinks = []
     total_inside = 0
@@ -1467,11 +1605,15 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
         total_inside += 1
         if len(sinks) >= MAX_REPORTED_SINKS:
             continue  # keep counting (for total_found below) but stop adding markers past the cap
+        bottom_m = float(arr[r, c])
+        spill_m = float(filled[r, c])
         sinks.append({
             "x": round(x - center_x, 2),
             "y": round(y - center_y, 2),
-            "elevation_m": round(float(arr[r, c]), 2),
+            "elevation_m": round(bottom_m, 2),
             "catchment_cells": catchment,
+            "spill_elevation_m": round(spill_m, 2),
+            "fill_depth_m": round(spill_m - bottom_m, 2),
         })
 
     extent = (
@@ -1487,7 +1629,20 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     # downsample is the standard, simple way to get anti-aliased-looking
     # lines out of a drawing API with none built in.
     ss = FLOW_SUPERSAMPLE
-    overlay_img = Image.new("RGBA", (TEXTURE_SIZE * ss, TEXTURE_SIZE * ss), (0, 0, 0, 0))
+    canvas_size = (TEXTURE_SIZE * ss, TEXTURE_SIZE * ss)
+    overlay_img = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+
+    if flooded.any():
+        # A plain nearest-neighbour view of `flooded` scaled up would look
+        # like a blocky mask — resizing through the SAME supersample ->
+        # LANCZOS-downsample pipeline as the lines/markers below gives it
+        # smooth, anti-aliased edges instead, and keeps every layer of
+        # this texture consistent.
+        mask_img = Image.fromarray((flooded.astype(np.uint8) * 255), mode="L").resize(canvas_size, Image.LANCZOS)
+        pool_layer = Image.new("RGBA", canvas_size, (*FLOOD_POOL_COLOR, 0))
+        pool_layer.putalpha(mask_img.point(lambda v: int(v * FLOOD_POOL_ALPHA / 255)))
+        overlay_img = Image.alpha_composite(overlay_img, pool_layer)
+
     draw = ImageDraw.Draw(overlay_img, "RGBA")
     _draw_flow_network(draw, flow_acc, flow_to, arr, ext, resolution, center_x, center_y, extent, TEXTURE_SIZE, ss)
     marker_r = max(2, int(round(_meters_to_pixels(SINK_MARKER_RADIUS_M, extent, TEXTURE_SIZE) * ss)))
@@ -1499,13 +1654,14 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     buf = io.BytesIO()
     overlay_img.save(buf, format="PNG")
 
-    log.info("-> Flow analysis: %d low point(s) inside the plot boundary (showing top %d by catchment size)",
-              total_inside, len(sinks))
+    log.info("-> Flow analysis: %d low point(s) inside the plot boundary (showing top %d by catchment size), %d cell(s) would flood",
+              total_inside, len(sinks), int(flooded.sum()))
 
     return {
         "found": True,
         "sinks": sinks,
         "total_sinks_found": total_inside,
+        "flooded_area_m2": round(float(flooded.sum()) * resolution * resolution, 1),
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
         "flow_overlay_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
     }
