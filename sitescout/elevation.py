@@ -34,11 +34,56 @@ other source in this app), and if a tile covers it, download just that
 one ~4MB tile and cache it locally (CACHE_DIR) — repeat lookups near the
 same area reuse the cached tile instead of re-downloading.
 
-Two sources tried in order (NASC first — newer, more tiles):
+Sources tried in order:
 - OPW NASC (National Aerial Survey Contract): confirmed genuinely 2m,
   ~4MB per tile, DTM + DSM both present, uppercase filenames.
 - OPW (older, pre-NASC): also confirmed genuinely 2m, ~4MB per tile,
-  DTM + DSM both present, lowercase filenames.
+  DTM + DSM both present, lowercase filenames. **Confirmed dead weight,
+  left in place anyway**: this specific coverage-index layer returns
+  NEITHER `EXT_*` attributes NOR real geometry for any of its 635
+  features (checked the full dataset, not a sample) — `_tile_extent()`
+  below always returns None for it, so it can never actually contribute a
+  tile. Kept in the list (rather than deleted) only because it costs
+  nothing to leave in and would start working again for free if GSI ever
+  fixes that service's schema.
+- TII (Transport Infrastructure Ireland): road/rail corridor survey, easily
+  the single biggest incremental source found (10,268km², confirmed via a
+  real geometric union of all 2,567 tiles) — but published differently
+  from OPW's own tiles in three separate ways, each confirmed by actually
+  downloading a sample tile rather than assumed to match OPW's convention:
+  (1) **no `EXT_*` attributes at all** — real `esriGeometryPolygon`
+  geometry IS returned though, and confirmed to be the same plain
+  axis-aligned-square convention (`SHAPE.AREA` = exactly 4,000,000 =
+  2000x2000m) as OPW's tiles, so a geometry-derived bounding box is exact,
+  not an approximation — see `_tile_extent()`; (2) **DTM only, no DSM** —
+  its zip has exactly one `.tif`, not a `_DTM`/`_DSM` pair (`dsm_pattern`
+  is `None` for this source, handled explicitly below); (3) **a different
+  NoData sentinel, `-99.0` not `-9999.0`** — confirmed directly (622,256 of
+  1,000,000 pixels in a real sample tile are exactly `-99.0`, zero pixels
+  at any other implausible value, and the remaining pixels form a smooth,
+  plausible 21-193m range for Kerry terrain) — normalized to the app's own
+  `-9999.0` convention at mosaic-build time (`_mosaic_dtm()`) so every
+  downstream NoData check keeps working unchanged.
+- Westmeath County Council: one county's own commissioned survey (2020,
+  25cm resolution, Ushnagh Hill area) — confirmed to match OPW's own
+  `EXT_*` + `_DTM.tif`/`_DSM.tif` + `-9999.0` conventions exactly (just
+  nested one folder level deeper in its zip), so it needed no special
+  handling at all once the TII-driven fixes above existed.
+
+**Deliberately not yet wired in: GSI/DCHG/DP (heritage sites), confirmed
+1,619km².** Its tiles are a genuinely different file FORMAT — ESRI ASCII
+Grid (`.asc`, a plain 6-line text header + space-separated rows), not
+GeoTIFF — confirmed by downloading a real sample. Not hard to parse (the
+header even states its own `NODATA_value` explicitly, no guessing needed,
+arguably more robust than TII's undocumented `-99`) but it's a genuinely
+new raster-reading code path through `tifffile.memmap()`/`imread()`
+everywhere in this module, and deserves its own careful, separately-tested
+pass rather than being bundled into the same change as TII/Westmeath.
+GSI Phase2 (144 tiles) and NYU Dublin (4 tiles) are excluded for the same
+reason as pre-NASC above — confirmed neither returns `EXT_*` attributes
+nor real geometry, so `_tile_extent()` would always return None for them
+too; both are small enough (a few km² combined) not to be worth chasing
+further right now.
 
 **Deliberately excludes OPW Cork.** Its coverage-index RESOLUTION field
 claims 2.0m — confirmed WRONG by actually downloading and reading a tile:
@@ -103,20 +148,33 @@ from .arcgis import point_query, point_query_full
 
 log = logging.getLogger("sitescout.elevation")
 
-# (source label, coverage-index query URL, DTM filename pattern, DSM filename pattern)
+# (source label, coverage-index query URL, DTM filename pattern,
+#  DSM filename pattern (None if the source has no DSM), NoData sentinel
+#  used inside that source's own raw TIFF — normalized to -9999.0 at
+#  mosaic-build time so every other NoData check in this module can stay
+#  written against one single convention)
 LIDAR_SOURCES = [
     (
         "OPW NASC",
         "https://gsi.geodata.gov.ie/server/rest/services/Lidar/IE_GSI_LiDAR_Coverage_OPW_NASC_IE26_ITM/MapServer/3/query",
-        "{name}_DTM.tif", "{name}_DSM.tif",
+        "{name}_DTM.tif", "{name}_DSM.tif", -9999.0,
     ),
     (
         "OPW (pre-NASC)",
         "https://gsi.geodata.gov.ie/server/rest/services/Lidar/IE_GSI_LiDAR_Coverage_OPW_IE26_ITM/MapServer/3/query",
-        "{name}_dtm.tif", "{name}_dsm.tif",
+        "{name}_dtm.tif", "{name}_dsm.tif", -9999.0,
+    ),
+    (
+        "TII",
+        "https://gsi.geodata.gov.ie/server/rest/services/Lidar/IE_GSI_LiDAR_Coverage_TII_IE26_ITM/MapServer/0/query",
+        "{name}/{name}.tif", None, -99.0,
+    ),
+    (
+        "Westmeath Co Co",
+        "https://gsi.geodata.gov.ie/server/rest/services/Lidar/IE_GSI_LiDAR_Coverage_WH_CoCo_IE26_ITM/MapServer/0/query",
+        "{name}/{name}_DTM.tif", "{name}/{name}_DSM.tif", -9999.0,
     ),
 ]
-COVERAGE_OUT_FIELDS = "DATA_URL,DATA_NAME,RESOLUTION,DATECAPTUR,EXT_LEFT,EXT_TOP,EXT_RIGHT,EXT_BOTTOM"
 
 CONTOUR_LAYER_URL = (
     "https://gsi.geodata.gov.ie/server/rest/services/Third_Party/"
@@ -158,11 +216,17 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
-def _download_and_extract(data_url: str, source_label: str, dtm_name: str, dsm_name: str) -> tuple[Optional[Path], Optional[Path]]:
+def _download_and_extract(
+    data_url: str, source_label: str, dtm_name: str, dsm_name: Optional[str]
+) -> tuple[Optional[Path], Optional[Path]]:
+    """`dsm_name` is None for a source with no DSM at all (confirmed for
+    TII: its zip has exactly one .tif, not a _DTM/_DSM pair) — the DSM
+    half of the return is then always None, not a missing/failed lookup.
+    """
     dtm_path = _cache_path(source_label, dtm_name)
-    dsm_path = _cache_path(source_label, dsm_name)
+    dsm_path = _cache_path(source_label, dsm_name) if dsm_name else None
     if dtm_path.exists():
-        return dtm_path, (dsm_path if dsm_path.exists() else None)
+        return dtm_path, (dsm_path if dsm_path and dsm_path.exists() else None)
 
     log.info("Downloading LIDAR tile (%s)…", data_url)
     resp = requests.get(data_url, timeout=TILE_DOWNLOAD_TIMEOUT_S)
@@ -175,13 +239,17 @@ def _download_and_extract(data_url: str, source_label: str, dtm_name: str, dsm_n
             log.warning("-> %s not found in %s (zip contents: %s)", dtm_name, data_url, zf.namelist())
             return None, None
         _atomic_write(dtm_path, zf.read(names[dtm_name.lower()]))
-        if dsm_name.lower() in names:
+        if dsm_path and dsm_name.lower() in names:
             _atomic_write(dsm_path, zf.read(names[dsm_name.lower()]))
 
-    return dtm_path, (dsm_path if dsm_path.exists() else None)
+    return dtm_path, (dsm_path if dsm_path and dsm_path.exists() else None)
 
 
-def _read_pixel(tif_path: Path, itm_x: float, itm_y: float, ext_left: float, ext_top: float, ext_right: float, ext_bottom: float) -> Optional[float]:
+def _read_pixel(
+    tif_path: Path, itm_x: float, itm_y: float,
+    ext_left: float, ext_top: float, ext_right: float, ext_bottom: float,
+    nodata: float = -9999.0,
+) -> Optional[float]:
     mm = tifffile.memmap(str(tif_path))
     height, width = mm.shape
     px_w = (ext_right - ext_left) / width
@@ -193,7 +261,7 @@ def _read_pixel(tif_path: Path, itm_x: float, itm_y: float, ext_left: float, ext
         return None
     value = float(mm[row, col])
     del mm
-    return None if value <= -9999 else value
+    return None if value <= nodata else value
 
 
 IMAGE_RADIUS_M = 1000  # "cover a 1km radius" — a square crop of this half-width, not a strict circle (simpler; visually equivalent for this purpose)
@@ -225,13 +293,13 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
     Uses arcgis.point_query()'s existing distance_m — a real server-side
     buffered spatial query, no manual sampling needed. "Does a source
     actually cover the exact point" is answered with a plain bbox check
-    against the returned tiles' own EXT_* attributes rather than a second
-    query: these coverage-index features are plain axis-aligned squares,
-    so their extent IS their exact boundary — no geometry library needed
-    for an exact (not approximate) point-in-tile test, same reasoning as
-    the karst/contour decisions not to hand-roll real polygon geometry
-    elsewhere in this app, just simpler here because these shapes are
-    trivial rectangles.
+    against each tile's own extent (see _tile_extent()) rather than a
+    second query: these coverage-index features are plain axis-aligned
+    squares, so their extent IS their exact boundary — no geometry library
+    needed for an exact (not approximate) point-in-tile test, same
+    reasoning as the karst/contour decisions not to hand-roll real polygon
+    geometry elsewhere in this app, just simpler here because these shapes
+    are trivial rectangles.
 
     Deliberately sticks to ONE source per mosaic (whichever the point
     itself falls within, in LIDAR_SOURCES priority order) rather than
@@ -239,12 +307,20 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
     """
     search_radius_m = radius_m * 1.5  # > radius_m * sqrt(2) (~1.4142), a bit of extra margin against rounding
     itm_x, itm_y = _to_itm.transform(lon, lat)
-    for source_label, coverage_url, dtm_pattern, dsm_pattern in LIDAR_SOURCES:
+    for source_label, coverage_url, dtm_pattern, dsm_pattern, nodata in LIDAR_SOURCES:
         log.info("Checking %s LIDAR coverage within %dm (for a %dm-radius square crop)…", source_label, search_radius_m, radius_m)
         try:
+            # return_geometry=True: needed as a fallback for sources whose
+            # coverage index has no EXT_* attributes at all (confirmed
+            # needed for TII) — see _tile_extent(). out_fields="*", not a
+            # named list: confirmed live that TII's own layer throws a
+            # hard "Failed to execute query" error (not a silent ignore)
+            # when asked for EXT_* fields it doesn't have in its schema —
+            # requesting everything sidesteps needing to know each
+            # source's exact field names up front.
             feats = point_query(
-                coverage_url, lon, lat, out_fields=COVERAGE_OUT_FIELDS,
-                distance_m=search_radius_m, result_record_count=16,
+                coverage_url, lon, lat, out_fields="*",
+                distance_m=search_radius_m, result_record_count=16, return_geometry=True,
             )
         except Exception as exc:
             log.warning("-> %s coverage query failed: %s", source_label, exc)
@@ -252,10 +328,10 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
         if not feats:
             continue
 
+        exts = {id(f): _tile_extent(f) for f in feats}
         contains_point = any(
-            f["attributes"]["EXT_LEFT"] <= itm_x <= f["attributes"]["EXT_RIGHT"]
-            and f["attributes"]["EXT_BOTTOM"] <= itm_y <= f["attributes"]["EXT_TOP"]
-            for f in feats
+            ext is not None and ext[0] <= itm_x <= ext[2] and ext[3] <= itm_y <= ext[1]
+            for ext in exts.values()
         )
         if not contains_point:
             log.info("-> %s has tiles nearby but none covering the exact point — trying next source", source_label)
@@ -263,10 +339,13 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
 
         tiles = []
         for f in feats:
+            ext = exts[id(f)]
+            if ext is None:
+                continue  # this source's coverage index has neither EXT_* attributes nor real geometry for this feature — see the module docstring's pre-NASC/GSI-Phase2/NYU note
             a = f["attributes"]
             data_name = a["DATA_NAME"]
             dtm_name = dtm_pattern.format(name=data_name)
-            dsm_name = dsm_pattern.format(name=data_name)
+            dsm_name = dsm_pattern.format(name=data_name) if dsm_pattern else None
             try:
                 dtm_path, dsm_path = _download_and_extract(a["DATA_URL"], source_label, dtm_name, dsm_name)
             except Exception as exc:
@@ -277,14 +356,86 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
             tiles.append({
                 "dtm_path": dtm_path,
                 "dsm_path": dsm_path,
-                "ext": (a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"]),
+                "ext": ext,
                 "resolution": a.get("RESOLUTION"),
                 "survey_date": a.get("DATECAPTUR"),
+                "nodata": nodata,
             })
+
+        if not tiles or not _point_has_real_data(tiles, itm_x, itm_y):
+            # A tile's bounding box containing the point is NOT the same
+            # as that exact pixel having real data — confirmed live: a
+            # real query point sat inside an OPW NASC tile's own square,
+            # but its survey (like TII's corridor survey, or any real
+            # LIDAR flight) doesn't fill every tile edge-to-edge, so the
+            # actual pixel there was NoData. Committing to this source
+            # anyway (the original behaviour) would report "no coverage"
+            # even when a LOWER-priority source (confirmed: TII, at this
+            # exact point) has real data — exactly undoing the point of
+            # having multiple sources. So: fall through to the next
+            # source instead of stopping at the first bbox match.
+            log.info("-> %s tile bounding box covers the point, but that exact pixel is NoData — trying next source", source_label)
+            continue
+
         log.info("-> %s: %d tile(s) found (search radius %dm, for a %dm-radius square crop)", source_label, len(tiles), search_radius_m, radius_m)
         return source_label, tiles
 
     return None, []
+
+
+def _point_has_real_data(tiles: list, itm_x: float, itm_y: float) -> bool:
+    """Whether the exact query point's own pixel — not just its enclosing
+    tile's bounding box — has real (non-NoData) elevation data. See the
+    caller: a tile's bbox containing a point never guaranteed that exact
+    pixel was actually surveyed.
+
+    Uses tifffile.imread() here, not the memmap-based _read_pixel() this
+    module otherwise prefers for single-pixel reads — confirmed live that
+    memmap raises `ValueError: image data are not memory-mappable` on a
+    real, ordinary-looking OPW NASC tile (memmap only works on
+    uncompressed, contiguous TIFF data, and not every real tile turns out
+    to be one). This check runs on ANY candidate source before it's even
+    known whether that source will be used at all, so it needs to work
+    unconditionally — a full-array read costs a bit more than a memmapped
+    single-pixel one, but only for the couple of tiles actually adjacent
+    to the query point, not the whole mosaic.
+    """
+    for t in tiles:
+        left, top, right, bottom = t["ext"]
+        if left <= itm_x <= right and bottom <= itm_y <= top:
+            arr = tifffile.imread(str(t["dtm_path"]))
+            height, width = arr.shape
+            col = int((itm_x - left) / ((right - left) / width))
+            row = int((top - itm_y) / ((top - bottom) / height))
+            if not (0 <= row < height and 0 <= col < width):
+                return False
+            return float(arr[row, col]) > t.get("nodata", -9999.0)
+    return False
+
+
+def _tile_extent(feature: dict) -> Optional[tuple]:
+    """A coverage-index tile's real-world ITM extent (left, top, right,
+    bottom) — from the tile's own EXT_* attributes when present (OPW's own
+    convention), or derived from its returned WGS84 polygon geometry
+    otherwise (confirmed needed for TII's coverage index, which returns
+    real geometry but no EXT_* attributes at all). Every source here uses
+    the same plain-axis-aligned-square tile convention (confirmed via
+    TII's own SHAPE.AREA = exactly 4,000,000 = 2000x2000m), so a geometry-
+    derived bounding box is exact, not an approximation. None if a feature
+    has neither (confirmed true of every OPW pre-NASC / GSI Phase2 / NYU
+    Dublin feature — see the module docstring) — such a feature simply
+    can't be used, not a bug to work around further.
+    """
+    a = feature["attributes"]
+    if all(a.get(k) is not None for k in ("EXT_LEFT", "EXT_TOP", "EXT_RIGHT", "EXT_BOTTOM")):
+        return a["EXT_LEFT"], a["EXT_TOP"], a["EXT_RIGHT"], a["EXT_BOTTOM"]
+    rings = (feature.get("geometry") or {}).get("rings")
+    if not rings:
+        return None
+    itm_points = [_to_itm.transform(x, y) for ring in rings for x, y in ring]
+    xs = [p[0] for p in itm_points]
+    ys = [p[1] for p in itm_points]
+    return min(xs), max(ys), max(xs), min(ys)
 
 
 def _itm_bounds_to_wgs84(ext: tuple) -> list:
@@ -322,6 +473,16 @@ def _mosaic_dtm(lat: float, lon: float, radius_m: float) -> Optional[dict]:
 
     for t in tiles:
         arr = tifffile.imread(str(t["dtm_path"])).astype(np.float32)
+        tile_nodata = t.get("nodata", -9999.0)
+        if tile_nodata != -9999.0:
+            # Normalize this source's own NoData sentinel to the canvas's
+            # canonical -9999.0 — confirmed needed for TII, whose tiles use
+            # -99.0 instead (see LIDAR_SOURCES/module docstring). Without
+            # this, TII's real NoData pixels (most of a corridor-survey
+            # tile — a road survey doesn't cover the whole 2km square) would
+            # read as a plausible-looking but completely fake "-99m" dip
+            # everywhere downstream (mesh, point reads, image rendering).
+            arr[arr <= tile_nodata] = -9999.0
         t_left, _t_top, _t_right, t_bottom = t["ext"]
         col_off = round((t_left - left) / resolution)
         row_off = round((top - t["ext"][1]) / resolution)
@@ -376,7 +537,7 @@ def get_precise_elevation(lat: float, lon: float) -> dict:
     for t in mosaic["tiles"]:
         tl, tt, tr, tb = t["ext"]
         if tl <= itm_x <= tr and tb <= itm_y <= tt and t["dsm_path"]:
-            surface_m = _read_pixel(t["dsm_path"], itm_x, itm_y, tl, tt, tr, tb)
+            surface_m = _read_pixel(t["dsm_path"], itm_x, itm_y, tl, tt, tr, tb, nodata=t.get("nodata", -9999.0))
             break
 
     valid = arr > -9999
@@ -393,7 +554,7 @@ def get_precise_elevation(lat: float, lon: float) -> dict:
         "canopy_or_building_height_m": round(surface_m - ground_m, 2) if surface_m is not None else None,
         "resolution_m": mosaic["resolution"],
         "survey_date": mosaic["survey_date"],
-        "source": f"OPW LIDAR ({mosaic['source_label']})",
+        "source": f"{mosaic['source_label']} LIDAR",
         "bounds_wgs84": _itm_bounds_to_wgs84(mosaic["ext"]),
         "image_min_elevation_m": round(vmin, 1),
         "image_max_elevation_m": round(vmax, 1),
@@ -518,13 +679,15 @@ def get_terrain(lat: float, lon: float) -> dict:
     return {
         "precise": get_precise_elevation(lat, lon),
         "contours": get_contours(lat, lon),
-        "source": "OPW LIDAR (precise, where surveyed) + EPA Hydrological DTM contours (national, coarser)",
+        "source": "Precise LIDAR (OPW, TII, Westmeath Co Co — see LIDAR_SOURCES) + EPA Hydrological DTM contours (national, coarser)",
         "caveat": (
-            "Precise elevation (OPW LIDAR, ~2m grid) only exists where OPW surveyed for flood-risk "
-            "mapping — mainly rivers, floodplains, and coasts, not the whole country. Where it's not "
-            "available, the contour lines (10m vertical interval, 20m grid) are the fallback — real "
-            "elevation values, but far coarser, and shown as a range rather than a single figure since "
-            "this app has no way to compute true point-to-contour distance."
+            "Precise elevation (real LIDAR, ~2m grid or better) only exists where one of several "
+            "agencies happened to survey it — OPW for flood-risk mapping (rivers, floodplains, coasts), "
+            "TII along national road/rail corridors, Westmeath Co Co for its own county — not the whole "
+            "country. Where none of them cover a point, the contour lines (10m vertical interval, 20m "
+            "grid) are the fallback — real elevation values, but far coarser, and shown as a range "
+            "rather than a single figure since this app has no way to compute true point-to-contour "
+            "distance."
         ),
     }
 
@@ -953,7 +1116,7 @@ def get_terrain_mesh(
         "max_elevation_m": round(max(valid_heights), 2),
         "cell_size_m": resolution * step,
         "resolution_m": resolution,
-        "source": f"OPW LIDAR ({mosaic['source_label']})",
+        "source": f"{mosaic['source_label']} LIDAR",
         "origin_lon": center_lon,
         "origin_lat": center_lat,
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
