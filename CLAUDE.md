@@ -1322,6 +1322,73 @@ app, rather than the documented-but-dead endpoints:
       assumed: ~1.3s at Fermoy (roughly double the ~0.6s unfilled-only
       version) — still fine for an on-demand toggle fetch, no frontend
       changes needed since the response only gained new fields.
+27. **Interactive catchment selection: click one or more low points, see
+    their combined real catchment area highlighted.** Asked for directly
+    — select sink(s) in the 3D view and see the total area draining into
+    them, in a distinct colour. Kept entirely client-side after one fetch
+    (no round trip per click, for a tool meant to be clicked around
+    exploratively): `get_flow_analysis()` now also returns the filled/
+    routed flow-direction grid itself (`flow_dir_codes`, `rows`, `cols`,
+    `cell_size_m`), compactly encoded as one small int per cell (0 = sink/
+    NoData, 1-8 = an index into `FLOW_DIR_OFFSETS` — a fixed 8-direction
+    table kept byte-for-byte identical in both `elevation.py` and
+    `terrain3d.html`, since decoding depends on the two agreeing) rather
+    than the raw two-number-per-cell offsets, halving that part of the
+    payload. Each sink also now carries its own `row`/`col` so a click
+    can seed the trace directly, with no reverse coordinate lookup needed.
+    - **Client-side reverse-BFS, not a new endpoint per click**: the
+      frontend builds a reverse adjacency ("which cells flow INTO this
+      one") from `flow_dir_codes` once, then a click on a sink marker
+      seeds a plain breadth-first search over that reverse graph — every
+      cell reachable backward from the sink is, by definition, everywhere
+      its water could have come from. Multiple selected sinks union their
+      BFS results (a cell counts if it's upstream of ANY selection),
+      which is also just a set union, no extra graph work.
+    - **Reuses the FILLED/routed flow graph, not the raw unfilled one —
+      confirmed these give meaningfully different answers, not just
+      similar ones**: computed both for the same real sinks at Fermoy and
+      found no consistent relationship — one sink's catchment went from
+      961 cells (unfilled) to 15 (filled/routed), another from 198 to
+      1808. This makes sense once stated plainly: unfilled catchment is
+      "this basin's own immediate watershed in isolation"; filled/routed
+      catchment is "everywhere that ends up flowing through this exact
+      point once upstream depressions overflow into it" — a genuinely
+      different question, and the one this feature is actually answering
+      ("total catchment of the selected points" only means something
+      coherent under the cascading model, item 26's whole reason for
+      existing).
+    - **Sink markers are real 3D objects** (small spheres, not just baked
+      into the flow overlay's own texture image) specifically so they can
+      be raycast against for click selection — positioned using the exact
+      same `terrainY()` exaggeration function the rest of the scene uses,
+      so they sit correctly on the (deliberately stretched) surface.
+      Click detection distinguishes a real click from an OrbitControls
+      drag-to-rotate gesture by comparing pointerdown/pointerup screen
+      position (movement under 5px counts as a click) rather than using
+      the browser's native `click` event, which can behave inconsistently
+      after a drag depending on what consumed the intervening pointer
+      events.
+    - The highlighted catchment is its own THIRD overlay mesh (after the
+      base terrain and the static flow/flood texture), reusing the same
+      shared `BufferGeometry` as everything else on this page, drawn via
+      an HTML canvas + `THREE.CanvasTexture` updated in place
+      (`needsUpdate = true`) on every selection change rather than
+      rebuilt from scratch, and hidden/shown together with the rest of
+      the flow-analysis layer when the main toggle is switched off and
+      back on.
+    - Verified end-to-end via a mock Three.js harness that simulates REAL
+      pointerdown/pointerup events through the renderer's own canvas
+      (with the mock raycaster forced to report a hit on a specific
+      marker) rather than reaching into the module's internal closures —
+      confirmed: single-select shows the correct catchment size (15
+      cells, exactly matching an independent Python reference
+      implementation of the same reverse-BFS run against the identical
+      captured data); click-again deselects; multi-select unions
+      correctly (36 cells for two sinks independently measured at 15 and
+      21 — no overlap between them, so a clean sum); repeat selections
+      reuse the same texture/mesh rather than creating duplicates; and
+      unchecking/rechecking the main flow toggle correctly hides and
+      restores the catchment layer together with everything else.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
