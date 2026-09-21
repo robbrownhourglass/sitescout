@@ -650,6 +650,46 @@ def mesh_center_and_radius(polygon_ring_sets_wgs84: list) -> Optional[tuple]:
     return center_lon, center_lat, radius_m
 
 
+MESH_SMOOTHING_WINDOW = 3  # 3x3 median filter — see _median_smooth()
+
+
+def _median_smooth(arr: np.ndarray, size: int = MESH_SMOOTHING_WINDOW) -> np.ndarray:
+    """A small median filter (default 3x3) over the raw DTM array before
+    meshing it for the 3D view — real LIDAR data can have a handful of
+    genuinely noisy/outlier pixels (sensor edge effects, water-surface
+    returns), which are invisible in a single point reading or a flat
+    top-down colour-mapped image but show up as sharp, jagged "tearing" in
+    a LIT, rotatable 3D surface (a real user report, with a screenshot,
+    at the padded area's own outer edge — exactly where a wider render
+    area is more likely to reach an actual noisy patch). A median filter
+    is the standard, textbook tool for exactly this class of noise — as
+    opposed to a mean/Gaussian blur, which would soften real terrain
+    detail everywhere while still leaving some residual spike — verified
+    directly against a synthetic single-pixel spike before use (removed
+    it exactly, left an unrelated pixel untouched).
+
+    NoData (-9999) is excluded from every window: a pixel whose
+    neighbourhood contains ANY NoData is left completely untouched at its
+    own raw value — smoothing across a real coverage boundary would mix
+    "no data here" with real elevations, a worse bug than the noise being
+    fixed. Confirmed directly: a pixel one column away from a NoData
+    region stayed exactly at its original value, not blended toward -9999.
+
+    Only used for the 3D mesh (get_terrain_mesh()) — deliberately NOT
+    applied to get_precise_elevation()'s single reported point value (that
+    should stay the exact raw pixel, not a smoothed neighbourhood average)
+    or render_dtm_image() (the issue wasn't reported there, and a flat
+    top-down image doesn't reveal this kind of noise the way lit 3D
+    shading does).
+    """
+    h, w = arr.shape
+    pad = size // 2
+    padded = np.pad(arr, pad, mode="edge")
+    windows = np.stack([padded[i:i + h, j:j + w] for i in range(size) for j in range(size)], axis=0)
+    valid = np.all(windows > -9999, axis=0)
+    return np.where(valid, np.median(windows, axis=0), arr)
+
+
 def _sample_elevation(arr, ext, resolution, itm_x, itm_y) -> Optional[float]:
     """Nearest-pixel elevation lookup at an arbitrary ITM point within an
     already-loaded mosaic array — used to find the real ground level under
@@ -832,7 +872,7 @@ def get_terrain_mesh(
     if plot_geom is None or plot_geom.is_empty:
         return None
 
-    arr = mosaic["array"]
+    arr = _median_smooth(mosaic["array"])  # see _median_smooth() — suppresses sensor-noise "tearing" in the lit 3D surface, not applied to the raw mosaic other callers use
     ext = mosaic["ext"]
     ext_left, ext_top, ext_right, ext_bottom = ext
     resolution = mosaic["resolution"]
