@@ -44,6 +44,7 @@
     <input type="checkbox" id="flowToggle" /> Show water flow analysis
   </label>
   <div id="flowMeta" class="muted" style="margin-top:6px;display:none"></div>
+  <div id="catchmentMeta" class="muted" style="margin-top:6px;display:none;font-weight:600"></div>
   <a id="backLink" href="/">&larr; Back to site report</a>
 </div>
 
@@ -76,6 +77,12 @@ import * as THREE from 'three';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 
 const VERTICAL_EXAGGERATION = 3;
+
+// Must exactly match elevation.py's FLOW_DIR_OFFSETS — code 1-8 = 1 +
+// this list's own index, code 0 = a sink/NoData cell. Used to decode the
+// flow-analysis response's compact `flow_dir_codes` grid for client-side
+// catchment tracing (see the flow-toggle handler below).
+const FLOW_DIR_OFFSETS = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 document.getElementById('exaggerationLabel').textContent = VERTICAL_EXAGGERATION + '×';
 
 const statusEl = document.getElementById('statusPanel');
@@ -315,16 +322,140 @@ function buildScene(mesh, ringSets){
   document.getElementById('flowToggleRow').style.display = 'flex';
   const flowToggle = document.getElementById('flowToggle');
   const flowMeta = document.getElementById('flowMeta');
+  const catchmentMeta = document.getElementById('catchmentMeta');
   let flowMesh = null;
   let flowFetchPromise = null;
+  let flowData = null;
+
+  // Click-to-select sink markers + client-side catchment tracing — built
+  // once the flow data itself loads (see below). Kept entirely client-
+  // side (no round trip per click) by sending the filled/routed flow
+  // direction grid up front (elevation.py's FLOW_DIR_OFFSETS encoding)
+  // and reverse-tracing it here: a plain BFS over "which cells flow INTO
+  // this one" from each selected sink, unioned across the whole
+  // selection — the exact same real routing model (depression filling +
+  // cascading overflow) the drawn flow lines themselves already use, not
+  // a separate/different notion of catchment.
+  let upstream = null;         // upstream[flatIndex] -> [flatIndex, ...] cells that flow into it
+  const sinkMarkers = [];      // [{ mesh, sinkIndex }, ...]
+  const selectedSinkIndices = new Set();
+  let catchmentMesh = null;
+  let catchmentCanvas = null, catchmentCtx = null, catchmentTexture = null;
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+
+  function buildUpstreamIndex(dirCodes, rows, cols){
+    const result = new Array(rows * cols);
+    for(let idx = 0; idx < dirCodes.length; idx++){
+      const code = dirCodes[idx];
+      if(code === 0) continue;
+      const [dr, dc] = FLOW_DIR_OFFSETS[code - 1];
+      const r = Math.floor(idx / cols), c = idx % cols;
+      const nr = r + dr, nc = c + dc;
+      if(nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+      const targetIdx = nr * cols + nc;
+      (result[targetIdx] || (result[targetIdx] = [])).push(idx);
+    }
+    return result;
+  }
+
+  function computeUnionCatchment(seedFlatIndices){
+    const seen = new Set(seedFlatIndices);
+    const queue = seedFlatIndices.slice();
+    while(queue.length){
+      const cur = queue.pop();
+      const ups = upstream[cur];
+      if(!ups) continue;
+      for(const u of ups){
+        if(!seen.has(u)){ seen.add(u); queue.push(u); }
+      }
+    }
+    return seen;
+  }
+
+  function updateCatchmentHighlight(){
+    if(selectedSinkIndices.size === 0){
+      if(catchmentMesh) catchmentMesh.visible = false;
+      catchmentMeta.style.display = 'none';
+      return;
+    }
+    const seeds = [...selectedSinkIndices].map(i => flowData.sinks[i].row * flowData.cols + flowData.sinks[i].col);
+    const catchmentSet = computeUnionCatchment(seeds);
+
+    if(!catchmentCanvas){
+      catchmentCanvas = document.createElement('canvas');
+      catchmentCanvas.width = flowData.cols;
+      catchmentCanvas.height = flowData.rows;
+      catchmentCtx = catchmentCanvas.getContext('2d');
+    }
+    const imgData = catchmentCtx.createImageData(flowData.cols, flowData.rows);
+    for(const idx of catchmentSet){
+      const p = idx * 4;
+      imgData.data[p] = 255; imgData.data[p + 1] = 170; imgData.data[p + 2] = 0; imgData.data[p + 3] = 170;
+    }
+    catchmentCtx.putImageData(imgData, 0, 0);
+
+    if(!catchmentTexture){
+      catchmentTexture = new THREE.CanvasTexture(catchmentCanvas);
+      const catchmentMaterial = new THREE.MeshBasicMaterial({
+        map: catchmentTexture, transparent: true, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6,
+      });
+      catchmentMesh = new THREE.Mesh(geometry, catchmentMaterial);
+      scene.add(catchmentMesh);
+    } else {
+      catchmentTexture.needsUpdate = true;
+      catchmentMesh.visible = true;
+    }
+
+    const areaM2 = Math.round(catchmentSet.size * flowData.cell_size_m * flowData.cell_size_m).toLocaleString();
+    catchmentMeta.style.display = 'block';
+    catchmentMeta.textContent = `Selected ${selectedSinkIndices.size} point${selectedSinkIndices.size > 1 ? 's' : ''}: total catchment ~${areaM2}m² (${catchmentSet.size.toLocaleString()} cells) — click a point again to deselect.`;
+  }
+
+  function toggleSinkSelection(sinkIndex){
+    const marker = sinkMarkers[sinkIndex].mesh;
+    if(selectedSinkIndices.has(sinkIndex)){
+      selectedSinkIndices.delete(sinkIndex);
+      marker.material.color.set(0xc83030);
+      marker.scale.set(1, 1, 1);
+    } else {
+      selectedSinkIndices.add(sinkIndex);
+      marker.material.color.set(0xffaa00);
+      marker.scale.set(1.5, 1.5, 1.5);
+    }
+    updateCatchmentHighlight();
+  }
+
+  let pointerDownAt = null;
+  renderer.domElement.addEventListener('pointerdown', (e) => { pointerDownAt = { x: e.clientX, y: e.clientY }; });
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if(!pointerDownAt) return;
+    const moved = Math.hypot(e.clientX - pointerDownAt.x, e.clientY - pointerDownAt.y);
+    pointerDownAt = null;
+    if(moved > 5 || !sinkMarkers.length) return; // a drag/rotate gesture, not a click
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(sinkMarkers.map(m => m.mesh));
+    if(hits.length) toggleSinkSelection(sinkMarkers.find(m => m.mesh === hits[0].object).sinkIndex);
+  });
+
+  function setFlowLayerVisible(visible){
+    if(flowMesh) flowMesh.visible = visible;
+    if(catchmentMesh) catchmentMesh.visible = visible && selectedSinkIndices.size > 0;
+    for(const m of sinkMarkers) m.mesh.visible = visible;
+    catchmentMeta.style.display = (visible && selectedSinkIndices.size > 0) ? 'block' : 'none';
+  }
 
   flowToggle.addEventListener('change', async () => {
     if(!flowToggle.checked){
-      if(flowMesh) flowMesh.visible = false;
+      setFlowLayerVisible(false);
       return;
     }
     if(flowMesh){
-      flowMesh.visible = true;
+      setFlowLayerVisible(true);
       return;
     }
     if(!flowFetchPromise){
@@ -343,6 +474,7 @@ function buildScene(mesh, ringSets){
       return;
     }
     const flow = body.data;
+    flowData = flow;
     const flowTexture = new THREE.TextureLoader().load('data:image/png;base64,' + flow.flow_overlay_png_base64);
     flowTexture.colorSpace = THREE.SRGBColorSpace;
     const flowMaterial = new THREE.MeshBasicMaterial({
@@ -351,12 +483,25 @@ function buildScene(mesh, ringSets){
     });
     flowMesh = new THREE.Mesh(geometry, flowMaterial);
     scene.add(flowMesh);
+
+    upstream = buildUpstreamIndex(flow.flow_dir_codes, flow.rows, flow.cols);
+    const markerRadius = Math.max(0.5, planExtent * 0.012);
+    const markerGeom = new THREE.SphereGeometry(markerRadius, 10, 8);
+    for(let i = 0; i < flow.sinks.length; i++){
+      const s = flow.sinks[i];
+      const mat = new THREE.MeshBasicMaterial({ color: 0xc83030 });
+      const marker = new THREE.Mesh(markerGeom, mat);
+      marker.position.set(s.x, terrainY(s.elevation_m) + markerRadius * 1.5, -s.y);
+      scene.add(marker);
+      sinkMarkers.push({ mesh: marker, sinkIndex: i });
+    }
+
     const shown = flow.sinks.length;
     const total = flow.total_sinks_found;
     const floodedArea = Math.round(flow.flooded_area_m2 || 0).toLocaleString();
     flowMeta.textContent = total
       ? `${total} low point${total > 1 ? 's' : ''} found where water would pool` + (total > shown ? ` (showing the ${shown} largest)` : '') +
-        ` — shaded areas (~${floodedArea}m² total) show where each one would flood once full; lines show the overflow cascading downstream from there, thicker where more area drains through.`
+        ` — shaded areas (~${floodedArea}m² total) show where each one would flood once full; lines show the overflow cascading downstream from there, thicker where more area drains through. Click a low point to see its total catchment area (click again to deselect, click more to combine).`
       : 'No distinct low points found inside this plot boundary.';
   });
 
