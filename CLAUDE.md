@@ -1157,6 +1157,87 @@ app, rather than the documented-but-dead endpoints:
       NODATA_value explicitly, no guessing needed) but it's a new raster-
       reading code path through every `tifffile` call in this module, and
       deserves its own dedicated pass rather than being bundled in here.
+25. **Water flow analysis — real local minima (where water pools) and the
+    drainage network that feeds them, toggleable on the 3D terrain view.**
+    Asked whether the plot boundary's own shape in the 3D view could be
+    analyzed for water flow; specifically wanted the points where water
+    has nowhere further to go (local minima) and the convergent "low
+    point lines" — the standard hydrological terms are **sinks** (or
+    pits) and **flow accumulation** (the network you get by routing water
+    downhill from every cell and counting how much passes through each
+    one) — this is exactly the same computation GIS hydrology tools use
+    to derive a stream network from a DEM, not a bespoke invention.
+    - **D8 flow routing + accumulation** (`_compute_flow_network()`):
+      each cell's water flows entirely to whichever of its 8 neighbours
+      has the steepest downhill slope; accumulation is computed by
+      processing cells from highest to lowest elevation so every upstream
+      contributor is finalized before being passed further down. Same
+      risk class as bilinear interpolation or ray-casting elsewhere in
+      this app: a simple, well-defined, textbook algorithm, not something
+      that needed to be guessed at. Verified directly before use, not
+      assumed correct: a synthetic 20x20 V-shaped valley draining to one
+      corner gave a single sink exactly at the true basin bottom, with
+      accumulation there equal to the full 400-cell grid (real mass
+      conservation) and accumulation increasing monotonically along the
+      valley floor toward that outlet. Deliberately does NOT fill sinks
+      before routing (the standard preprocessing step for tools that need
+      water to keep flowing somewhere) — this app wants the opposite: the
+      real, unfilled local minima are the actual answer to the question
+      asked, so flow correctly terminates there.
+    - **Raw per-pixel sink detection was unusable, confirmed by actually
+      running it, not assumed fine**: 423 individual "sink" pixels on one
+      ordinary parcel's padded mosaic — almost all flat micro-plateaus a
+      few cm across left over from median smoothing (adjacent cells
+      sharing the exact same value have no STRICTLY lower neighbour, so
+      D8 marks all of them as separate sinks — a well-known limitation of
+      plain D8 on flat/smoothed terrain). Tried stronger smoothing first;
+      confirmed live that it made the problem WORSE (a 15x15 median
+      filter gave 849 sink pixels, not fewer — bigger kernels create
+      bigger flat plateaus, more ties, not less). Fixed instead with
+      `_cluster_sinks()`: 8-connected clustering of sink cells into one
+      point per contiguous low area, ranked by that cluster's own real
+      catchment size (its own flow-accumulation value — how much upstream
+      area actually drains into it), which naturally sorts a genuine
+      puddle-forming point (fed by real contributing area) ahead of an
+      isolated single-cell numerical blip with nothing draining into it.
+      Brought the same test parcel down to 32 real clustered low points —
+      capped to the top `MAX_REPORTED_SINKS` (20) by catchment size for
+      display, with the true total still disclosed alongside them.
+    - **The flow-line channel threshold has to scale with the site's own
+      area, not a fixed cell count** — confirmed live: a fixed threshold
+      of 6 contributing cells was reasonable for a single small parcel's
+      own grid but let ~90% of a bigger padded mosaic's cells qualify,
+      drawing lines almost everywhere instead of highlighting real
+      channels. Fixed with `FLOW_CHANNEL_THRESHOLD_FRACTION` (0.5% of the
+      site's own total valid cell count, floored at
+      `FLOW_MIN_CONTRIBUTING_CELLS_FLOOR`) — confirmed visually afterward:
+      a sparse, genuinely dendritic (branching) network, not a solid wash
+      of lines.
+    - **Rendering reuses the exact same "paint it on the surface" overlay-
+      texture approach as the boundary/roads layer** (see item 22) rather
+      than building separate 3D line/marker geometry — `get_flow_analysis()`
+      returns its own transparent `flow_overlay_png_base64` (line width/
+      opacity log-scaled by catchment size — a single trickle stays thin
+      and faint, a channel fed by many converging cells gets thick and
+      bold, matching the user's own description) plus red sink markers,
+      using the SAME `_local_to_pixel()`/`grid_extent` mapping as the
+      terrain mesh so it's pixel-aligned by construction. On the frontend,
+      the flow overlay is a SEPARATE `THREE.Mesh` reusing the terrain's
+      own `BufferGeometry` object directly (identical vertex positions/
+      UVs, confirmed no duplicate buffers needed) with
+      `polygonOffset`/`transparent` to sit cleanly on the surface without
+      z-fighting, toggled via a checkbox and fetched lazily on first
+      toggle-on only (same "expensive rendering only when a layer is
+      actually switched on" pattern as the map's own terrain-image
+      overlay) — confirmed via a mock harness that toggling on twice
+      only fetches once, and toggling off/on again just shows/hides the
+      same mesh.
+    - A real, disclosed limitation stated directly in the response and the
+      UI: D8 routing on real (if median-smoothed) LIDAR terrain models
+      where water WOULD go on this exact surface shape — a genuine,
+      standard technique, but not a substitute for an actual site
+      drainage survey, and it says nothing about subsurface drainage,
+      soil permeability, or engineered drainage already on site.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
