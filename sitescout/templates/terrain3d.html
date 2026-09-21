@@ -337,6 +337,7 @@ function buildScene(mesh, ringSets){
   // cascading overflow) the drawn flow lines themselves already use, not
   // a separate/different notion of catchment.
   let upstream = null;         // upstream[flatIndex] -> [flatIndex, ...] cells that flow into it
+  let poolMembers = null;      // Map<poolLabel, [flatIndex, ...]> — see below
   const sinkMarkers = [];      // [{ mesh, sinkIndex }, ...]
   const selectedSinkIndices = new Set();
   let catchmentMesh = null;
@@ -359,6 +360,32 @@ function buildScene(mesh, ringSets){
     return result;
   }
 
+  // Cells sharing the exact same FILLED elevation are the same real flat
+  // pool (see elevation.py's _label_pools() for why this matters): each
+  // one otherwise only traces back through whichever single arbitrary
+  // branch of the fill algorithm's own spanning tree happened to reach
+  // that specific pixel, not the pool's real combined contributing area
+  // — a real user report, confirmed live (two sinks sharing one 610-cell
+  // pool showed 21- and 7-cell "thin line" catchments individually,
+  // instead of the pool's real 3106-cell total). So a sink's own seed
+  // for tracing is its WHOLE pool, not just the one cell clicked.
+  function buildPoolMembers(poolLabels){
+    const map = new Map();
+    for(let idx = 0; idx < poolLabels.length; idx++){
+      const label = poolLabels[idx];
+      if(label === -1) continue;
+      if(!map.has(label)) map.set(label, []);
+      map.get(label).push(idx);
+    }
+    return map;
+  }
+
+  function seedsForSink(sink){
+    const idx = sink.row * flowData.cols + sink.col;
+    const label = flowData.pool_labels[idx];
+    return label === -1 ? [idx] : poolMembers.get(label);
+  }
+
   function computeUnionCatchment(seedFlatIndices){
     const seen = new Set(seedFlatIndices);
     const queue = seedFlatIndices.slice();
@@ -379,7 +406,7 @@ function buildScene(mesh, ringSets){
       catchmentMeta.style.display = 'none';
       return;
     }
-    const seeds = [...selectedSinkIndices].map(i => flowData.sinks[i].row * flowData.cols + flowData.sinks[i].col);
+    const seeds = [...selectedSinkIndices].flatMap(i => seedsForSink(flowData.sinks[i]));
     const catchmentSet = computeUnionCatchment(seeds);
 
     if(!catchmentCanvas){
@@ -485,6 +512,7 @@ function buildScene(mesh, ringSets){
     scene.add(flowMesh);
 
     upstream = buildUpstreamIndex(flow.flow_dir_codes, flow.rows, flow.cols);
+    poolMembers = buildPoolMembers(flow.pool_labels);
     const markerRadius = Math.max(0.5, planExtent * 0.012);
     const markerGeom = new THREE.SphereGeometry(markerRadius, 10, 8);
     for(let i = 0; i < flow.sinks.length; i++){
