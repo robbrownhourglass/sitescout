@@ -53,8 +53,22 @@
 
 <div id="hint">Drag = rotate &middot; Scroll = zoom &middot; Right-drag = pan</div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js"
+  }
+}
+</script>
 <script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js';
+// OrbitControls.js itself does `import ... from 'three'` (a bare specifier)
+// rather than a full URL — browsers can't resolve that without the import
+// map above. Without it, the whole module graph fails to load silently
+// (no console-visible network error either, just nothing ever runs), which
+// is exactly what "stuck on Loading terrain forever, no request ever hits
+// the server" looks like — confirmed by checking OrbitControls.js's own
+// source, not just that its URL itself returns 200.
+import * as THREE from 'three';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 
 const VERTICAL_EXAGGERATION = 3;
