@@ -1469,6 +1469,19 @@ app, rather than the documented-but-dead endpoints:
       against the backend's own reported `catchment_cells` for that exact
       point) and unions correctly with other selected points, same as
       confirmed for basin sinks in items 27-28.
+    - **Follow-up, real user report: the lake and line blue still didn't
+      match even after sharing one RGB constant.** Same RGB isn't the
+      same rendered colour once alpha enters it — both layers get
+      alpha-blended over the terrain's own varying colour underneath, so
+      a translucent pool and a near-opaque line read as visibly different
+      shades regardless of RGB. Confirmed the actual numbers: the pool
+      was fixed at 120/255 alpha (~47% opaque) while a strong flow line
+      reaches 255 (fully opaque) — a big channel looked solid and
+      saturated right next to a pale, washed-out lake. Fixed by raising
+      `FLOOD_POOL_ALPHA` to 225, matching the SATURATED end of what a
+      bold line reaches rather than the line's own faint-trickle end —
+      confirmed visually afterward: pools and lines now read as one
+      continuous, solid body of water.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
