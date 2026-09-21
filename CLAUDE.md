@@ -1427,6 +1427,48 @@ app, rather than the documented-but-dead endpoints:
       shows exactly 3,106 (correct union of a pool with itself — no
       double-counting), while distinct-pool multi-select (item 27's own
       test case) still correctly sums instead of collapsing.
+29. **Unified the flow-line colour with the flood-pool colour, and added
+    markers wherever a channel exits the analyzed area.** Both asked for
+    directly. The colour change was simple (`FLOW_LINE_COLOR` and
+    `FLOOD_POOL_COLOR` now both derive from one shared `WATER_COLOR`
+    constant) — the exit-point markers needed the same "confirm before
+    building" discipline as everything else here.
+    - **What a "line exits the texture" point actually IS, confirmed
+      directly rather than assumed**: in `_fill_and_route()`'s filled/
+      routed graph, `flow_to == (-1, -1)` (code 0) turns out to occur
+      ONLY for the cells that seeded the fill algorithm in the first
+      place — the mosaic's own outer border, or cells next to a real
+      internal NoData gap in the LIDAR data. Checked live at Fermoy:
+      7,572 such cells, 698 on the literal border and the rest against
+      internal NoData — zero "leftover" unrouted local minima, since
+      depression filling connects every real basin bottom onward by
+      construction (that's the whole point of item 26). So "where does a
+      channel exit the texture" and "every code-0 cell in the routed
+      graph" are exactly the same question — no separate detection logic
+      needed beyond what `_fill_and_route()` already computes.
+    - Only code-0 cells that actually carry a meaningful channel (the
+      same `_channel_threshold()` — extracted as its own small function,
+      reused by both the line-drawing code and this — already used to
+      decide whether to draw a line there at all) get a marker; otherwise
+      every one of a mosaic's few hundred border pixels would get its own
+      point regardless of whether any real water reaches it. Deliberately
+      a SEPARATE concept from the existing basin `sinks` (real local
+      minima with a genuine fill depth/spill elevation) — an exit point
+      has neither, since it's not a basin at all, just where the
+      analysis itself runs out of data — so it's added with
+      `is_exit: true` and null `spill_elevation_m`/`fill_depth_m`, drawn
+      in a visually distinct grey (`EXIT_MARKER_COLOR`) rather than the
+      basin markers' red, and counted separately
+      (`total_exit_points_found`, alongside the existing
+      `total_sinks_found`) so the two are never conflated in the UI text.
+    - Exit points are fully interactive the same way basin sinks are — no
+      special-casing needed on the frontend beyond the marker colour,
+      since click-to-select/catchment-tracing only ever needs a point's
+      `row`/`col` (present on both). Verified directly: clicking an exit
+      point's own marker correctly traces its real catchment (confirmed
+      against the backend's own reported `catchment_cells` for that exact
+      point) and unions correctly with other selected points, same as
+      confirmed for basin sinks in items 27-28.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
