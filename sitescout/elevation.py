@@ -1216,16 +1216,19 @@ FLOW_MIN_CONTRIBUTING_CELLS_FLOOR = 4  # absolute floor so a tiny site's thresho
 FLOW_LINE_COLOR = (40, 110, 200)
 SINK_MARKER_COLOR = (200, 40, 40)
 SINK_MARKER_RADIUS_M = 1.0
+FLOW_SUPERSAMPLE = 3  # draw at 3x TEXTURE_SIZE then downsample (LANCZOS) for anti-aliased-looking lines — PIL's own line/ellipse drawing has no anti-aliasing at all
 
 
 def _compute_flow_network(arr: np.ndarray, resolution: float) -> tuple:
     """D8 flow direction + accumulation over `arr` (see the module comment
-    above). Returns `(flow_acc, is_sink)`, both the same shape as `arr`:
-    `flow_acc[r, c]` is the number of cells (including itself) whose water
-    ultimately passes through (r, c); `is_sink[r, c]` is True where (r, c)
-    has no lower valid neighbour at all (a real local minimum — water
-    reaching it has nowhere further downhill to go) and isn't itself
-    NoData.
+    above). Returns `(flow_acc, flow_to, is_sink)`, all the same shape as
+    `arr` (`flow_to` has an extra trailing (dr, dc) axis): `flow_acc[r, c]`
+    is the number of cells (including itself) whose water ultimately
+    passes through (r, c); `flow_to[r, c]` is the (dr, dc) offset to
+    whichever neighbour (r, c) drains into, or (-1, -1) if it's a sink;
+    `is_sink[r, c]` is True where (r, c) has no lower valid neighbour at
+    all (a real local minimum — water reaching it has nowhere further
+    downhill to go) and isn't itself NoData.
     """
     h, w = arr.shape
     valid = arr > -9999
@@ -1273,62 +1276,86 @@ def _compute_flow_network(arr: np.ndarray, resolution: float) -> tuple:
         if 0 <= nr < h and 0 <= nc < w:
             flat_acc[nr * w + nc] += flat_acc[idx]
 
-    return flow_acc.reshape(h, w), is_sink
+    return flow_acc.reshape(h, w), flow_to, is_sink
 
 
-def _draw_flow_network(draw, flow_acc: np.ndarray, arr: np.ndarray, ext: tuple, resolution: float,
-                        center_x: float, center_y: float, extent: tuple, texture_size: int) -> None:
-    """Draws each qualifying cell's own short flow-direction segment (cell
-    -> whichever neighbour it drains to) onto the overlay, line width/
-    opacity scaled (log scale — real contributing-area values span orders
-    of magnitude) by how much area drains through that cell: a single
-    trickle stays thin and faint, a channel fed by many converging cells
-    (per the user's own description — "a lot of these low point lines
-    running into it") gets thicker and bolder.
+def _draw_flow_network(draw, flow_acc: np.ndarray, flow_to: np.ndarray, arr: np.ndarray, ext: tuple,
+                        resolution: float, center_x: float, center_y: float, extent: tuple,
+                        texture_size: int, supersample: int) -> None:
+    """Traces each channel's full path — from its head (a qualifying cell
+    with no qualifying upstream neighbour of its own) downhill via
+    `flow_to` to a sink or the edge of the array — and draws it as ONE
+    connected polyline, not one independent segment per cell.
+
+    The first version drew a separate 1-cell segment for every qualifying
+    cell in isolation, which looked like converging arrowheads at every
+    confluence (several short segments from different upstream directions
+    all terminating at the same point, with no connecting line making
+    them read as one channel) rather than a continuous stream — a real
+    user report, with a screenshot. Tracing whole paths and drawing each
+    as a single multi-point line fixes that directly: segments along one
+    real flow path are now genuinely end-to-end connected. Stops tracing
+    early if it reaches a cell another head's path already drew, to avoid
+    needlessly re-stacking the same shared downstream tail many times.
+
+    Width/opacity per segment is still log-scaled by that segment's own
+    flow accumulation (real contributing-area values span orders of
+    magnitude) — a single trickle stays thin and faint, a channel fed by
+    many converging cells (per the user's own description — "a lot of
+    these low point lines running into it") gets thicker and bolder.
     """
     h, w = arr.shape
-    ext_left, ext_top, ext_right, ext_bottom = ext
+    ext_left, ext_top = ext[0], ext[1]
     valid = arr > -9999
     max_acc = float(flow_acc[valid].max()) if valid.any() else 1.0
     min_contributing_cells = max(FLOW_MIN_CONTRIBUTING_CELLS_FLOOR, int(valid.sum() * FLOW_CHANNEL_THRESHOLD_FRACTION))
     log_max = np.log(max(max_acc, min_contributing_cells + 1))
+    qualifies = valid & (flow_acc >= min_contributing_cells)
 
-    diag = resolution * 1.4142135623730951
-    neighbor_offsets = [
-        (-1, -1, diag), (-1, 0, resolution), (-1, 1, diag),
-        (0, -1, resolution), (0, 1, resolution),
-        (1, -1, diag), (1, 0, resolution), (1, 1, diag),
-    ]
-    for dr, dc, _dist in neighbor_offsets:
-        shifted = np.roll(np.roll(arr, -dr, axis=0), -dc, axis=1)
-        drop = (arr - shifted)
-        out_of_bounds = np.zeros((h, w), dtype=bool)
-        if dr == -1:
-            out_of_bounds[0, :] = True
-        elif dr == 1:
-            out_of_bounds[-1, :] = True
-        if dc == -1:
-            out_of_bounds[:, 0] = True
-        elif dc == 1:
-            out_of_bounds[:, -1] = True
-        neighbor_valid = valid & np.roll(np.roll(valid, -dr, axis=0), -dc, axis=1) & ~out_of_bounds
-        # This offset is only the real flow direction for a cell if it's
-        # the one _compute_flow_network() actually picked — recomputing
-        # the same steepest-descent test here (rather than storing/passing
-        # flow_to) keeps this function self-contained given only flow_acc.
-        candidates = neighbor_valid & (flow_acc >= min_contributing_cells) & (drop > 0)
-        rows, cols = np.where(candidates)
-        for r, c in zip(rows.tolist(), cols.tolist()):
-            acc = flow_acc[r, c]
+    # A channel head: qualifies, but no neighbour that flows INTO it also
+    # qualifies (i.e. nothing upstream of it is itself part of a channel —
+    # this is where a new channel starts, not a mid-stream point).
+    has_qualifying_upstream = np.zeros((h, w), dtype=bool)
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            points_here = qualifies & (flow_to[:, :, 0] == dr) & (flow_to[:, :, 1] == dc)
+            has_qualifying_upstream |= np.roll(np.roll(points_here, dr, axis=0), dc, axis=1)
+    channel_heads = qualifies & ~has_qualifying_upstream
+
+    def to_pixel(r, c):
+        x = ext_left + c * resolution
+        y = ext_top - r * resolution
+        return _local_to_pixel(x - center_x, y - center_y, extent, texture_size * supersample)
+
+    drawn = np.zeros((h, w), dtype=bool)
+    head_rows, head_cols = np.where(channel_heads)
+    for r0, c0 in zip(head_rows.tolist(), head_cols.tolist()):
+        r, c = r0, c0
+        path = [(r, c)]
+        while True:
+            drawn[r, c] = True
+            dr, dc = int(flow_to[r, c, 0]), int(flow_to[r, c, 1])
+            if dr == -1 and dc == -1:
+                break  # reached a sink
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc]:
+                break  # flowed off the edge of this mosaic's own coverage
+            path.append((nr, nc))
+            if drawn[nr, nc]:
+                break  # merges into a channel already traced from another head — no need to re-draw its tail again
+            r, c = nr, nc
+
+        if len(path) < 2:
+            continue
+        for i in range(len(path) - 1):
+            acc = flow_acc[path[i][0], path[i][1]]
             norm = min(1.0, np.log(max(acc, 1)) / log_max) if log_max > 0 else 0.0
-            width_px = max(1, int(round(1 + norm * 3)))
-            x0 = ext_left + c * resolution
-            y0 = ext_top - r * resolution
-            x1 = ext_left + (c + dc) * resolution
-            y1 = ext_top - (r + dr) * resolution
-            p0 = _local_to_pixel(x0 - center_x, y0 - center_y, extent, texture_size)
-            p1 = _local_to_pixel(x1 - center_x, y1 - center_y, extent, texture_size)
-            draw.line([p0, p1], fill=(*FLOW_LINE_COLOR, min(255, 90 + int(norm * 165))), width=width_px)
+            width_px = max(1, int(round((1 + norm * 3) * supersample)))
+            p0 = to_pixel(*path[i])
+            p1 = to_pixel(*path[i + 1])
+            draw.line([p0, p1], fill=(*FLOW_LINE_COLOR, min(255, 90 + int(norm * 165))), width=width_px, joint="curve")
 
 
 MAX_REPORTED_SINKS = 20  # cap how many low points get their own marker — see get_flow_analysis()'s note on clustering/ranking
@@ -1427,7 +1454,7 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     ext_left, ext_top, ext_right, ext_bottom = ext
     resolution = mosaic["resolution"]
 
-    flow_acc, is_sink = _compute_flow_network(arr, resolution)
+    flow_acc, flow_to, is_sink = _compute_flow_network(arr, resolution)
     clustered = _cluster_sinks(is_sink, arr, flow_acc)  # already sorted by catchment size, descending
 
     sinks = []
@@ -1451,13 +1478,23 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
         ext_left - center_x, ext_right - center_x,
         ext_bottom - center_y, ext_top - center_y,
     )
-    overlay_img = Image.new("RGBA", (TEXTURE_SIZE, TEXTURE_SIZE), (0, 0, 0, 0))
+    # Drawn at FLOW_SUPERSAMPLE x the final texture size, then downsampled
+    # with LANCZOS resampling — plain PIL line/ellipse drawing has no
+    # anti-aliasing at all, which combined with the first version's
+    # disconnected per-cell segments (see _draw_flow_network()'s own
+    # comment) made the lines look visibly blocky/pixelated even after
+    # fixing the connectivity — a real user report. Supersample-then-
+    # downsample is the standard, simple way to get anti-aliased-looking
+    # lines out of a drawing API with none built in.
+    ss = FLOW_SUPERSAMPLE
+    overlay_img = Image.new("RGBA", (TEXTURE_SIZE * ss, TEXTURE_SIZE * ss), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay_img, "RGBA")
-    _draw_flow_network(draw, flow_acc, arr, ext, resolution, center_x, center_y, extent, TEXTURE_SIZE)
-    marker_r = max(2, int(round(_meters_to_pixels(SINK_MARKER_RADIUS_M, extent, TEXTURE_SIZE))))
+    _draw_flow_network(draw, flow_acc, flow_to, arr, ext, resolution, center_x, center_y, extent, TEXTURE_SIZE, ss)
+    marker_r = max(2, int(round(_meters_to_pixels(SINK_MARKER_RADIUS_M, extent, TEXTURE_SIZE) * ss)))
     for s in sinks:
-        px, py = _local_to_pixel(s["x"], s["y"], extent, TEXTURE_SIZE)
+        px, py = _local_to_pixel(s["x"], s["y"], extent, TEXTURE_SIZE * ss)
         draw.ellipse([px - marker_r, py - marker_r, px + marker_r, py + marker_r], fill=(*SINK_MARKER_COLOR, 230))
+    overlay_img = overlay_img.resize((TEXTURE_SIZE, TEXTURE_SIZE), Image.LANCZOS)
 
     buf = io.BytesIO()
     overlay_img.save(buf, format="PNG")
