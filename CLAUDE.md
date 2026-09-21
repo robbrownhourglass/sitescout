@@ -1263,6 +1263,65 @@ app, rather than the documented-but-dead endpoints:
       afterward, including a close zoomed crop: smooth, continuous,
       properly branching drainage lines with real tributary confluences,
       not arrows — performance unaffected (~0.6s, same as before).
+26. **Follow-up: the unfilled model wasn't answering the real question —
+    "sinks that are tiny and would quickly overflow" need to actually
+    overflow, not just be a point where flow stops forever.** The
+    unfilled model (item 25) is only half of a real flood event: a real
+    depression fills with water until it spills over its own lowest rim,
+    then that overflow keeps flowing downhill toward whatever's next —
+    asked for directly, wanting to see sinks fill up and the paths to
+    the next downstream sink, not a static "flow terminates here" map.
+    - **`_fill_and_route()`**: standard priority-flood depression filling
+      (Barnes et al. 2014 — the real algorithm hydrology tools use to
+      prepare a DEM for basin-to-basin routing), which derives flow
+      direction directly from its OWN fill order rather than re-running
+      D8 on the filled result afterward. That distinction matters and was
+      confirmed live, not assumed: plain D8 on a filled array breaks on
+      the flat plateaus filling deliberately creates (every cell in a
+      pool shares the exact same elevation, so none has a strictly lower
+      neighbour — the standard "flat resolution" problem in DEM
+      hydrology). Recording each cell's flow direction AT THE MOMENT the
+      priority-flood algorithm "conquers" it sidesteps the problem
+      entirely, since a cell's conqueror is always its correct downhill
+      neighbour by construction, tie or no tie. Verified on a synthetic
+      two-basin case (a shallow basin, a deeper one, separated by a
+      saddle) before use: the shallow basin's real bottom went from an
+      isolated dead end (flow_acc=1, nowhere to go) to a real contributing
+      catchment (28 cells) whose flow direction chain correctly led
+      through the saddle, through the deeper basin, all the way to the
+      map's own edge — a genuine cascading path, not a basin that just
+      stops.
+    - **Two separate flow computations, on purpose**: the original
+      unfilled `_compute_flow_network()` still decides WHERE the real
+      local minima are (filling exists to route water THROUGH a basin,
+      not to decide where a basin's own floor is — filling would move/
+      hide the very points being asked about). `_fill_and_route()`'s
+      filled/routed result decides where an overflowing sink's water
+      goes NEXT, and is what the drawn flow-line network now uses.
+    - **New per-sink figures, directly answering "how quickly would this
+      overflow"**: `spill_elevation_m` (the level a depression fills to
+      before it spills over its own rim) and `fill_depth_m` (spill minus
+      the real bottom — its actual capacity). Confirmed live at Fermoy:
+      most real depressions are shallow (0.0-0.33m fill depth) — small
+      real undulations in ordinary terrain, not proper ponds, exactly
+      matching the "tiny sinks that would quickly overflow" framing.
+    - **Flood-extent visualization**: every cell the fill algorithm
+      actually raised (`filled > original + FLOOD_EPSILON_M`) is painted
+      as a translucent blue pool directly onto the same overlay texture
+      as the flow lines/sink markers (same supersample-then-LANCZOS-
+      downsample anti-aliasing as everything else on this texture) — this
+      literally IS a flood event visualization: exactly which cells would
+      be underwater once every depression fills to its own natural spill
+      point. `flooded_area_m2` (total flooded cell count x resolution^2)
+      is returned and shown in the 3D page's own toggle summary text.
+      Confirmed visually: real irregular-shaped pools (not blocky
+      rectangles) with flow lines now correctly running THROUGH them and
+      continuing out the other side toward the next basin or the map's
+      edge, instead of stopping arbitrarily.
+    - Performance cost of the extra priority-flood pass, measured not
+      assumed: ~1.3s at Fermoy (roughly double the ~0.6s unfilled-only
+      version) — still fine for an on-demand toggle fetch, no frontend
+      changes needed since the response only gained new fields.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
