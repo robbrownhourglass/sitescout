@@ -949,6 +949,89 @@ def _coarse_valid_grid(valid_mask: np.ndarray, row_indices: list, col_indices: l
     return out
 
 
+MESH_BOUNDARY_LINE_MIN_POINTS = 8  # minimum real transition points before even attempting a line fit
+MESH_BOUNDARY_LINE_MAX_RESIDUAL_RATIO = 0.5  # fitted line's residual std must be under this many cell-widths to be trusted
+MESH_BOUNDARY_LINE_BAND_CELLS = 4  # only let the fitted line override raw per-cell validity within this many cell-widths of it
+
+
+def _fit_coverage_boundary_line(coarse_valid: np.ndarray, row_indices: list, col_indices: list,
+                                 grid_xs: list, grid_ys: list, height: int, width: int, cell_size: float) -> Optional[dict]:
+    """Real LIDAR coverage edges are very often a single straight line in
+    practice — a survey/tile boundary, not an organic curve (confirmed
+    directly: R32 E4F8's own real edge fits a line with residual std of
+    0.09m against a 2m grid, essentially exact). A per-triangle cut
+    (`emit_triangle()`) still leaves a visible zigzag along a straight
+    edge, because each triangle only ever knows its OWN 3 corners, with
+    no sense that neighbouring triangles' cuts should all line up on one
+    common line — asked for directly: "cut this off at an angle... with a
+    single line," not many small independent notches. This fits that
+    single line (via PCA / total-least-squares — the standard technique
+    for fitting a line to noisy 2D points of unknown orientation; ordinary
+    least-squares y=mx+b breaks down for a near-vertical line, which real
+    coverage edges often are) from the mesh's own real internal NoData
+    transitions, so `get_terrain_mesh()` can cut cleanly along it instead.
+
+    Returns None (falls back to the existing per-triangle behaviour,
+    unchanged) when there's no good reason to trust a single line: too
+    few transition points, or a residual too large relative to the grid's
+    own cell size — a genuinely organic/branching real gap (not every
+    coverage edge is a straight tile boundary) should NOT be forced
+    through a bad line fit, that would be a worse failure mode than the
+    honest per-triangle zigzag it would replace.
+
+    **Critical gotcha, found by testing, not assumed**: `_erode_valid_mask()`
+    treats anything outside the array's own bounds as invalid too (see its
+    own docstring), so EVERY mosaic has a uniform invalid band around all
+    four of its own outer edges after erosion — not just the one real
+    internal coverage edge this function is meant to find. Including those
+    array-boundary transitions as "boundary sample points" pulls in points
+    from all four sides of a rectangle at once, which cannot lie on any
+    single line — confirmed directly: doing so gave a residual std 25x the
+    cell size (a hopelessly bad fit) on a case that, once those artefact
+    points were correctly excluded, fit a line almost exactly. Every
+    transition point here is therefore required to be comfortably inside
+    the array's own true edge (past `MESH_EDGE_TRIM_PIXELS`'s own trim
+    depth) on BOTH sides of the pair — only a genuine INTERNAL transition
+    can ever contribute a point.
+    """
+    edge_margin = MESH_EDGE_TRIM_PIXELS + 3  # native pixels — comfortably past _erode_valid_mask()'s own trim depth
+    nrows, ncols = coarse_valid.shape
+
+    def _interior(native_idx: int, size: int) -> bool:
+        return edge_margin <= native_idx <= size - 1 - edge_margin
+
+    pts = []
+    for i in range(nrows):
+        if not _interior(row_indices[i], height):
+            continue
+        for j in range(ncols):
+            if not _interior(col_indices[j], width) or not coarse_valid[i, j]:
+                continue
+            if j + 1 < ncols and _interior(col_indices[j + 1], width) and not coarse_valid[i, j + 1]:
+                pts.append(((grid_xs[j] + grid_xs[j + 1]) / 2, grid_ys[i]))
+            if i + 1 < nrows and _interior(row_indices[i + 1], height) and not coarse_valid[i + 1, j]:
+                pts.append((grid_xs[j], (grid_ys[i] + grid_ys[i + 1]) / 2))
+
+    if len(pts) < MESH_BOUNDARY_LINE_MIN_POINTS:
+        return None
+    pts_arr = np.array(pts)
+    centroid = pts_arr.mean(axis=0)
+    centered = pts_arr - centroid
+    cov = centered.T @ centered
+    _eigvals, eigvecs = np.linalg.eigh(cov)
+    normal = eigvecs[:, 0]  # smallest-variance direction = perpendicular to the fitted line
+    residuals = centered @ normal
+    if residuals.std() > MESH_BOUNDARY_LINE_MAX_RESIDUAL_RATIO * cell_size:
+        return None  # not well-explained by one straight line — an organic/branching real gap, most likely
+
+    grid_x_arr, grid_y_arr = np.meshgrid(grid_xs, grid_ys)
+    dist = (grid_x_arr - centroid[0]) * normal[0] + (grid_y_arr - centroid[1]) * normal[1]
+    if not (~coarse_valid).any():
+        return None  # fully valid grid — no boundary to fit in the first place
+    valid_sign = 1.0 if dist[coarse_valid].mean() > dist[~coarse_valid].mean() else -1.0
+    return {"centroid": centroid, "normal": normal, "valid_sign": valid_sign, "band": MESH_BOUNDARY_LINE_BAND_CELLS * cell_size}
+
+
 def _sample_elevation(arr, ext, resolution, itm_x, itm_y) -> Optional[float]:
     """Nearest-pixel elevation lookup at an arbitrary ITM point within an
     already-loaded mosaic array — used to find the real ground level under
@@ -1145,6 +1228,7 @@ def get_terrain_mesh(
     grid_ys = [ext_top - r * resolution for r in row_indices]
     nrows, ncols = len(row_indices), len(col_indices)
     coarse_valid = _coarse_valid_grid(valid_mask, row_indices, col_indices)  # avoids point-sampling aliasing when step > 1 — see its own docstring
+    line_fit = _fit_coverage_boundary_line(coarse_valid, row_indices, col_indices, grid_xs, grid_ys, height, width, resolution * step)
 
     vertices: list = []
     faces: list = []
@@ -1161,6 +1245,33 @@ def get_terrain_mesh(
         valid_heights.append(float(elev))
         vertex_cache[key] = idx
         return idx
+
+    def cut_point(v: tuple, inv: tuple) -> tuple:
+        """XY position for a new vertex on the edge from a valid corner `v`
+        to an invalid corner `inv`. Uses the EXACT intersection with the
+        fitted coverage-boundary line (`line_fit`) when one exists and
+        genuinely crosses this specific edge — giving a clean, precisely
+        straight cut shared consistently across every triangle along the
+        whole boundary, rather than each triangle picking its own
+        independent midpoint (confirmed live: R32 E4F8's real edge fits a
+        line with 0.09m residual on a 2m grid — essentially exact — so a
+        real single-line cut is achievable there, not just an
+        approximation). Falls back to the plain geometric midpoint when
+        there's no confident line fit for this mesh at all, or this
+        particular edge isn't genuinely explained by it (t outside [0,1] —
+        an isolated, local transition the global line doesn't pass
+        through) — same behaviour as before line-fitting existed.
+        """
+        if line_fit is not None:
+            cx, cy = line_fit["centroid"]
+            nx, ny = line_fit["normal"]
+            dvx, dvy = inv[0] - v[0], inv[1] - v[1]
+            denom = dvx * nx + dvy * ny
+            if abs(denom) > 1e-9:
+                t = ((cx - v[0]) * nx + (cy - v[1]) * ny) / denom
+                if 0.0 <= t <= 1.0:
+                    return (v[0] + t * dvx, v[1] + t * dvy)
+        return ((v[0] + inv[0]) / 2, (v[1] + inv[1]) / 2)
 
     def emit_triangle(pa: tuple, pb: tuple, pc: tuple) -> None:
         """One grid triangle -> 0, 1, or 2 real triangles, depending on how
@@ -1179,16 +1290,13 @@ def get_terrain_mesh(
         ambiguous "saddle" case, where two DIAGONAL corners of a quad are
         valid and the other two aren't, can't happen here: a triangle only
         has 3 corners, so there are just 4 clean cases, not marching
-        squares' 16). Cutting a partially-valid triangle at the MIDPOINT of
-        each edge crossing from valid to invalid roughly doubles the
-        effective edge resolution (confirmed visually: a zoomed side-by-side
-        crop shows steps at roughly half the size of the plain-rule
-        version) without needing real sub-pixel elevation data at all: a
-        cut vertex's position is a genuine geometric midpoint, but its
-        ELEVATION is always copied from the valid corner it's closest to,
-        NEVER interpolated toward the invalid corner's NoData value — the
-        same "never guess across NoData" rule this whole module already
-        follows, just applied per-triangle-corner instead of per-quad.
+        squares' 16). Each cut vertex's XY position comes from `cut_point()`
+        (the exact fitted-line crossing when available, a plain midpoint
+        otherwise); its ELEVATION is always copied from the valid corner
+        it's closest to, NEVER interpolated toward the invalid corner's
+        NoData value — the same "never guess across NoData" rule this
+        whole module already follows, just applied per-triangle-corner
+        instead of per-quad.
         """
         valid_pts = [p for p in (pa, pb, pc) if p[3]]
         n_valid = len(valid_pts)
@@ -1201,18 +1309,56 @@ def get_terrain_mesh(
         if n_valid == 1:
             v = valid_pts[0]
             i0 = add_vertex(v[0], v[1], v[2])
-            i1 = add_vertex((v[0] + invalid_pts[0][0]) / 2, (v[1] + invalid_pts[0][1]) / 2, v[2])
-            i2 = add_vertex((v[0] + invalid_pts[1][0]) / 2, (v[1] + invalid_pts[1][1]) / 2, v[2])
+            m1 = cut_point(v, invalid_pts[0])
+            m2 = cut_point(v, invalid_pts[1])
+            i1 = add_vertex(m1[0], m1[1], v[2])
+            i2 = add_vertex(m2[0], m2[1], v[2])
             faces.append([i0, i1, i2])
         else:  # n_valid == 2
             v0, v1 = valid_pts
             inv = invalid_pts[0]
             i0 = add_vertex(v0[0], v0[1], v0[2])
             i1 = add_vertex(v1[0], v1[1], v1[2])
-            i2 = add_vertex((v0[0] + inv[0]) / 2, (v0[1] + inv[1]) / 2, v0[2])
-            i3 = add_vertex((v1[0] + inv[0]) / 2, (v1[1] + inv[1]) / 2, v1[2])
+            m0 = cut_point(v0, inv)
+            m1 = cut_point(v1, inv)
+            i2 = add_vertex(m0[0], m0[1], v0[2])
+            i3 = add_vertex(m1[0], m1[1], v1[2])
             faces.append([i0, i1, i3])
             faces.append([i0, i3, i2])
+
+    def classify(x: float, y: float, raw_valid: bool, elev: float) -> bool:
+        """A grid point's validity — the real per-cell data almost
+        everywhere, EXCEPT within `line_fit["band"]` of a confidently-fitted
+        coverage-boundary line, where the clean fitted line overrides it.
+        Confining the override to a narrow band around the fitted line
+        (rather than applying it globally across the whole mesh) matters:
+        a single infinite line's half-plane could otherwise silently
+        misclassify a real, unrelated NoData gap elsewhere in a larger
+        mesh — this keeps the fix scoped to exactly the boundary it was
+        fitted from.
+
+        **The override only ever WITHHOLDS a point, never RESURRECTS
+        one**: if the line says "invalid" within the band, that's trusted
+        outright (a real point being trimmed a little early for a cleaner
+        cut is harmless — the exact same trade-off `_erode_valid_mask()`
+        already makes). But if the line says "valid," that's only honoured
+        when `elev` is a genuine, non-NoData elevation (`elev > -9999`) —
+        without this check, a point the EROSION correctly excluded (a real
+        NoData pixel sitting just past the fitted line, on what the line
+        calls the "valid" side) could get treated as real terrain, adding
+        a fabricated vertex at -9999m. The line fit is a cosmetic cutting
+        guide for where REAL data already exists, never a licence to
+        invent elevation where there is none.
+        """
+        if line_fit is None:
+            return raw_valid
+        cx, cy = line_fit["centroid"]
+        nx, ny = line_fit["normal"]
+        d = (x - cx) * nx + (y - cy) * ny
+        if abs(d) > line_fit["band"]:
+            return raw_valid
+        line_says_valid = (d * line_fit["valid_sign"]) > 0
+        return (elev > -9999) if line_says_valid else False
 
     # A plain, uncipped rectangular grid of quads, each split into 2
     # triangles — same structure as before (dropping the exact-clip
@@ -1227,10 +1373,11 @@ def get_terrain_mesh(
         for ci in range(ncols - 1):
             c0, c1 = col_indices[ci], col_indices[ci + 1]
             x0, x1 = grid_xs[ci], grid_xs[ci + 1]
-            p00 = (x0, y0, float(arr[r0, c0]), bool(coarse_valid[ri, ci]))
-            p10 = (x1, y0, float(arr[r0, c1]), bool(coarse_valid[ri, ci + 1]))
-            p01 = (x0, y1, float(arr[r1, c0]), bool(coarse_valid[ri + 1, ci]))
-            p11 = (x1, y1, float(arr[r1, c1]), bool(coarse_valid[ri + 1, ci + 1]))
+            e00, e10, e01, e11 = float(arr[r0, c0]), float(arr[r0, c1]), float(arr[r1, c0]), float(arr[r1, c1])
+            p00 = (x0, y0, e00, classify(x0, y0, bool(coarse_valid[ri, ci]), e00))
+            p10 = (x1, y0, e10, classify(x1, y0, bool(coarse_valid[ri, ci + 1]), e10))
+            p01 = (x0, y1, e01, classify(x0, y1, bool(coarse_valid[ri + 1, ci]), e01))
+            p11 = (x1, y1, e11, classify(x1, y1, bool(coarse_valid[ri + 1, ci + 1]), e11))
             emit_triangle(p00, p10, p01)
             emit_triangle(p10, p11, p01)
 

@@ -1821,6 +1821,73 @@ app, rather than the documented-but-dead endpoints:
       actually rendered, which this aliasing bug meant it technically
       wasn't doing with full precision on a large, downsampled site.
 
+36. **Follow-up to items 34-35, real user report with a screenshot: still
+    a visible sawtooth, and a direct, correct diagnosis from the user
+    themselves — "we're crossing at an angle with the pixels... we can't
+    just leave the extra pixels in and then crop it with a single line."**
+    Items 34-35 both still worked PER-TRIANGLE (or per-pixel-block) —
+    each triangle along the boundary independently decided its own cut
+    point, with no sense that neighbouring triangles' cuts should all lie
+    on one shared line. That's inherently still a (finer) staircase, not
+    a straight edge, exactly as the user diagnosed.
+    - **`_fit_coverage_boundary_line()`**: real LIDAR coverage edges are
+      very often a single straight line in practice (a survey/tile
+      boundary), not an organic curve — confirmed directly, not assumed:
+      R32 E4F8's own real edge fits a line via PCA/total-least-squares
+      (the standard technique for a line of unknown orientation — ordinary
+      least-squares y=mx+b breaks down for a near-vertical line, which
+      real coverage edges often are) with a residual std of 0.09m against
+      a 2m grid — essentially exact. `get_terrain_mesh()` now fits this
+      line once per mesh and, when confident, cuts every boundary triangle
+      against that SAME shared line (via `cut_point()`'s exact
+      line-segment intersection) instead of each one picking its own
+      independent midpoint — verified visually with a zoomed crop: the
+      diagonal edge is now genuinely straight, no remaining staircase at
+      any zoom level (a small, separate local NoData patch elsewhere in
+      the same mesh correctly still uses the per-triangle fallback, since
+      it isn't part of the fitted line — appropriately honest, not forced
+      into a shape it doesn't have).
+    - **A real, serious bug caught before shipping, not after**: the line
+      fit can flip a corner's classification, and a naive version of this
+      could reclassify a point as "valid" that's actually genuine NoData
+      just past the fitted line on its "valid" side — using that corner's
+      OWN elevation would then fabricate a vertex at -9999m. Fixed by
+      making the override ONE-DIRECTIONAL: the fitted line may only ever
+      make a corner MORE conservative (line says invalid -> trust it
+      outright, same harmless early-trim trade-off `_erode_valid_mask()`
+      already makes) — it may never resurrect a corner as valid unless
+      that exact pixel's own raw elevation is confirmed real
+      (`elev > -9999`) first. Never assumed safe — reasoned through
+      explicitly and encoded as a real runtime check.
+    - **A second real bug caught while first verifying the fit quality
+      itself** (not in the final shipped code, but instructive): an
+      initial residual check came back absurdly bad (25x the cell size)
+      on a case that should have fit almost perfectly. Traced directly:
+      `_erode_valid_mask()` treats anything outside the array's own bounds
+      as invalid too (item 33), so EVERY mosaic has a uniform invalid band
+      around all four of ITS OWN outer edges after erosion — not just the
+      one real internal coverage edge being searched for. The boundary-
+      point collector was picking up transitions from all four sides of a
+      rectangle at once, which obviously can't lie on one line. Fixed by
+      excluding any transition within `MESH_EDGE_TRIM_PIXELS`'s own trim
+      depth (plus a small margin) of the array's true edge on either side
+      of the pair — confirmed live: residual dropped from 25x the cell
+      size to 0.045x once only genuine internal transitions were kept.
+    - **Confidence-gated with a real fallback, not a forced fit**: fewer
+      than `MESH_BOUNDARY_LINE_MIN_POINTS` (8) transition points, or a
+      residual over `MESH_BOUNDARY_LINE_MAX_RESIDUAL_RATIO` (0.5 cell
+      widths), returns `None` and the mesh falls back to items 34-35's
+      existing per-triangle behaviour unchanged — verified directly with
+      two synthetic cases: a circular NoData blob (organic, non-linear)
+      correctly returns no fit, a clean synthetic diagonal correctly
+      finds one. The line's influence is also spatially BANDED
+      (`MESH_BOUNDARY_LINE_BAND_CELLS`, 4 cell-widths either side) rather
+      than applied as a global infinite half-plane, so it can't silently
+      swallow an unrelated real NoData gap elsewhere in a larger mesh —
+      confirmed the full-coverage Fermoy site still returns no line fit
+      at all (nothing to fit) and R32 E4F8's own vertex/face counts are
+      unaffected anywhere outside the fitted boundary's own band.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
