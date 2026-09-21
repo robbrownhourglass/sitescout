@@ -40,6 +40,10 @@
 <div id="topPanel" class="panel">
   <h1>3D terrain — this site's own shape</h1>
   <div class="muted">Real LIDAR elevation over the site and its surroundings, with the plot boundary and nearby roads painted onto the surface (not separate objects) and nearby buildings shown as real 3D shapes for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
+  <label id="satelliteToggleRow" style="display:none;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+    <input type="checkbox" id="satelliteToggle" /> Show satellite imagery (inside boundary)
+  </label>
+  <div id="satelliteMeta" class="muted" style="margin-top:6px;display:none"></div>
   <label id="flowToggleRow" style="display:none;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
     <input type="checkbox" id="flowToggle" /> Show water flow analysis
   </label>
@@ -156,7 +160,7 @@ async function main(){
 }
 
 function buildScene(mesh, ringSets){
-  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng } = mesh;
+  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
 
   // Legend
@@ -307,6 +311,65 @@ function buildScene(mesh, ringSets){
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // Satellite imagery drape (elevation.get_satellite_overlay()): real Esri
+  // World Imagery resampled into this mesh's own local coordinate frame
+  // and masked to alpha=0 outside the real plot boundary (so the
+  // hypsometric terrain colouring shows through everywhere else) — same
+  // lazy-fetch-on-first-toggle, separate-mesh-reusing-shared-geometry
+  // pattern as the water flow overlay below (see there for the full
+  // rationale). origin_lon/origin_lat/grid_extent are sent back to the
+  // backend exactly as this mesh itself received them, so the overlay is
+  // guaranteed pixel-aligned with THIS mesh rather than risking a second,
+  // independently-derived coordinate frame drifting apart from it.
+  document.getElementById('satelliteToggleRow').style.display = 'flex';
+  const satelliteToggle = document.getElementById('satelliteToggle');
+  const satelliteMeta = document.getElementById('satelliteMeta');
+  let satelliteMesh = null;
+  let satelliteFetchPromise = null;
+
+  satelliteToggle.addEventListener('change', async () => {
+    if(!satelliteToggle.checked){
+      if(satelliteMesh) satelliteMesh.visible = false;
+      satelliteMeta.style.display = 'none';
+      return;
+    }
+    if(satelliteMesh){
+      satelliteMesh.visible = true;
+      satelliteMeta.style.display = 'block';
+      return;
+    }
+    if(!satelliteFetchPromise){
+      satelliteMeta.style.display = 'block';
+      satelliteMeta.textContent = 'Fetching satellite imagery…';
+      satelliteFetchPromise = fetch('/api/terrain-satellite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ polygon_ring_sets_wgs84: ringSets, origin_lon: originLon, origin_lat: originLat, grid_extent: extent }),
+      }).then(r => r.json().then(body => ({ ok: r.ok, body })));
+    }
+    const { ok, body } = await satelliteFetchPromise;
+    if(!ok || body.status !== 'ok'){
+      satelliteMeta.textContent = (body && body.message) || 'Satellite imagery request failed.';
+      satelliteToggle.checked = false;
+      return;
+    }
+    const sat = body.data;
+    const satelliteTexture = new THREE.TextureLoader().load('data:image/png;base64,' + sat.satellite_overlay_png_base64);
+    satelliteTexture.colorSpace = THREE.SRGBColorSpace;
+    // polygonOffset -2 sits it just above the base terrain (0) but behind
+    // the flow overlay (-4) and catchment highlight (-6) below, so if a
+    // user toggles more than one layer on at once the stacking stays
+    // sensible: satellite as a ground-truth base, flow analysis on top of
+    // that, catchment selection on top of everything.
+    const satelliteMaterial = new THREE.MeshBasicMaterial({
+      map: satelliteTexture, transparent: true, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    });
+    satelliteMesh = new THREE.Mesh(geometry, satelliteMaterial);
+    scene.add(satelliteMesh);
+    satelliteMeta.textContent = `${sat.source}, zoom ${sat.zoom_level} — shown only inside the real plot boundary; the hypsometric terrain colouring remains everywhere else.`;
   });
 
   // Water flow analysis (elevation.get_flow_analysis()): real local minima

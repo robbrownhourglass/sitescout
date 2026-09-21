@@ -111,6 +111,10 @@ sitescout/
                              objects, for the /terrain-3d rotatable 3D page (webapp.py) —
                              get_terrain_mesh() and the OSM fetch run concurrently in webapp.py,
                              joined via attach_features() (see CLAUDE.md item 21).
+                             get_satellite_overlay() drapes real Esri World Imagery satellite
+                             tiles onto the same mesh, masked to the plot boundary only — the
+                             /terrain-3d page's own "Show satellite imagery" toggle, lazily
+                             fetched via its own endpoint (see CLAUDE.md item 31).
   buildings.py              nearby building footprints AND roads/tracks, from OpenStreetMap in one
                              combined Overpass query (get_nearby_features(), on-disk cached) — used
                              only by the /terrain-3d page's elevation.get_terrain_mesh(), not a
@@ -1536,6 +1540,82 @@ app, rather than the documented-but-dead endpoints:
       folded in) — genuinely distinct data, and the geology card now
       cross-references it with a one-line note clarifying its own
       "subsoil" is the geological sense, not a soil-science reading.
+
+31. **Satellite imagery drape on the /terrain-3d page — a new toggle,
+    asked for directly ("replace the area inside the property boundary
+    with satellite imagery").** Reuses the exact same public,
+    unauthenticated Esri World Imagery XYZ tile source
+    templates/index.html's own "Satellite" base layer already calls
+    (`server.arcgisonline.com/.../World_Imagery/MapServer/tile/{z}/{y}/{x}`)
+    — confirmed live before use (real JPEG tiles returned at z16-18 for a
+    known Fermoy test point), just fetched server-side and resampled into
+    this app's own local mesh-coordinate frame instead of left as Leaflet
+    tiles, since the whole point is draping it onto the SAME rotatable 3D
+    surface, not showing a second independent map.
+    - **`elevation.get_satellite_overlay()`**: for every pixel of a new
+      overlay texture (in the SAME local coordinate frame as
+      `get_terrain_mesh()`'s own `grid_extent`/UVs), reprojects local
+      (x,y) -> ITM -> WGS84 -> Web Mercator pixel space via pyproj's
+      vectorized numpy transform (confirmed fast even at 1024x1024 = 1M+
+      points in one call), fetches only the real tiles that area actually
+      needs (a small ThreadPoolExecutor, mirroring `pipeline.py`'s own
+      concurrency pattern), and samples each output pixel from the
+      stitched tile mosaic. Reprojecting PER OUTPUT PIXEL rather than
+      aligning whole tiles to the mesh's own frame is deliberate — ITM and
+      WGS84 axes are close to but not exactly aligned at this scale, and a
+      per-pixel transform is correct regardless of any small rotation,
+      with no extra complexity over an approximate tile-grid alignment.
+    - **Masked to the real plot boundary shape, not a bounding box**:
+      `shapely.contains_xy()` (vectorized point-in-polygon, shapely >=2.0)
+      decides alpha per pixel — 255 (opaque) inside the real parcel
+      polygon, 0 (fully transparent) outside it, so the terrain's own
+      hypsometric colouring + boundary/roads texture shows through
+      unchanged everywhere else. Verified end-to-end against a real
+      cadastral boundary at Fermoy: exactly 20.2% of the texture area
+      inside the boundary (confirmed numerically via the PNG's own alpha
+      channel, not just a visual glance — a flattened preview render can
+      make a masked PNG look fully opaque, since not every image viewer
+      honours alpha), producing a real, correctly-oriented, irregular
+      parcel-shaped crop of genuine aerial imagery (visible tree lines, a
+      building, a river) once composited onto a plain background for
+      inspection.
+    - **A real tile-count-cap bug caught before shipping**: the zoom-level
+      picker (`_pick_satellite_zoom()`) analytically estimates the zoom
+      that keeps tile count under `SATELLITE_MAX_TILES_PER_SIDE` (8, i.e.
+      64 tiles max) — but that estimate assumes a perfectly axis-aligned
+      square, and the REAL tile range (from actual per-pixel Mercator
+      coordinates, very slightly skewed by axis misalignment plus
+      min/max rounding) came out to 72 tiles at the estimate's own zoom
+      boundary in a real test, not 64. Fixed by actually measuring the
+      real tile range and stepping zoom down in a loop until it genuinely
+      fits, rather than trusting the formula alone — confirmed back down
+      to 25 tiles (zoom 18) for the same real test site afterward, and
+      confirmed the cap holds on a synthetic ~4.5km-wide boundary too (42
+      tiles at zoom 15, well within budget, ~1.2s).
+    - **New, separate lazily-fetched endpoint** (`POST
+      /api/terrain-satellite`), not folded into `/api/terrain-mesh`'s own
+      response — real external tile downloads, an optional visual layer,
+      not something every 3D-view visit should pay for (same reasoning as
+      `/api/terrain-flow`). Takes `origin_lon`/`origin_lat`/`grid_extent`
+      back from the frontend exactly as `/api/terrain-mesh` returned them,
+      rather than recomputing them server-side, so the overlay is
+      guaranteed pixel-aligned with the mesh already on screen instead of
+      risking two independently-derived coordinate frames drifting apart
+      — verified directly in a mock-fetch test that asserts the real
+      request body echoes back the mesh's own values exactly.
+    - **Frontend**: same "separate mesh reusing the terrain's own shared
+      `BufferGeometry`, lazy-fetch-on-first-toggle-on, no re-fetch on
+      repeat toggles" pattern as the water flow overlay (item 25) —
+      verified via the same mock-Three.js harness approach used
+      throughout this page's testing: fetch happens exactly once across
+      on/off/on, the mesh is reused (not duplicated) on the second
+      toggle-on, and a real server error correctly un-checks the box and
+      shows the error message rather than leaving the UI in a stuck
+      "loading" state. `polygonOffset -2` deliberately sits it between the
+      base terrain (0, implicit) and the flow overlay (-4)/catchment
+      highlight (-6), so if a user enables more than one overlay at once
+      the stacking stays sensible: satellite as a ground-truth base, flow
+      analysis on top of that, catchment selection on top of everything.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority

@@ -261,6 +261,40 @@ def api_terrain_flow():
     return jsonify({"status": "ok", "data": result})
 
 
+@app.post("/api/terrain-satellite")
+def api_terrain_satellite():
+    """Real Esri World Imagery satellite/aerial imagery, resampled into the
+    exact same local mesh-coordinate frame /api/terrain-mesh already
+    returned and masked to the plot boundary only (see
+    elevation.get_satellite_overlay()) — for the /terrain-3d page's own
+    "Show satellite imagery" toggle, asked for directly. Takes
+    `origin_lon`/`origin_lat`/`grid_extent` back from the frontend (exactly
+    what /api/terrain-mesh returned) rather than recomputing them, so this
+    overlay is guaranteed pixel-aligned with the already-rendered mesh
+    instead of risking two independently-derived frames drifting apart.
+    A separate, lazily-fetched endpoint (like /api/terrain-flow) rather
+    than folded into /api/terrain-mesh's own response — real tile
+    downloads from an external service, not something every 3D-view visit
+    needs to pay for.
+    """
+    body = request.get_json(silent=True) or {}
+    ring_sets = body.get("polygon_ring_sets_wgs84")
+    origin_lon, origin_lat, grid_extent = body.get("origin_lon"), body.get("origin_lat"), body.get("grid_extent")
+    if not ring_sets or origin_lon is None or origin_lat is None or not grid_extent:
+        return _error("polygon_ring_sets_wgs84, origin_lon, origin_lat, and grid_extent are required", 400)
+
+    try:
+        result = elevation.get_satellite_overlay(ring_sets, origin_lon, origin_lat, grid_extent)
+    except Exception as exc:
+        log.error("Satellite overlay failed: %s", exc)
+        return _error(f"satellite overlay failed: {exc}", 502)
+
+    if not result:
+        return _error("could not build a satellite overlay for this plot boundary", 404)
+
+    return jsonify({"status": "ok", "data": result})
+
+
 @app.get("/terrain-3d")
 def terrain_3d():
     """A standalone page (opened in a new tab from the Terrain & elevation
