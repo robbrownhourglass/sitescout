@@ -81,9 +81,9 @@ can't supply one.
 """
 from __future__ import annotations
 
+import base64
 import io
 import logging
-import math
 import os
 import zipfile
 from pathlib import Path
@@ -93,9 +93,9 @@ import numpy as np
 import requests
 import shapely
 import tifffile
-from PIL import Image
+from PIL import Image, ImageDraw
 from pyproj import Transformer
-from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
 from . import config
@@ -529,46 +529,76 @@ def get_terrain(lat: float, lon: float) -> dict:
     }
 
 
-# --- 3D terrain mesh, clipped to the site's own confirmed boundary shape ---
+# --- 3D terrain mesh, with the site's own boundary and nearby roads
+# painted onto it as a texture (not built as separate geometry) ---
 #
 # Everything above answers "how high is this site" with a single number or
 # a picture of a fixed square area around it. This answers a different
-# question: "what does the ground under this specific plot actually look
-# like" — a real mesh clipped to the plot's own boundary shape (not a
-# bounding rectangle, and not a blocky grid staircase either — see below),
-# for the browser to render as a rotatable 3D surface.
+# question: "what does the ground under and around this specific plot
+# actually look like" — a real mesh over a generous padded area, for the
+# browser to render as a rotatable 3D surface, with the plot boundary and
+# any nearby roads/tracks drawn onto it.
 #
-# First version of this clipped the elevation GRID by testing each cell's
-# corner with a hand-rolled point-in-polygon (ray casting) and discarding
-# any cell that wasn't fully inside — correct, but visibly blocky/jagged at
-# the boundary, since the edge could only ever land on a grid line, never
-# on the plot's own real boundary point. Fixed by switching to `shapely`
-# (GEOS) for real polygon geometry: boundary-straddling grid cells are now
-# intersected against the actual plot polygon (`shapely.intersection`,
-# handles concave polygons correctly — confirmed live against a concave
-# test shape before use, exact area match) and the resulting exact-boundary
-# fragment is triangulated with `shapely.constrained_delaunay_triangles`
-# (also confirmed live: triangulates a concave test polygon with the exact
-# same total area, i.e. it respects the real boundary rather than falling
-# back to a convex-hull Delaunay). This is the same class of decision as
-# adding pyproj for the WGS84<->ITM transform above: a real, verified
-# library is the correct response once the problem outgrows what a
-# textbook hand-rolled algorithm (plain ray-casting, still fine for a
-# simple inside/outside test) can safely do — geometric clipping and
-# triangulation of an arbitrary concave polygon is a different, much
-# easier-to-get-subtly-wrong class of problem than a single-point test.
+# **Revision history, because the first two approaches were both wrong in
+# instructive ways:**
 #
-# One known, accepted, disclosed limitation: a grid cell is only tested
-# for clipping if at least one of its 4 corners is inside the plot: a
-# polygon notch narrower than one grid cell that grazes a cell's interior
-# without containing any of its 4 corners is missed. At this mesh's grid
-# spacing (native ~2m for a single small parcel, coarser only for large
-# merged multi-parcel sites) this only matters for a real cadastral
-# boundary detail finer than the LIDAR data's own resolution could
-# meaningfully render anyway.
+# v1 clipped the elevation GRID by testing each cell's corner with a
+# hand-rolled point-in-polygon and discarding any cell not fully inside —
+# correct, but visibly blocky/jagged at the boundary (the edge could only
+# ever land on a grid line).
+#
+# v2 fixed the blockiness with real `shapely` polygon clipping + triangulation
+# (intersecting boundary cells against the actual plot polygon, then
+# `shapely.constrained_delaunay_triangles` on the exact fragment) — genuinely
+# exact, but this created a NEW, worse problem once roads/buildings were
+# added: the rendered terrain existed ONLY inside the tight polygon, so any
+# building or road just outside it (a real, relevant part of the site's
+# context — a neighbour's shed a few metres over the line, a driveway that
+# crosses it) rendered as a disconnected object floating in empty space
+# with no ground under it at all. Roads as separate 3D ribbon geometry
+# (mitre-less quads per straight segment) also looked visibly blocky/
+# discontinuous at corners — a real user report, with a screenshot showing
+# both problems clearly.
+#
+# **v3 (current): stop treating the boundary and roads as geometry that
+# has to be matched to a location on the surface — paint them onto the
+# surface instead**, closer to how an actual physical site model or an
+# aerial-orthophoto drape works. The terrain mesh is now a plain, uncipped
+# rectangular grid over `radius_m + MESH_CONTEXT_BUFFER_M` (real context,
+# not just the plot itself), with NO shapely clipping/triangulation
+# needed for the terrain at all — a real simplification, not just a
+# workaround (no more per-quad shapely calls, no more "which cells touch
+# the boundary" edge cases). The plot boundary and any roads are drawn as
+# lines directly onto a `overlay_texture_png_base64` PNG, in the exact
+# same local coordinate frame as the mesh's own vertices (see
+# `grid_extent`), and applied as the mesh's own texture map (multiplied
+# with its existing per-vertex hypsometric elevation tint) — so they're
+# always perfectly flush with the surface by construction, with no
+# discontinuity/joint artifacts possible (a drawn line has none), and no
+# "floating disconnected object" failure mode (nothing needs to be
+# individually positioned relative to a clipped edge any more).
+#
+# Buildings stay real 3D objects (unlike roads/boundary) — a building is
+# a genuine 3D volume, not a 2D marking on the ground, and the user asked
+# for that distinction explicitly. Their own real problem (a flat base
+# floating above, or gapping from, sloped real terrain) is fixed instead
+# by sampling the LOWEST real elevation under the footprint (not just its
+# centroid) and embedding the base further below that — see
+# `_extrude_building()`/`BUILDING_EMBED_M`.
 
 MESH_MAX_GRID_SIZE = 150  # cap the mesh at ~150x150 vertices regardless of plot size — plenty of detail, stays light in the browser
-MESH_BOUNDARY_BUFFER_M = 20  # small margin so edge-of-plot cells aren't clipped by floating-point/rounding
+MESH_CONTEXT_BUFFER_M = 50  # render real terrain/context this far beyond the plot's own bounding box in every direction, not just to its edge
+TEXTURE_SIZE = 1024  # overlay PNG resolution (boundary + roads) — compresses to a few KB regardless, since it's mostly flat white
+BOUNDARY_LINE_COLOR = (224, 128, 32)  # warm amber — distinct from the green/tan/white hypsometric terrain tint underneath it
+BOUNDARY_LINE_WIDTH_M = 1.0
+ROAD_LINE_COLOR = (60, 60, 58)  # dark asphalt gray
+ROAD_WIDTH_M = {
+    "motorway": 10.0, "trunk": 9.0, "primary": 8.0, "secondary": 7.0, "tertiary": 6.0,
+    "residential": 5.0, "unclassified": 5.0, "living_street": 5.0,
+    "service": 3.5, "track": 2.5, "cycleway": 1.5, "footway": 1.2, "path": 1.0,
+}  # standard rough widths by OSM highway type, for the painted line's thickness — real `width` tags are rarely present
+DEFAULT_ROAD_WIDTH_M = 4.0
+BUILDING_EMBED_M = 0.75  # extra depth below the LOWEST real elevation sampled under a building's footprint, so its base plants firmly into the terrain everywhere under it rather than possibly gapping on a slope
 
 
 def _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84: list):
@@ -598,10 +628,12 @@ def _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84: list):
 
 def mesh_center_and_radius(polygon_ring_sets_wgs84: list) -> Optional[tuple]:
     """(center_lon, center_lat, radius_m) for a plot boundary's own bounding
-    box (+ MESH_BOUNDARY_BUFFER_M) — the exact sizing get_terrain_mesh()
-    uses to build its LIDAR mosaic. Exposed separately so webapp.py can
-    size the nearby-buildings search around the same real area (a genuine
-    pyproj-based metre measurement, not a rough degrees-to-metres guess).
+    box + MESH_CONTEXT_BUFFER_M (real surrounding context, not just the
+    plot's own edge — see the module comment above) — the exact sizing
+    get_terrain_mesh() uses to build its LIDAR mosaic. Exposed separately
+    so webapp.py can size the nearby-buildings/roads search around the
+    same real area (a genuine pyproj-based metre measurement, not a rough
+    degrees-to-metres guess).
     """
     all_points = [pt for ring_set in polygon_ring_sets_wgs84 for ring in ring_set for pt in ring]
     if not all_points:
@@ -614,7 +646,7 @@ def mesh_center_and_radius(polygon_ring_sets_wgs84: list) -> Optional[tuple]:
     itm_points = [_to_itm.transform(lon, lat) for lon, lat in all_points]
     half_width = max(abs(x - center_x) for x, y in itm_points)
     half_height = max(abs(y - center_y) for x, y in itm_points)
-    radius_m = max(half_width, half_height) + MESH_BOUNDARY_BUFFER_M
+    radius_m = max(half_width, half_height) + MESH_CONTEXT_BUFFER_M
     return center_lon, center_lat, radius_m
 
 
@@ -634,21 +666,85 @@ def _sample_elevation(arr, ext, resolution, itm_x, itm_y) -> Optional[float]:
     return None if v <= -9999 else float(v)
 
 
+def _local_to_pixel(x: float, y: float, extent: tuple, texture_size: int) -> tuple:
+    """Local (already center-relative) metres -> overlay texture pixel
+    coordinates. Row 0 of the image = the north edge (largest y) — the
+    same orientation get_terrain_mesh() already uses for its own grid
+    (row 0 = ext_top) — so a line drawn here from these coordinates lines
+    up with the mesh vertex at that same (x, y) without any extra flip
+    logic needed on the frontend.
+    """
+    x_min, x_max, y_min, y_max = extent
+    px = (x - x_min) / (x_max - x_min) * texture_size
+    py = (y_max - y) / (y_max - y_min) * texture_size
+    return px, py
+
+
+def _meters_to_pixels(width_m: float, extent: tuple, texture_size: int) -> float:
+    x_min, x_max, _, _ = extent
+    return max(1.0, width_m / (x_max - x_min) * texture_size)
+
+
+def _draw_plot_boundary(draw, plot_geom, center_x: float, center_y: float, extent: tuple, texture_size: int) -> None:
+    """Draws every ring (outer + holes) of the plot polygon as a stroked
+    line directly onto the overlay texture — the boundary is "ink on the
+    surface", not geometry that has to be positioned relative to the
+    terrain mesh, so there's no way for it to end up misaligned or
+    disconnected from the ground the way a separate clipped mesh could.
+    """
+    width_px = int(round(_meters_to_pixels(BOUNDARY_LINE_WIDTH_M, extent, texture_size)))
+    polys = plot_geom.geoms if hasattr(plot_geom, "geoms") else [plot_geom]
+    for poly in polys:
+        for ring in [poly.exterior, *poly.interiors]:
+            pts = [_local_to_pixel(x - center_x, y - center_y, extent, texture_size) for x, y in ring.coords]
+            if len(pts) >= 2:
+                draw.line(pts, fill=BOUNDARY_LINE_COLOR, width=max(1, width_px), joint="curve")
+
+
+def _draw_road_on_overlay(draw, road: dict, center_x: float, center_y: float, extent: tuple, texture_size: int) -> None:
+    """Draws one OSM road/track path as a stroked line onto the overlay
+    texture — same "ink on the surface" approach as the boundary, and
+    directly why this fixes the earlier blocky/discontinuous 3D road
+    ribbons: a single stroked polyline has no per-segment joints to be
+    discontinuous at in the first place.
+    """
+    path_itm = [_to_itm.transform(lon, lat) for lon, lat in road["path_wgs84"]]
+    if len(path_itm) < 2:
+        return
+    width_m = ROAD_WIDTH_M.get(road.get("highway_type"), DEFAULT_ROAD_WIDTH_M)
+    width_px = int(round(_meters_to_pixels(width_m, extent, texture_size)))
+    pts = [_local_to_pixel(x - center_x, y - center_y, extent, texture_size) for x, y in path_itm]
+    draw.line(pts, fill=ROAD_LINE_COLOR, width=max(1, width_px), joint="curve")
+
+
 def _extrude_building(building: dict, center_x: float, center_y: float, arr, ext, resolution) -> Optional[dict]:
     """One OSM building footprint -> a flat-roofed 3D prism (vertical walls
     + a triangulated roof cap, same shapely triangulation used for the
-    terrain boundary above), sitting at the real ground elevation sampled
-    under its own footprint centroid. A real, disclosed simplification —
-    actual roofs aren't flat, and a sloped site means a real building's
-    floor isn't perfectly level either — this is a site-scouting visual
-    aid, not a survey-grade building model.
+    terrain boundary above). A real, disclosed simplification — actual
+    roofs aren't flat, and a sloped site means a real building's floor
+    isn't perfectly level either — this is a site-scouting visual aid, not
+    a survey-grade building model.
+
+    The base sits at the LOWEST real elevation sampled anywhere under the
+    footprint (every footprint vertex, plus the centroid) minus
+    BUILDING_EMBED_M — not just the centroid's own single elevation. A
+    building's real footprint isn't perfectly flat ground, and sampling
+    only the centroid left the base floating above (or gapping from) the
+    terrain wherever the rest of the footprint sat higher (or lower) than
+    that one point — visible as buildings clearly not touching the ground
+    in a real screenshot. Embedding below the lowest real point, not just
+    matching it, means the base stays buried under the visible terrain
+    surface everywhere under the footprint even on a real slope.
     """
     ring_itm = [_to_itm.transform(lon, lat) for lon, lat in building["footprint_wgs84"]]
     centroid_x = sum(x for x, y in ring_itm) / len(ring_itm)
     centroid_y = sum(y for x, y in ring_itm) / len(ring_itm)
-    ground_m = _sample_elevation(arr, ext, resolution, centroid_x, centroid_y)
-    if ground_m is None:
+    samples = [_sample_elevation(arr, ext, resolution, x, y) for x, y in ring_itm]
+    samples.append(_sample_elevation(arr, ext, resolution, centroid_x, centroid_y))
+    valid_samples = [s for s in samples if s is not None]
+    if not valid_samples:
         return None  # outside this mosaic's own coverage, or a real LIDAR data gap under this building — skip rather than guess
+    ground_m = min(valid_samples) - BUILDING_EMBED_M
 
     footprint = Polygon(ring_itm)
     if not footprint.is_valid:
@@ -699,92 +795,27 @@ def _extrude_building(building: dict, center_x: float, center_y: float, arr, ext
     }
 
 
-ROAD_WIDTH_M = {
-    "motorway": 10.0, "trunk": 9.0, "primary": 8.0, "secondary": 7.0, "tertiary": 6.0,
-    "residential": 5.0, "unclassified": 5.0, "living_street": 5.0,
-    "service": 3.5, "track": 2.5, "cycleway": 1.5, "footway": 1.2, "path": 1.0,
-}  # standard rough widths by OSM highway type — real `width` tags are rarely present
-DEFAULT_ROAD_WIDTH_M = 4.0
-ROAD_SURFACE_OFFSET_M = 0.15  # raised slightly above the terrain surface so it doesn't z-fight with the ground mesh underneath it
-
-
-def _extrude_road(road: dict, center_x: float, center_y: float, arr, ext, resolution) -> list:
-    """One OSM road/track way -> a thin flat ribbon (width by highway
-    type — see ROAD_WIDTH_M) draped along the real terrain surface.
-    Unlike a building (one flat floor level, a real height added on top
-    UNexaggerated — see _extrude_building()'s comment), a road's elevation
-    genuinely varies along its length: every vertex here carries its own
-    ABSOLUTE elevation (sampled from this SAME mosaic, same as the terrain
-    mesh itself) rather than a height-above-ground offset, so the frontend
-    runs it through the exact same vertical-exaggeration transform as the
-    terrain mesh — the road correctly follows the (deliberately stretched)
-    slope it actually sits on, rather than needing its own separate
-    true-scale treatment the way a building's height does.
-
-    Returns a LIST of small mesh dicts, not one: a road that partially
-    leaves this mosaic's own coverage is split into separate continuous
-    on-coverage segments rather than guessing an elevation across the gap
-    (same never-guess-across-NoData rule used everywhere else here).
-    """
-    path_itm = [_to_itm.transform(lon, lat) for lon, lat in road["path_wgs84"]]
-    elevations = [_sample_elevation(arr, ext, resolution, x, y) for x, y in path_itm]
-    half_width = ROAD_WIDTH_M.get(road.get("highway_type"), DEFAULT_ROAD_WIDTH_M) / 2
-
-    segments: list = []
-    vertices: list = []
-    faces: list = []
-
-    def flush():
-        nonlocal vertices, faces
-        if len(vertices) >= 4:
-            segments.append({"highway_type": road.get("highway_type"), "name": road.get("name"),
-                              "vertices": vertices, "faces": faces})
-        vertices = []
-        faces = []
-
-    prev = None
-    for (x, y), elev in zip(path_itm, elevations):
-        if elev is None:
-            flush()
-            prev = None
-            continue
-        if prev is not None:
-            x0, y0, e0 = prev
-            dx, dy = x - x0, y - y0
-            length = math.hypot(dx, dy)
-            if length < 1e-6:
-                prev = (x, y, elev)
-                continue
-            nx, ny = -dy / length * half_width, dx / length * half_width
-            z0, z1 = e0 + ROAD_SURFACE_OFFSET_M, elev + ROAD_SURFACE_OFFSET_M
-            i0 = len(vertices); vertices.append([round(x0 - center_x + nx, 2), round(y0 - center_y + ny, 2), round(z0, 2)])
-            i1 = len(vertices); vertices.append([round(x0 - center_x - nx, 2), round(y0 - center_y - ny, 2), round(z0, 2)])
-            i2 = len(vertices); vertices.append([round(x - center_x + nx, 2), round(y - center_y + ny, 2), round(z1, 2)])
-            i3 = len(vertices); vertices.append([round(x - center_x - nx, 2), round(y - center_y - ny, 2), round(z1, 2)])
-            faces.append([i0, i1, i2])
-            faces.append([i1, i3, i2])
-        prev = (x, y, elev)
-    flush()
-    return segments
-
-
 def get_terrain_mesh(
     polygon_ring_sets_wgs84: list,
     buildings: Optional[list] = None,
     roads: Optional[list] = None,
 ) -> Optional[dict]:
     """A real triangle mesh (vertices + faces, not a height grid) of the
-    plot's own real LIDAR elevation, exactly clipped to its boundary shape
-    (see the module comment above for the shapely-based clipping/
-    triangulation approach). `buildings`/`roads` — see
-    buildings.get_nearby_features() — are optional; when given, each is
-    extruded (_extrude_building()/_extrude_road()) and grounded on this
-    SAME elevation mosaic, in this SAME local (x, y) coordinate frame
+    real LIDAR elevation over a generous padded area around the plot (see
+    the module comment above for why this is no longer clipped to the
+    exact boundary), with the plot boundary painted onto it as a texture
+    (`overlay_texture_png_base64` — apply as the mesh's own texture map;
+    `grid_extent` gives the local-coordinate bounds needed to compute each
+    vertex's own UV). `buildings`/`roads` — see
+    buildings.get_nearby_features() — are optional; when given, buildings
+    are extruded as real 3D objects (_extrude_building()) and roads are
+    drawn onto the SAME overlay texture (not built as geometry — see the
+    module comment). Everything shares one local (x, y) coordinate frame
     (metres east/north of `origin_lon`/`origin_lat`, returned so callers
-    can reproduce the exact frame if needed) so terrain/buildings/roads
-    all align without the browser needing to know anything about ITM or
-    WGS84. Can also be attached later via attach_features() — see there
-    for why (running the OSM fetch concurrently with this mesh build).
+    can reproduce the exact frame if needed) so terrain/buildings/the
+    overlay all align without the browser needing to know anything about
+    ITM or WGS84. Can also be attached later via attach_features() — see
+    there for why (running the OSM fetch concurrently with this build).
     """
     center = mesh_center_and_radius(polygon_ring_sets_wgs84)
     if not center:
@@ -814,13 +845,6 @@ def get_terrain_mesh(
     grid_ys = [ext_top - r * resolution for r in row_indices]
     nrows, ncols = len(row_indices), len(col_indices)
 
-    # Every grid vertex's inside/outside status, computed once as a single
-    # vectorized shapely call (not up to 4 Point()+covers() calls per quad,
-    # which would repeat the same corner point's test up to 4x since
-    # adjacent quads share corners).
-    xx, yy = np.meshgrid(grid_xs, grid_ys)
-    inside = shapely.covers(plot_geom, shapely.points(xx.ravel(), yy.ravel())).reshape(xx.shape)
-
     vertices: list = []
     faces: list = []
     valid_heights: list = []
@@ -837,64 +861,49 @@ def get_terrain_mesh(
         vertex_cache[key] = idx
         return idx
 
+    # A plain, uncipped rectangular grid — every cell whose 4 real corner
+    # values are valid (not NoData) becomes 2 triangles, full stop. No
+    # polygon test, no per-cell shapely call: dropping the exact-clip
+    # approach (see the module comment above) means this loop is now both
+    # simpler AND faster than the v2 version.
     for ri in range(nrows - 1):
         r0, r1 = row_indices[ri], row_indices[ri + 1]
-        y0, y1 = grid_ys[ri], grid_ys[ri + 1]  # y0 > y1 (north to south)
+        y0, y1 = grid_ys[ri], grid_ys[ri + 1]
         for ci in range(ncols - 1):
             c0, c1 = col_indices[ci], col_indices[ci + 1]
             x0, x1 = grid_xs[ci], grid_xs[ci + 1]
-
             h00, h10, h01, h11 = arr[r0, c0], arr[r0, c1], arr[r1, c0], arr[r1, c1]
             if h00 <= -9999 or h10 <= -9999 or h01 <= -9999 or h11 <= -9999:
                 continue  # a real LIDAR data gap in this cell — never guess across NoData
-
-            in00, in10, in01, in11 = inside[ri, ci], inside[ri, ci + 1], inside[ri + 1, ci], inside[ri + 1, ci + 1]
-
-            if in00 and in10 and in01 and in11:
-                # Fast path: whole cell inside, no clipping needed — this
-                # is the overwhelming majority of cells for any real plot,
-                # so skipping the shapely call here (only used at the
-                # boundary below) matters for performance.
-                i00, i10 = add_vertex(x0, y0, h00), add_vertex(x1, y0, h10)
-                i01, i11 = add_vertex(x0, y1, h01), add_vertex(x1, y1, h11)
-                faces.append([i00, i10, i01])
-                faces.append([i10, i11, i01])
-                continue
-            if not (in00 or in10 or in01 or in11):
-                continue  # no corner inside — see the module comment above on the one known edge case this misses
-
-            quad = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
-            clipped = quad.intersection(plot_geom)
-            if clipped.is_empty:
-                continue
-            fragments = clipped.geoms if isinstance(clipped, MultiPolygon) else [clipped]
-            for frag in fragments:
-                if frag.is_empty or frag.geom_type != "Polygon" or frag.area < 1e-6:
-                    continue
-                try:
-                    tris = shapely.constrained_delaunay_triangles(frag)
-                except Exception:
-                    continue
-                for tri in tris.geoms:
-                    idxs = []
-                    for vx, vy in list(tri.exterior.coords)[:3]:
-                        # Bilinear interpolation within this cell's own 4
-                        # real corner heights — exact at the corners
-                        # themselves (u/v snap to 0 or 1), a standard,
-                        # well-defined estimate anywhere else inside it.
-                        u = 0.0 if x1 == x0 else min(1.0, max(0.0, (vx - x0) / (x1 - x0)))
-                        v = 0.0 if y0 == y1 else min(1.0, max(0.0, (y0 - vy) / (y0 - y1)))
-                        elev = (1 - u) * (1 - v) * h00 + u * (1 - v) * h10 + (1 - u) * v * h01 + u * v * h11
-                        idxs.append(add_vertex(vx, vy, elev))
-                    faces.append(idxs)
+            i00, i10 = add_vertex(x0, y0, h00), add_vertex(x1, y0, h10)
+            i01, i11 = add_vertex(x0, y1, h01), add_vertex(x1, y1, h11)
+            faces.append([i00, i10, i01])
+            faces.append([i10, i11, i01])
 
     if not vertices:
-        log.info("-> LIDAR coverage exists nearby but no grid cell fell inside the plot boundary")
+        log.info("-> LIDAR coverage exists nearby but no cell in this padded area had valid data")
         return None
 
+    # Overlay texture: the plot boundary is drawn now (always available);
+    # roads are drawn later by attach_features() once the concurrent OSM
+    # fetch lands (see webapp.py) — the live PIL Image is kept in `_raw`
+    # so that second pass can mutate it directly rather than starting over.
+    extent = (
+        grid_xs[0] - center_x, grid_xs[-1] - center_x,
+        grid_ys[-1] - center_y, grid_ys[0] - center_y,
+    )  # (x_min, x_max, y_min, y_max) in local coords — grid_ys[0] is the north edge (largest y)
+    overlay_img = Image.new("RGB", (TEXTURE_SIZE, TEXTURE_SIZE), (255, 255, 255))
+    draw = ImageDraw.Draw(overlay_img)
+    _draw_plot_boundary(draw, plot_geom, center_x, center_y, extent, TEXTURE_SIZE)
+
+    def _encode_overlay() -> str:
+        buf = io.BytesIO()
+        overlay_img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
     log.info(
-        "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, exact-clipped to plot boundary), %.1f-%.1fm",
-        len(vertices), len(faces), resolution * step, min(valid_heights), max(valid_heights),
+        "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, %dm padded context around the plot), %.1f-%.1fm",
+        len(vertices), len(faces), resolution * step, int(radius_m), min(valid_heights), max(valid_heights),
     )
     result = {
         "found": True,
@@ -907,26 +916,32 @@ def get_terrain_mesh(
         "source": f"OPW LIDAR ({mosaic['source_label']})",
         "origin_lon": center_lon,
         "origin_lat": center_lat,
+        "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
+        "overlay_texture_png_base64": _encode_overlay(),
         "buildings": [],
-        "roads": [],
-        # Raw mosaic pieces, kept only long enough for attach_features() to
-        # ground buildings/roads onto this SAME mesh — stripped before the
-        # result ever reaches webapp.py's jsonify() (see attach_features()
-        # and api_terrain_mesh()). Not re-fetching the LIDAR tiles a second
-        # time (they're disk-cached) is the point: buildings.py's Overpass
-        # call and this mesh build now run concurrently (see webapp.py),
-        # so the buildings/roads lookup is no longer available yet at the
-        # moment this function itself returns.
-        "_raw": {"center_x": center_x, "center_y": center_y, "arr": arr, "ext": ext, "resolution": resolution},
+        "road_count": 0,
+        # Raw pieces, kept only long enough for attach_features() to ground
+        # buildings and draw roads onto this SAME mesh/texture — stripped
+        # before the result ever reaches webapp.py's jsonify() (see
+        # attach_features() and api_terrain_mesh()). Not re-fetching the
+        # LIDAR tiles a second time (they're disk-cached) is the point:
+        # buildings.py's Overpass call and this mesh build now run
+        # concurrently (see webapp.py), so the buildings/roads lookup
+        # isn't available yet at the moment this function itself returns.
+        "_raw": {
+            "center_x": center_x, "center_y": center_y, "arr": arr, "ext": ext, "resolution": resolution,
+            "extent": extent, "overlay_img": overlay_img, "encode_overlay": _encode_overlay,
+        },
     }
     attach_features(result, buildings, roads)
     return result
 
 
 def attach_features(result: dict, buildings: Optional[list] = None, roads: Optional[list] = None) -> dict:
-    """Extrudes OSM buildings/roads (buildings.py) onto an already-built
-    get_terrain_mesh() result, using its stashed `_raw` mosaic pieces —
-    lets webapp.py fetch buildings/roads CONCURRENTLY with the mesh build
+    """Extrudes OSM buildings as real 3D objects and draws OSM roads onto
+    the overlay texture (buildings.py) onto an already-built
+    get_terrain_mesh() result, using its stashed `_raw` pieces — lets
+    webapp.py fetch buildings/roads CONCURRENTLY with the mesh build
     itself (via a thread pool) rather than paying Overpass's latency
     strictly after the mesh is already done. Safe to call with nothing to
     attach (a no-op) or after `_raw` has already been stripped (also a
@@ -948,12 +963,11 @@ def attach_features(result: dict, buildings: Optional[list] = None, roads: Optio
                   len(placed), len(buildings))
 
     if roads:
-        placed = []
+        draw = ImageDraw.Draw(raw["overlay_img"])
         for r in roads:
-            segments = _extrude_road(r, center_x, center_y, arr, ext, resolution)
-            placed.extend(segments)
-        result["roads"] = placed
-        log.info("-> %d nearby road(s) placed on this terrain mesh (as %d continuous on-coverage segment(s))",
-                  len(roads), len(placed))
+            _draw_road_on_overlay(draw, r, center_x, center_y, raw["extent"], TEXTURE_SIZE)
+        result["overlay_texture_png_base64"] = raw["encode_overlay"]()
+        result["road_count"] = len(roads)
+        log.info("-> %d nearby road(s) painted onto the terrain's overlay texture", len(roads))
 
     return result
