@@ -1517,6 +1517,22 @@ FLOOD_EPSILON_M = 0.02  # a cell only counts as "would be flooded" if filling ra
 FLOOD_POOL_COLOR = (30, 90, 180)
 FLOOD_POOL_ALPHA = 120
 
+# code 1-8 = 1 + this list's own index; code 0 = a sink or NoData cell (no
+# flow_to at all) — used to send the filled/routed flow direction grid to
+# the frontend compactly (one small int per cell instead of two), so a
+# click on a sink marker can reverse-trace that sink's own real catchment
+# (every cell whose water eventually reaches it) entirely client-side —
+# instant, no round trip per click, for an interactive multi-select tool.
+FLOW_DIR_OFFSETS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+
+def _encode_flow_dir_codes(flow_to: np.ndarray) -> list:
+    h, w, _ = flow_to.shape
+    codes = np.zeros((h, w), dtype=np.int8)
+    for i, (dr, dc) in enumerate(FLOW_DIR_OFFSETS):
+        codes[(flow_to[:, :, 0] == dr) & (flow_to[:, :, 1] == dc)] = i + 1
+    return codes.flatten().tolist()
+
 
 def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     """Water flow analysis for a confirmed plot — a real flood-fill
@@ -1608,6 +1624,8 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
         bottom_m = float(arr[r, c])
         spill_m = float(filled[r, c])
         sinks.append({
+            "row": r,
+            "col": c,
             "x": round(x - center_x, 2),
             "y": round(y - center_y, 2),
             "elevation_m": round(bottom_m, 2),
@@ -1657,6 +1675,7 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     log.info("-> Flow analysis: %d low point(s) inside the plot boundary (showing top %d by catchment size), %d cell(s) would flood",
               total_inside, len(sinks), int(flooded.sum()))
 
+    rows, cols = arr.shape
     return {
         "found": True,
         "sinks": sinks,
@@ -1664,4 +1683,15 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
         "flooded_area_m2": round(float(flooded.sum()) * resolution * resolution, 1),
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
         "flow_overlay_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+        # For client-side catchment tracing (click a sink -> highlight
+        # everywhere its water comes from, no round trip per click — see
+        # FLOW_DIR_OFFSETS): the SAME filled/routed direction grid the
+        # drawn network itself uses, encoded compactly (see
+        # _encode_flow_dir_codes()), plus the grid's own shape so the
+        # frontend can map a flat index back to (row, col) and, via
+        # `grid_extent`, to local (x, y).
+        "rows": rows,
+        "cols": cols,
+        "cell_size_m": resolution,
+        "flow_dir_codes": _encode_flow_dir_codes(flow_to),
     }
