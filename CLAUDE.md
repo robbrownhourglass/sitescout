@@ -297,7 +297,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Groundwater source protection (public water supply + group water scheme) | GSI `IE_GSI_Group_Water_Scheme_Public_Water_Supply_Source_Protection_Areas_20K_IE26_ITM` (layer 0 = SPAs, layer 1 = zones of contribution) | `geohazards.py` |
 | Transmission grid (substations, overhead lines, underground cables — existing + committed/planned) | EirGrid's own public "TDP 2024 Web Map PUBLIC" `FeatureServer`, found via ArcGIS Online's public content search rather than a specific viewer | `eirgrid.py` |
 | Species occurrence records + IUCN Red List threatened species | GBIF (Global Biodiversity Information Facility) public REST API (`api.gbif.org`), not NBDC's own map viewer — see below | `biodiversity.py` |
-| Precise terrain elevation (~2m grid, ground + surface) | OPW's own LIDAR survey tiles (GeoTIFF, real float32 metres) — downloaded + cached on demand, not a live API (none exists — see below) | `elevation.py` |
+| Precise terrain elevation (~2m grid or better, ground + surface where available) | OPW, TII, and Westmeath Co Co's own LIDAR survey tiles (`LIDAR_SOURCES`, priority order — GeoTIFF, real float32 metres, ~30% of the country combined, confirmed via a real geometric union — see CLAUDE.md item 24) — downloaded + cached on demand, not a live API (none exists — see below) | `elevation.py` |
 | National elevation contours (10m interval, 20m grid, fallback) | GSI/EPA "Hydrologically Corrected DTM" contour `MapServer` — attribute-only query, no map geometry (see below) | `elevation.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
@@ -1060,6 +1060,103 @@ app, rather than the documented-but-dead endpoints:
     from a NoData region stayed exactly at its original value rather than
     blending toward -9999, since blending real elevation with "no data
     here" would be a worse bug than the noise being fixed.
+24. **Wired in TII and Westmeath Co Co as two more real LIDAR sources —
+    found by actually computing national coverage, not guessing.** Asked
+    what % of the country has this LIDAR data and why; answered by
+    querying the exact same GSI coverage index this app already uses and
+    computing a real geometric union (shapely) rather than a naive
+    tile-count estimate: OPW's own two sources are ~19.6% of the country
+    (13,776km², NASC alone, geometrically verified). That led to checking
+    whether GSI's server hosts other agencies' coverage indexes too — it
+    does, at `Lidar/IE_GSI_LiDAR_Coverage_{TII,GSI_DCHG_DP,NYU_Dublin,
+    OPW_Cork,WH_CoCo}_IE26_ITM` — and TII (Transport Infrastructure
+    Ireland's road/rail corridor survey) alone adds 10,268km², nearly
+    doubling real usable coverage to ~30%.
+    - **TII and Westmeath Co Co are now wired into `LIDAR_SOURCES`** (after
+      OPW NASC/pre-NASC in priority order). Confirmed each one's real
+      on-disk format before trusting it, not assumed to match OPW's
+      convention — and they didn't, in three separate ways: TII's coverage
+      index has **no `EXT_*` attributes at all** (only real `esriGeometryPolygon`
+      geometry, confirmed to be the same exact 2km-square convention via
+      its own `SHAPE.AREA` = exactly 4,000,000), **no DSM** (its zip has
+      one `.tif`, not a `_DTM`/`_DSM` pair), and **a different NoData
+      sentinel, `-99.0` not `-9999.0`** (confirmed directly: 622,256 of
+      1,000,000 pixels in a real sample tile are exactly `-99.0`, zero
+      pixels at any other implausible negative value). Westmeath, once
+      those fixes existed, needed none of its own — same `EXT_*`/
+      `_DTM.tif`+`_DSM.tif`/`-9999.0` conventions as OPW, just one folder
+      level deeper in its zip.
+    - `_tile_extent()` (new): a tile's extent from `EXT_*` attributes when
+      present, or derived from its own real polygon geometry when not —
+      exact, not approximate, since these are confirmed plain axis-aligned
+      squares either way. This ALSO retroactively hardens OPW pre-NASC,
+      which — discovered along the way — has **neither** `EXT_*` nor real
+      geometry for any of its 635 features (checked the full dataset).
+      That was a live, dormant crash risk before this fix (an unguarded
+      `f["attributes"]["EXT_LEFT"]` with no such key) that had simply never
+      been triggered; now it degrades to "this source has nothing usable
+      here," same as any other source with no coverage. Left in
+      `LIDAR_SOURCES` anyway rather than deleted — costs nothing to keep
+      and would start working again for free if GSI ever fixes that
+      service's schema. GSI Phase2 and NYU Dublin have the same problem
+      and are excluded for the same reason (both small, a few km²
+      combined, not worth chasing).
+    - **A real, previously-unknown ArcGIS gotcha, found via a hard failure,
+      not assumed**: querying TII's layer for the shared `EXT_LEFT/TOP/
+      RIGHT/BOTTOM` field list — fields that don't exist in its schema —
+      threw a hard `"Failed to execute query"` error, not a silent ignore.
+      Different from (and worse than) the already-documented "hit the bare
+      layer URL, get schema JSON back" gotcha above: this is a real 400-
+      class failure from a well-formed request to the right endpoint,
+      caused purely by naming a field the target layer's schema doesn't
+      have. Fixed by requesting `outFields=*` universally for the coverage-
+      index query instead of a named field list — sidesteps needing to
+      know each source's exact schema up front, and the app already
+      handles missing keys gracefully via `.get()`/`_tile_extent()`'s own
+      fallback.
+    - **A real architectural gap, found by testing TII end-to-end, not
+      designed for in advance**: a coverage-index tile's bounding box
+      containing a point never guaranteed that exact PIXEL had real data —
+      confirmed live, a genuine OPW NASC tile whose square covers a real
+      TII-corridor point but whose actual survey has a hole exactly there
+      (OPW's own flood survey, like TII's corridor survey, doesn't fill
+      every tile edge-to-edge). The original design committed to the
+      first source whose bbox matched and stopped — meaning adding TII/
+      Westmeath as lower-priority fallbacks would have silently done
+      nothing in exactly the cases they're meant to help with (bbox
+      overlaps an already-tried higher-priority source, but that source's
+      real data is a gap). Fixed with `_point_has_real_data()`: after
+      building a candidate source's tile list, read the actual pixel at
+      the query point before committing to it, falling through to the
+      next source if it's NoData. Uses `tifffile.imread()`, not this
+      module's usual memmap-based single-pixel read — confirmed live that
+      `tifffile.memmap()` throws `"image data are not memory-mappable"` on
+      a real, ordinary OPW tile (memmap only works on uncompressed,
+      contiguous TIFF data, and not every real tile turns out to be one) —
+      a second pre-existing gap surfaced by exercising this code path for
+      the first time, on a source (OPW) that had never needed it before.
+      Verified the fix live end-to-end: the same TII point now correctly
+      logs OPW NASC's bbox match, rejects it as real-NoData, tries OPW
+      pre-NASC (no bbox match at all), then finds and correctly uses TII
+      (66.35m, matching the tile's own real pixel value exactly) — and
+      confirmed no regression at Fermoy (still OPW NASC, same 22.24m) or
+      the R32 E4F8 coverage-edge case from item 18 (still resolves the
+      exact point the same way as before; only the wider 1km image's own
+      honest edge gap is unrelated to this fix).
+    - Every user-facing "OPW LIDAR" label (`get_precise_elevation()`'s
+      `source` field, the terrain card, the map layer toggle) now reflects
+      whichever source actually answered — `TII LIDAR`, `Westmeath Co Co
+      LIDAR`, etc. — rather than hardcoding OPW, since that stopped being
+      true the moment a second agency's data could be the one shown.
+    - **Deliberately not yet wired in: GSI/DCHG/DP (heritage sites, 1,619km²
+      confirmed)** — its tiles are ESRI ASCII Grid (`.asc`), a genuinely
+      different raster format from GeoTIFF, confirmed by downloading a
+      real sample (a plain 6-line text header — `ncols`/`nrows`/
+      `xllcorner`/`yllcorner`/`cellsize`/`NODATA_value` — followed by
+      space-separated rows). Not hard to parse (the header states its own
+      NODATA_value explicitly, no guessing needed) but it's a new raster-
+      reading code path through every `tifffile` call in this module, and
+      deserves its own dedicated pass rather than being bundled in here.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
