@@ -2562,6 +2562,28 @@ app, rather than the documented-but-dead endpoints:
       why 3D-page testing in this project verifies data/geometry
       construction, not actual rendered pixels).
 
+47. **Asked directly: show each selected sink's own elevation in the
+    water-flow catchment panel, so two sinks can be compared to see which
+    is genuinely lower.** No backend change needed — every sink already
+    carries a real `elevation_m` (and, for a genuine basin, its own
+    `spill_elevation_m`/`fill_depth_m` — item 26), it just wasn't
+    surfaced anywhere once a point got selected; only
+    `updateCatchmentHighlight()`'s own summary text (`#catchmentMeta`)
+    changed. Selected points are now listed lowest-first (matching what
+    "overall lower" is actually asking, rather than making the user scan
+    an arbitrary order) with the lowest explicitly marked, and a real
+    basin sink also shows its fill capacity inline (`fills to Xm,
+    +Ym`) — an exit point (item 29, no basin of its own) correctly omits
+    that part rather than showing a misleading blank. Verified the actual
+    sorting/labeling/formatting logic directly (extracted into a
+    standalone Node script against synthetic multi-sink data, since this
+    page's real rendering can't run headless — see item 19's own note):
+    confirmed the lower of two real sinks is correctly marked lowest
+    (not just picked by selection order), a single selection shows no
+    "lowest" marker at all (nothing to compare against), and an exit
+    point can correctly win "lowest" against a real sink when it genuinely
+    is lower.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

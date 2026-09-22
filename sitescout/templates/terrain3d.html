@@ -659,7 +659,31 @@ function buildScene(mesh, ringSets){
 
     const areaM2 = Math.round(catchmentSet.size * flowData.cell_size_m * flowData.cell_size_m).toLocaleString();
     catchmentMeta.style.display = 'block';
-    catchmentMeta.textContent = `Selected ${selectedSinkIndices.size} point${selectedSinkIndices.size > 1 ? 's' : ''}: total catchment ~${areaM2}m² (${catchmentSet.size.toLocaleString()} cells) — click a point again to deselect.`;
+
+    // Asked for directly: show each selected point's own real elevation
+    // (already in every sink's `elevation_m`, elevation.get_flow_analysis()
+    // — the same value the marker itself is positioned at) so two sinks
+    // can be compared directly to see which is genuinely lower, not just
+    // their combined catchment. Sorted lowest-first — the lowest is what
+    // "overall lower" is actually asking, so put it first rather than
+    // making the user scan for it.
+    const selected = [...selectedSinkIndices]
+      .map(i => ({ i, sink: flowData.sinks[i] }))
+      .sort((a, b) => a.sink.elevation_m - b.sink.elevation_m);
+    const lowestEl = selected[0].sink.elevation_m;
+    const pointsHtml = selected.map(({ sink }, rank) => {
+      const label = sink.is_exit ? 'Exit point' : 'Sink';
+      const isLowest = selected.length > 1 && sink.elevation_m === lowestEl;
+      const fillNote = (!sink.is_exit && sink.fill_depth_m != null)
+        ? ` <span class="muted" style="font-weight:normal">(fills to ${sink.spill_elevation_m}m, +${sink.fill_depth_m}m)</span>`
+        : '';
+      return `<div>${isLowest ? '&#9660; ' : ''}${label}: <strong>${sink.elevation_m}m</strong>${fillNote}${isLowest ? ' <span class="muted" style="font-weight:normal">— lowest selected</span>' : ''}</div>`;
+    }).join('');
+
+    catchmentMeta.innerHTML =
+      `<div>Selected ${selectedSinkIndices.size} point${selectedSinkIndices.size > 1 ? 's' : ''}: total catchment ~${areaM2}m² (${catchmentSet.size.toLocaleString()} cells)</div>` +
+      pointsHtml +
+      `<div class="muted" style="font-weight:normal;margin-top:2px">Click a point again to deselect.</div>`;
   }
 
   function toggleSinkSelection(sinkIndex){
