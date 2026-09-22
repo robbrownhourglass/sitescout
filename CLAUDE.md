@@ -2529,6 +2529,39 @@ app, rather than the documented-but-dead endpoints:
       display" with no "+ boundary overlap check" suffix) to confirm the
       fallback path itself is unaffected, not just the new one.
 
+46. **Real user report: on /terrain-3d, toggling satellite imagery and
+    water flow analysis on together only worked in ONE click order.**
+    Satellite-then-flow worked fine; flow-then-satellite made the
+    satellite layer invisible until flow was turned back off. Root cause,
+    confirmed directly rather than assumed: `THREE.MeshBasicMaterial`'s
+    `transparent: true` does NOT imply `depthWrite: false` — a real,
+    common three.js gotcha. All three overlay meshes on this page
+    (satellite, flow, catchment highlight — item 31's own `polygonOffset`
+    stacking comment already documents their intended
+    -2/-4/-6 layering) share the terrain's own geometry and are
+    genuinely coplanar; every one of them was still writing to the depth
+    buffer despite being transparent. Whichever mesh got added to the
+    scene FIRST wrote its depth first, and the second mesh's fragments
+    then failed the depth test against it (the small polygonOffset gap
+    isn't reliably enough to win) and were discarded before blending ever
+    ran — a real occlusion bug, not a blending/transparency one, which is
+    exactly why it depended on click ORDER rather than which layer was
+    meant to sit "on top."
+    - Fixed by adding `depthWrite: false` to all three overlay materials
+      (satellite, flow, catchment) — they still depth-TEST against the
+      opaque terrain underneath (so the existing polygonOffset anti-
+      z-fighting protection is unaffected), but no longer write depth
+      themselves, so they can never block each other regardless of
+      toggle order. Their polygonOffset values continue to control which
+      one visually sits on top when more than one is showing.
+    - No backend change — pure three.js material properties, verified by
+      reasoning through the real depth-test/blend pipeline (confirmed via
+      reading Three.js's own documented default of `depthWrite: true`
+      regardless of `transparent`) rather than by pixel-level rendering,
+      since jsdom has no real WebGL context (see item 19's own note on
+      why 3D-page testing in this project verifies data/geometry
+      construction, not actual rendered pixels).
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

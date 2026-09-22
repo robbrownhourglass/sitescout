@@ -499,8 +499,29 @@ function buildScene(mesh, ringSets){
     // user toggles more than one layer on at once the stacking stays
     // sensible: satellite as a ground-truth base, flow analysis on top of
     // that, catchment selection on top of everything.
+    //
+    // depthWrite: false — real user report: toggling water flow ON FIRST
+    // then satellite imagery ON made satellite invisible, but the reverse
+    // order worked fine. Root cause: THREE.MeshBasicMaterial's
+    // `transparent: true` does NOT imply `depthWrite: false` (a common
+    // three.js gotcha, confirmed directly, not assumed) — every one of
+    // these three coplanar overlay meshes (satellite/flow/catchment, all
+    // sharing this terrain's own geometry) was still writing to the depth
+    // buffer despite being transparent. Whichever mesh got added to the
+    // scene FIRST wrote its depth first; the second mesh's fragments then
+    // failed the depth test against it (their polygonOffset difference is
+    // too small to reliably win), so it was discarded before blending
+    // ever ran — occlusion, not a transparency/blending issue, which is
+    // why it depended on click ORDER rather than which layer was "on
+    // top." Setting depthWrite: false on all three (satellite, flow,
+    // catchment) stops them from ever blocking each other via the depth
+    // buffer — they still depth-TEST against the opaque terrain
+    // underneath (avoiding the very z-fighting polygonOffset already
+    // exists to prevent), and their own polygonOffset ordering continues
+    // to control which one visually sits on top when more than one is
+    // showing, regardless of which was toggled on first.
     const satelliteMaterial = new THREE.MeshBasicMaterial({
-      map: satelliteTexture, transparent: true, side: THREE.DoubleSide,
+      map: satelliteTexture, transparent: true, side: THREE.DoubleSide, depthWrite: false,
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     });
     satelliteMesh = new THREE.Mesh(geometry, satelliteMaterial);
@@ -623,8 +644,10 @@ function buildScene(mesh, ringSets){
 
     if(!catchmentTexture){
       catchmentTexture = new THREE.CanvasTexture(catchmentCanvas);
+      // depthWrite: false — see satelliteMaterial's own comment for the
+      // full real-bug writeup.
       const catchmentMaterial = new THREE.MeshBasicMaterial({
-        map: catchmentTexture, transparent: true, side: THREE.DoubleSide,
+        map: catchmentTexture, transparent: true, side: THREE.DoubleSide, depthWrite: false,
         polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6,
       });
       catchmentMesh = new THREE.Mesh(geometry, catchmentMaterial);
@@ -703,8 +726,12 @@ function buildScene(mesh, ringSets){
     flowData = flow;
     const flowTexture = new THREE.TextureLoader().load('data:image/png;base64,' + flow.flow_overlay_png_base64);
     flowTexture.colorSpace = THREE.SRGBColorSpace;
+    // depthWrite: false — see satelliteMaterial's own comment above for
+    // the full real-bug writeup (toggle order previously determined
+    // which coplanar overlay mesh blocked the other via the depth
+    // buffer, not their actual transparency).
     const flowMaterial = new THREE.MeshBasicMaterial({
-      map: flowTexture, transparent: true, side: THREE.DoubleSide,
+      map: flowTexture, transparent: true, side: THREE.DoubleSide, depthWrite: false,
       polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
     });
     flowMesh = new THREE.Mesh(geometry, flowMaterial);
