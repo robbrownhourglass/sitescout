@@ -1387,6 +1387,14 @@ function collapseTheme(theme){
     tileCheckboxes[key].checked = false;
     setTileLayersVisible(key, false);
   });
+  // Real user report: opening a layer's detail card, then switching to a
+  // DIFFERENT theme (or just closing the current one), left the detail
+  // panel open showing stale content for a theme that's no longer
+  // engaged on the map at all. Close it too, but only if it's actually
+  // showing one of THIS theme's own tiles — switching themes shouldn't
+  // close an unrelated detail panel that has nothing to do with either
+  // (were that even possible given the current single-open accordion).
+  if(activeTileKey && theme.tileKeys.includes(activeTileKey)) closeDetail();
 }
 
 function toggleDetail(spec){

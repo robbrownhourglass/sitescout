@@ -2147,6 +2147,32 @@ app, rather than the documented-but-dead endpoints:
       this app's own long-standing R32 E4F8 test site, with the subdomain
       form for the OSM one specifically because of this finding.
 
+42. **Follow-up to items 40-41, real user report with a screenshot: a
+    layer's detail panel stayed open showing stale content after
+    switching to a DIFFERENT theme, even though that theme's own layers
+    had correctly been removed from the map.** E.g.: open Planning &
+    Utilities, click "Planning context" to view its detail card, then
+    click Ground & Terrain — the map correctly re-engaged Ground &
+    Terrain's own layers, but the detail panel kept showing the now-
+    irrelevant Planning context card instead of closing.
+    - **Fix**: `collapseTheme()` now also calls `closeDetail()` when the
+      currently-open detail panel belongs to one of THAT theme's own
+      tiles (`theme.tileKeys.includes(activeTileKey)`) — a single fix
+      point that correctly covers both ways a theme can collapse: the
+      user switching to a different theme (`toggleTheme()` always
+      collapses whichever theme was open before deciding whether to open
+      a new one), and the user closing the currently-open theme directly
+      by clicking its own header again.
+    - Verified three real interaction sequences, not just the one
+      reported: (1) the exact reported scenario (open Planning context
+      inside Planning & Utilities, switch to Ground & Terrain — detail
+      panel now correctly closes); (2) opening a detail card then closing
+      that SAME theme directly also closes it; (3) — the important
+      negative case, confirming this fix doesn't over-reach — the
+      PINNED "Property boundary" detail (not part of any theme at all)
+      stays open regardless of which theme gets opened or closed
+      afterward, since `theme.tileKeys` never contains `'boundary'`.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
