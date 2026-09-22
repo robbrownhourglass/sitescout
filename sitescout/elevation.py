@@ -825,6 +825,19 @@ SATELLITE_MAX_TILES_PER_SIDE = 8  # caps a single request at 64 tile downloads r
 SATELLITE_TILE_TIMEOUT_S = 15
 SATELLITE_TEXTURE_SIZE = 1024
 
+# OpenStreetMap's own standard map tiles — same {z}/{x}/{y} XYZ convention
+# as the satellite source above (just x/y in the other order — see
+# _fetch_xyz_tile()'s own note on why that's transparent to it), reused
+# for get_terrain_mesh()'s no-data-area basemap (see there): a flat,
+# readable reference map draped where there's no real elevation data, so
+# a user still has real geographic context (roads, place names) for the
+# part of their plot LIDAR never covered. Confirmed live before use (a
+# real PNG tile, no API key or special User-Agent strictly required — but
+# OSM's own tile usage policy asks for a descriptive one for automated
+# use, same courtesy already extended to Overpass in buildings.py).
+OSM_STANDARD_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OSM_TILE_USER_AGENT = "ireland-site-scout (local site-scouting tool; basemap tiles for the 3D terrain view's no-data placeholder)"
+
 
 def _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84: list):
     """cadastral.py's polygon_ring_sets_wgs84 convention (a list of ring-sets,
@@ -997,6 +1010,7 @@ def _coarse_valid_grid(valid_mask: np.ndarray, row_indices: list, col_indices: l
 MESH_BOUNDARY_LINE_MIN_POINTS = 8  # minimum real transition points before even attempting a line fit
 MESH_BOUNDARY_LINE_MAX_RESIDUAL_RATIO = 0.5  # fitted line's residual std must be under this many cell-widths to be trusted
 MESH_BOUNDARY_LINE_BAND_CELLS = 4  # only let the fitted line override raw per-cell validity within this many cell-widths of it
+NO_DATA_OVERLAY_EDGE_MARGIN = MESH_EDGE_TRIM_PIXELS + 3  # matches _fit_coverage_boundary_line()'s own "comfortably past the routine trim depth" margin — see NO_DATA_OVERLAY_MIN_FRACTION's replacement logic in get_terrain_mesh()
 
 
 def _fit_coverage_boundary_line(coarse_valid: np.ndarray, row_indices: list, col_indices: list,
@@ -1446,27 +1460,21 @@ def get_terrain_mesh(
     boundary_lidar_coverage_fraction = round(boundary_covered / boundary_total, 3) if boundary_total else None
     min_elevation_m = min(valid_heights)
 
-    # A flat placeholder patch for any part of the PLOT BOUNDARY ITSELF
-    # (not the wider padded context, same "boundary, not context" scoping
-    # as boundary_lidar_coverage_fraction above) that has NO real LIDAR
-    # data at all — asked for directly, alongside the warning: "show the
-    # full shape of the property, but show zero elevation for every area
-    # that's not covered," rather than a mesh hole through which the
-    # property's own true outline can't be seen at all. Deliberately a
-    # SEPARATE mesh (own vertices/faces, own flat elevation) rather than
-    # blended into the real terrain — it must never be mistaken for real
-    # data. "Zero elevation" here means flush with `min_elevation_m` (the
-    # exact same baseline the black box's own base plane already sits at,
-    # see terrain3d.html's minSceneY) — a real sea-level-relative zero
-    # would be a physically meaningless flat plane at most Irish inland
-    # sites (routinely 50-200m+ ASL), so the frontend's already-established
-    # "lowest point in the scene" baseline is the one honest, consistent
-    # choice available, not an arbitrary pick.
-    col_centers = [(grid_xs[ci] + grid_xs[ci + 1]) / 2 for ci in range(ncols - 1)]
-    row_centers = [(grid_ys[ri] + grid_ys[ri + 1]) / 2 for ri in range(nrows - 1)]
-    cell_cx, cell_cy = np.meshgrid(col_centers, row_centers)
-    cell_inside_boundary = shapely.contains_xy(plot_geom, cell_cx, cell_cy)
-
+    # A flat placeholder patch for the FULL PADDED SQUARE — asked for
+    # directly ("let's just show the full square... the full area that we
+    # would show if we had it all"), a follow-up to the earlier version
+    # which only filled the part of the plot's own boundary that lacked
+    # data. Now covers every cell with no real corner at all, inside OR
+    # outside the plot boundary, so the whole rendered area is always a
+    # complete surface — never a hole. Deliberately a SEPARATE mesh (own
+    # vertices/faces, own flat elevation) rather than blended into the
+    # real terrain — it must never be mistaken for real data. "Zero
+    # elevation" is flush with `min_elevation_m` (the same baseline the
+    # black box's own base plane already sits at, see terrain3d.html's
+    # minSceneY) — a real sea-level-relative zero would be a physically
+    # meaningless flat plane at most Irish inland sites (routinely
+    # 50-200m+ ASL), so the scene's own established baseline is the one
+    # honest, consistent choice, not an arbitrary pick.
     no_data_vertices: list = []
     no_data_faces: list = []
     no_data_cache: dict = {}
@@ -1483,8 +1491,6 @@ def get_terrain_mesh(
 
     for ri in range(nrows - 1):
         for ci in range(ncols - 1):
-            if not cell_inside_boundary[ri, ci]:
-                continue  # outside the plot boundary — the wider padded context is EXPECTED to have gaps, no placeholder needed there
             if coarse_valid[ri, ci] or coarse_valid[ri, ci + 1] or coarse_valid[ri + 1, ci] or coarse_valid[ri + 1, ci + 1]:
                 continue  # at least one real corner here — the main loop above already drew something real (possibly a partial cut), no placeholder needed
             x0, x1 = grid_xs[ci], grid_xs[ci + 1]
@@ -1495,6 +1501,30 @@ def get_terrain_mesh(
             i11 = add_no_data_vertex(x1, y1)
             no_data_faces.append([i00, i10, i01])
             no_data_faces.append([i10, i11, i01])
+
+    # Skip the whole placeholder (and its OSM tile fetch below) unless the
+    # gap actually reaches the grid's own INTERIOR — confirmed necessary,
+    # not a hypothetical: _erode_valid_mask() trims a few pixels off EVERY
+    # mosaic's own outer edge as a matter of course (item 33), which on its
+    # own produces a small but real border of "missing" cells around
+    # literally every site, fully-covered ones included. A fixed-fraction
+    # threshold doesn't work here either — confirmed live: that routine
+    # border alone was 4.5% of a smaller site's own grid (Fermoy, 88x88),
+    # comfortably past an initial 2% cutoff, since a FIXED pixel-width trim
+    # is a BIGGER fraction of a SMALLER grid, not a stable one. So instead:
+    # only keep the placeholder if some invalid point lies within the
+    # INTERIOR (past `NO_DATA_OVERLAY_EDGE_MARGIN` from the array's own
+    # true edge — the exact same margin `_fit_coverage_boundary_line()`
+    # already uses for the identical "is this a routine edge artefact or a
+    # real internal gap" question). Confirmed live: Fermoy's border is
+    # entirely within that margin (no interior gap -> correctly skipped
+    # now), while R32 E4F8's real half-covered 20ha parcel clearly reaches
+    # deep into the interior (kept, as it should be).
+    interior_row = np.array([NO_DATA_OVERLAY_EDGE_MARGIN <= r <= height - 1 - NO_DATA_OVERLAY_EDGE_MARGIN for r in row_indices])
+    interior_col = np.array([NO_DATA_OVERLAY_EDGE_MARGIN <= c <= width - 1 - NO_DATA_OVERLAY_EDGE_MARGIN for c in col_indices])
+    interior_mask = np.outer(interior_row, interior_col)
+    if not bool((~coarse_valid & interior_mask).any()):
+        no_data_vertices, no_data_faces = [], []
 
     # Overlay texture: the plot boundary is drawn now (always available);
     # roads are drawn later by attach_features() once the concurrent OSM
@@ -1512,6 +1542,34 @@ def get_terrain_mesh(
         buf = io.BytesIO()
         overlay_img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    # A real OpenStreetMap basemap for the no-data placeholder mesh above
+    # — asked for directly, alongside "show the full square": "use the
+    # OpenStreetMap view and stick that on that flat section... to give
+    # some perspective, but then draw the property boundary on top of
+    # it." Only fetched when there's actually a placeholder to texture —
+    # a fully-covered site pays nothing extra. The plot boundary line is
+    # baked directly onto this SAME image afterward (reusing
+    # `_draw_plot_boundary()` — same extent/centre, so it's pixel-aligned
+    # with the terrain's own overlay above by construction) so the
+    # placeholder mesh only ever needs ONE self-contained texture, not
+    # several composited layers on the frontend. No alpha-masking needed
+    # here (unlike get_satellite_overlay()) — the placeholder MESH's own
+    # geometry already only exists where there's no real data, so the
+    # texture just needs to cover the full square; nothing extra to hide.
+    no_data_map_png_base64 = None
+    if no_data_faces:
+        osm_mosaic = _fetch_map_mosaic(OSM_STANDARD_TILE_URL, center_lon, center_lat, {
+            "x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3],
+        }, TEXTURE_SIZE, headers={"User-Agent": OSM_TILE_USER_AGENT})
+        osm_img = Image.fromarray(osm_mosaic["rgb"], "RGB")
+        osm_draw = ImageDraw.Draw(osm_img)
+        _draw_plot_boundary(osm_draw, plot_geom, center_x, center_y, extent, TEXTURE_SIZE)
+        buf = io.BytesIO()
+        osm_img.save(buf, format="PNG")
+        no_data_map_png_base64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        log.info("-> No-data placeholder basemap (OpenStreetMap): zoom %d, %d/%d tile(s) fetched",
+                  osm_mosaic["zoom"], osm_mosaic["fetched"], osm_mosaic["tile_count"])
 
     log.info(
         "-> Terrain mesh: %d vertices, %d triangles (%.1fm grid, %dm padded context around the plot), %.1f-%.1fm, %s%% of the plot boundary itself covered",
@@ -1531,7 +1589,7 @@ def get_terrain_mesh(
         "origin_lat": center_lat,
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
         "boundary_lidar_coverage_fraction": boundary_lidar_coverage_fraction,
-        "no_data_overlay": {"vertices": no_data_vertices, "faces": no_data_faces} if no_data_faces else None,
+        "no_data_overlay": {"vertices": no_data_vertices, "faces": no_data_faces, "map_png_base64": no_data_map_png_base64} if no_data_faces else None,
         "overlay_texture_png_base64": _encode_overlay(),
         "buildings": [],
         "road_count": 0,
@@ -1662,46 +1720,46 @@ def _pick_satellite_zoom(lat: float, span_m: float, texture_size: int) -> int:
     return max(1, min(SATELLITE_MAX_ZOOM, z_for_resolution, z_for_tile_cap))
 
 
-def _fetch_satellite_tile(zoom: int, tile_x: int, tile_y: int) -> Optional[np.ndarray]:
-    """One 256x256 RGB tile from Esri World Imagery, or None if it
-    genuinely can't be fetched (a real network hiccup, or no imagery at
-    this location/zoom) — a missing tile degrades to a transparent gap in
-    the final overlay rather than failing the whole request, since this is
-    a visual enhancement layer, not core report data (same philosophy as
-    buildings.py's OSM fetch).
+def _fetch_xyz_tile(tile_url_template: str, zoom: int, tile_x: int, tile_y: int, headers: Optional[dict] = None) -> Optional[np.ndarray]:
+    """One 256x256 RGB tile from any standard {z}/{x}/{y} XYZ tile source —
+    generalized from the original Esri-only version so the same pipeline
+    can also drape OpenStreetMap's own standard tiles (see
+    `get_terrain_mesh()`'s no-data-area basemap). Named `.format()`
+    placeholders mean this works regardless of whether the URL orders them
+    z/x/y (OpenStreetMap's own convention) or z/y/x (Esri's own — see
+    SATELLITE_TILE_URL) — each template just puts `{z}`/`{x}`/`{y}` where
+    that source expects them. None if the tile genuinely can't be fetched
+    — degrades to a gap in the final image rather than failing the whole
+    request (a visual enhancement layer, not core report data, same
+    philosophy as buildings.py's OSM fetch).
     """
-    url = SATELLITE_TILE_URL.format(z=zoom, y=tile_y, x=tile_x)
+    url = tile_url_template.format(z=zoom, x=tile_x, y=tile_y)
     for attempt in range(2):
         try:
-            resp = requests.get(url, timeout=SATELLITE_TILE_TIMEOUT_S)
+            resp = requests.get(url, timeout=SATELLITE_TILE_TIMEOUT_S, headers=headers)
             resp.raise_for_status()
             return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
         except Exception as exc:
-            log.warning("Satellite tile fetch failed (attempt %d) for z=%d x=%d y=%d: %s", attempt + 1, zoom, tile_x, tile_y, exc)
+            log.warning("Map tile fetch failed (attempt %d) for z=%d x=%d y=%d (%s): %s", attempt + 1, zoom, tile_x, tile_y, tile_url_template, exc)
     return None
 
 
-def get_satellite_overlay(
-    polygon_ring_sets_wgs84: list,
-    origin_lon: float,
-    origin_lat: float,
-    grid_extent: dict,
-    texture_size: int = SATELLITE_TEXTURE_SIZE,
-) -> Optional[dict]:
-    """Real Esri World Imagery, resampled into the exact same local
-    mesh-coordinate frame get_terrain_mesh() already returned (`origin_lon`/
-    `origin_lat`/`grid_extent` — pass back exactly what that call returned,
-    so this overlay lines up on the SAME geometry/UVs with no risk of two
-    independently-computed frames drifting apart), masked to alpha=0
-    outside the real plot boundary polygon. None if the boundary itself is
-    invalid (mirrors get_terrain_mesh()'s own contract) — a real tile-fetch
-    failure does NOT fail the whole call, it just leaves transparent gaps
-    (see `_fetch_satellite_tile()`).
-    """
-    plot_geom = _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84)
-    if plot_geom is None or plot_geom.is_empty:
-        return None
+def _fetch_map_mosaic(tile_url_template: str, origin_lon: float, origin_lat: float, grid_extent: dict,
+                       texture_size: int, headers: Optional[dict] = None) -> dict:
+    """Shared pipeline: reprojects the mesh's own local coordinate frame to
+    Web Mercator pixel space (vectorized pyproj transform), fetches only
+    the real tiles actually needed from whatever XYZ source is given, and
+    samples an RGB image at `texture_size` resolution. Used by both
+    `get_satellite_overlay()` (Esri World Imagery, masked to the plot
+    boundary) and `get_terrain_mesh()`'s own no-data-area basemap
+    (OpenStreetMap standard tiles, unmasked — see there) — identical
+    reprojection/tile-fetch/sampling math either way, only the tile source
+    and what the caller does with the result differ.
 
+    Returns the sampled RGB array plus each texture pixel's own real ITM
+    (x, y) position (`itm_x`/`itm_y` — for a caller that wants to mask or
+    further composite the result) and the zoom/tile-count actually used.
+    """
     center_x, center_y = _to_itm.transform(origin_lon, origin_lat)
     x_min, x_max, y_min, y_max = grid_extent["x_min"], grid_extent["x_max"], grid_extent["y_min"], grid_extent["y_max"]
 
@@ -1739,7 +1797,7 @@ def get_satellite_overlay(
 
     mosaic = np.zeros(((tile_y1 - tile_y0 + 1) * SATELLITE_TILE_SIZE, (tile_x1 - tile_x0 + 1) * SATELLITE_TILE_SIZE, 3), dtype=np.uint8)
     with ThreadPoolExecutor(max_workers=8) as pool:
-        tiles = list(pool.map(lambda t: (t, _fetch_satellite_tile(zoom, t[0], t[1])), tile_coords))
+        tiles = list(pool.map(lambda t: (t, _fetch_xyz_tile(tile_url_template, zoom, t[0], t[1], headers)), tile_coords))
     fetched = 0
     for (tx, ty), tile in tiles:
         if tile is None:
@@ -1753,21 +1811,46 @@ def get_satellite_overlay(
     sample_row = np.clip((merc_y - origin_py).round().astype(int), 0, mosaic.shape[0] - 1)
     rgb = mosaic[sample_row, sample_col]
 
-    inside = shapely.contains_xy(plot_geom, itm_x, itm_y)
+    return {"rgb": rgb, "itm_x": itm_x, "itm_y": itm_y, "zoom": zoom, "tile_count": len(tile_coords), "fetched": fetched}
+
+
+def get_satellite_overlay(
+    polygon_ring_sets_wgs84: list,
+    origin_lon: float,
+    origin_lat: float,
+    grid_extent: dict,
+    texture_size: int = SATELLITE_TEXTURE_SIZE,
+) -> Optional[dict]:
+    """Real Esri World Imagery, resampled into the exact same local
+    mesh-coordinate frame get_terrain_mesh() already returned (`origin_lon`/
+    `origin_lat`/`grid_extent` — pass back exactly what that call returned,
+    so this overlay lines up on the SAME geometry/UVs with no risk of two
+    independently-computed frames drifting apart), masked to alpha=0
+    outside the real plot boundary polygon. None if the boundary itself is
+    invalid (mirrors get_terrain_mesh()'s own contract) — a real tile-fetch
+    failure does NOT fail the whole call, it just leaves transparent gaps
+    (see `_fetch_map_mosaic()`/`_fetch_xyz_tile()`).
+    """
+    plot_geom = _ring_sets_to_itm_polygon(polygon_ring_sets_wgs84)
+    if plot_geom is None or plot_geom.is_empty:
+        return None
+
+    mosaic = _fetch_map_mosaic(SATELLITE_TILE_URL, origin_lon, origin_lat, grid_extent, texture_size)
+    inside = shapely.contains_xy(plot_geom, mosaic["itm_x"], mosaic["itm_y"])
     rgba = np.zeros((texture_size, texture_size, 4), dtype=np.uint8)
-    rgba[..., :3] = rgb
+    rgba[..., :3] = mosaic["rgb"]
     rgba[..., 3] = np.where(inside, 255, 0).astype(np.uint8)
 
     buf = io.BytesIO()
     Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
     log.info("-> Satellite overlay: zoom %d, %d/%d tile(s) fetched, %.1f%% of texture inside the plot boundary",
-              zoom, fetched, len(tile_coords), 100.0 * inside.mean())
+              mosaic["zoom"], mosaic["fetched"], mosaic["tile_count"], 100.0 * inside.mean())
 
     return {
         "found": True,
         "satellite_overlay_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
-        "zoom_level": zoom,
-        "tile_count": len(tile_coords),
+        "zoom_level": mosaic["zoom"],
+        "tile_count": mosaic["tile_count"],
         "source": "Esri World Imagery (ArcGIS Online)",
     }
 

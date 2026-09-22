@@ -1944,6 +1944,66 @@ app, rather than the documented-but-dead endpoints:
       full-coverage case (nothing to show) correctly omits it entirely
       rather than sending an empty overlay.
 
+38. **Follow-up to item 37, asked directly: extend the placeholder to the
+    FULL padded square (not just inside the plot boundary), and drape a
+    real OpenStreetMap basemap on it "to give some perspective," with the
+    plot boundary drawn on top.**
+    - **`get_satellite_overlay()` refactored into a shared pipeline**
+      (`_fetch_map_mosaic()` + generalized `_fetch_xyz_tile()`) before
+      adding the new feature, rather than duplicating the whole
+      reprojection/tile-fetch/sampling pipeline a second time — the two
+      features (satellite imagery draped on the plot, OSM basemap draped
+      on the no-data gap) are the exact same math against a different XYZ
+      tile source. `_fetch_xyz_tile()`'s named `.format()` placeholders
+      handle both Esri's z/y/x URL convention and OpenStreetMap's own z/x/y
+      one transparently — confirmed the refactor was a pure no-op via the
+      satellite feature's own test (identical zoom/tile-count/output
+      afterward). Confirmed OpenStreetMap's standard tiles are fetchable
+      server-side with no API key (a descriptive `User-Agent` sent as
+      courtesy, matching the same policy already respected for Overpass
+      in `buildings.py` — not strictly required, confirmed both ways, but
+      the right thing to do for automated use).
+    - **`no_data_overlay` now covers the whole padded square**, not just
+      the part of the PLOT boundary lacking data — the `cell_inside_boundary`
+      restriction from item 37 was simply removed; every cell with no real
+      corner at all gets a placeholder now, inside or outside the plot
+      boundary, so the rendered area is always a complete surface.
+    - **A real basemap, not a flat colour**: `get_terrain_mesh()` now also
+      fetches an OpenStreetMap image for the placeholder's own footprint
+      (`_fetch_map_mosaic(OSM_STANDARD_TILE_URL, ...)`) and bakes the plot
+      boundary line directly onto that SAME image afterward (reusing
+      `_draw_plot_boundary()` with the identical extent/centre the real
+      terrain's own overlay texture uses, so it's pixel-aligned by
+      construction) — one self-contained `map_png_base64`, not several
+      textures the frontend has to composite. No alpha-masking needed
+      (unlike the plot-boundary-masked satellite overlay): the placeholder
+      MESH's own geometry already only exists where there's no data, so
+      the texture just needs correct UV alignment across the whole
+      square — verified visually: a real rendered basemap (roads, a
+      river, place names) with the actual irregular plot boundary drawn
+      in amber on top, matching the field/river shape from the live
+      report's own 2D map exactly.
+    - **A real regression caught by testing the FULLY-COVERED case again
+      after this change, not assumed fine**: extending the placeholder to
+      the full square meant even a fully-covered site (Fermoy) started
+      showing a small placeholder — `_erode_valid_mask()`'s routine few-
+      pixel trim around every mosaic's own outer edge (item 33) is real
+      and universal, and now visible/costly wherever it fell. A first
+      fix attempt (skip if under a fixed 2% area fraction) was ALSO wrong,
+      confirmed live: that routine border was 4.5% of Fermoy's own
+      (smaller) grid — a fixed pixel-width trim is a bigger FRACTION of a
+      smaller grid, not a stable threshold across site sizes. Fixed
+      properly: only keep the placeholder (and pay for the OSM fetch) if
+      the gap reaches the grid's own INTERIOR — past `NO_DATA_OVERLAY_EDGE_MARGIN`
+      from the array's true edge, reusing the exact same margin
+      `_fit_coverage_boundary_line()` (item 36) already established for
+      telling a routine edge artefact apart from a real internal gap.
+      Confirmed live both ways: Fermoy's routine border is now correctly
+      confined to the margin (no placeholder, 0.4s, no OSM fetch at all)
+      while R32 E4F8's real half-covered 20ha/10.7ha parcels still
+      correctly trigger it (reaching deep into the interior, as a genuine
+      truncation should).
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
