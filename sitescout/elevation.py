@@ -929,6 +929,7 @@ def _median_smooth(arr: np.ndarray, size: int = MESH_SMOOTHING_WINDOW) -> np.nda
 
 
 MESH_EDGE_TRIM_PIXELS = 3  # see _erode_valid_mask() — real user report of anomalies right at a genuine LIDAR coverage edge
+MESH_EDGE_TRIM_MARGIN_M = 20  # get_terrain_mesh() fetches this much EXTRA around the render radius so _erode_valid_mask()'s own edge trim lands outside the visible area — see its use there for the real bug this fixes
 
 
 def _erode_valid_mask(valid: np.ndarray, pixels: int) -> np.ndarray:
@@ -1264,7 +1265,27 @@ def get_terrain_mesh(
     center_lon, center_lat, radius_m = center
     center_x, center_y = _to_itm.transform(center_lon, center_lat)
 
-    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m, require_data_at_point=False)
+    # Fetch a bit MORE than the final render radius, specifically so
+    # _erode_valid_mask()'s own outer-edge trim (below) lands outside the
+    # visible area, not on it — a real bug, found from a real screenshot:
+    # that erosion treats the mosaic's own array boundary as a "transition"
+    # too (see its docstring), so once the no-data placeholder (item 38)
+    # started showing every missing cell, this routine trim appeared as a
+    # thin, wrong-looking OpenStreetMap sliver along the THREE sides that
+    # were never actually truncated — only R32 E4F8's real diagonal edge
+    # (the fourth side) should ever show one. Confirmed directly: 162
+    # placeholder vertices existed hugging the TOP edge, well away from
+    # the real diagonal side, before this fix. Fetching
+    # `radius_m + MESH_EDGE_TRIM_MARGIN_M` and cropping the margin back off
+    # AFTER erosion means the erosion's own "pad outside the array as
+    # invalid" effect happens on real tile data safely beyond what's ever
+    # rendered (comfortably inside `_find_touching_tiles()`'s own already-
+    # generous 1.5x over-fetch) rather than on the render boundary itself
+    # — if real coverage genuinely does end within that margin (like the
+    # diagonal side genuinely does), the trim still correctly shows there;
+    # it just no longer falsely appears on sides where real data actually
+    # continues well past the crop.
+    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m + MESH_EDGE_TRIM_MARGIN_M, require_data_at_point=False)
     if not mosaic:
         log.info("-> No precise LIDAR coverage for this plot boundary")
         return None
@@ -1273,11 +1294,19 @@ def get_terrain_mesh(
     if plot_geom is None or plot_geom.is_empty:
         return None
 
-    arr = _median_smooth(mosaic["array"])  # see _median_smooth() — suppresses sensor-noise "tearing" in the lit 3D surface, not applied to the raw mosaic other callers use
-    valid_mask = _erode_valid_mask(arr > -9999, MESH_EDGE_TRIM_PIXELS)  # crops a few pixels back from any NoData transition — see _erode_valid_mask()'s own docstring for why (real sensor/edge artifacts right at a genuine coverage boundary)
-    ext = mosaic["ext"]
-    ext_left, ext_top, ext_right, ext_bottom = ext
+    arr_padded = _median_smooth(mosaic["array"])  # see _median_smooth() — suppresses sensor-noise "tearing" in the lit 3D surface, not applied to the raw mosaic other callers use
+    valid_mask_padded = _erode_valid_mask(arr_padded > -9999, MESH_EDGE_TRIM_PIXELS)  # crops a few pixels back from any NoData transition — see _erode_valid_mask()'s own docstring for why (real sensor/edge artifacts right at a genuine coverage boundary)
     resolution = mosaic["resolution"]
+    margin_px = max(1, round(MESH_EDGE_TRIM_MARGIN_M / resolution))
+    h_padded, w_padded = arr_padded.shape
+    arr = arr_padded[margin_px:h_padded - margin_px, margin_px:w_padded - margin_px]
+    valid_mask = valid_mask_padded[margin_px:h_padded - margin_px, margin_px:w_padded - margin_px]
+    ext_padded = mosaic["ext"]
+    ext = (
+        ext_padded[0] + margin_px * resolution, ext_padded[1] - margin_px * resolution,
+        ext_padded[2] - margin_px * resolution, ext_padded[3] + margin_px * resolution,
+    )
+    ext_left, ext_top, ext_right, ext_bottom = ext
     height, width = arr.shape
 
     step = max(1, int(np.ceil(max(height, width) / MESH_MAX_GRID_SIZE)))

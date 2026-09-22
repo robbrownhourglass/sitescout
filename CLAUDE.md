@@ -2004,6 +2004,46 @@ app, rather than the documented-but-dead endpoints:
       correctly trigger it (reaching deep into the interior, as a genuine
       truncation should).
 
+39. **Follow-up to item 38, real user report with a screenshot: the
+    no-data placeholder's OSM map was visible as a thin, wrong sliver
+    along the THREE sides of the render area that were never actually
+    truncated, not just the real diagonal edge — "I don't know why we're
+    cropping those edges in."** Traced directly, not guessed: item 38's
+    interior-reaching check is a single binary gate for the WHOLE
+    placeholder mesh — once R32 E4F8's genuine diagonal gap made that
+    check pass, EVERY missing cell got included, including the routine
+    few-pixel erosion border item 33 already puts around all four sides
+    of every mosaic regardless of real coverage (item 33's own trade-off,
+    "harmless" only as long as nothing ever rendered it — no longer true
+    once item 38 started drawing a map there). Confirmed directly before
+    fixing: 162 placeholder vertices sat hugging the TOP edge, nowhere
+    near the real (left-side) diagonal truncation.
+    - **Fix: fetch `radius_m + MESH_EDGE_TRIM_MARGIN_M` (20m) instead of
+      exactly `radius_m`, erode on that padded array, THEN crop the
+      margin back off before building anything** — so
+      `_erode_valid_mask()`'s own "pad outside the array as invalid"
+      side-effect lands on real tile data safely beyond what's ever
+      rendered (comfortably inside `_find_touching_tiles()`'s already-
+      generous 1.5x search-radius over-fetch, so no extra tiles are
+      typically needed) rather than directly on the render boundary. The
+      final rendered/mesh area is completely unchanged in size — only
+      WHERE the erosion's own edge-padding artefact lands moves, from the
+      visible crop edge to comfortably outside it. If real coverage
+      genuinely does end within that 20m margin (as it genuinely does on
+      the diagonal side), the trim still correctly shows there — this
+      only removes the FALSE trim on sides where real data actually
+      continues well past the crop, which is what was wrong.
+    - Confirmed live, precisely: the same 162-vertices-near-the-top-edge
+      check now returns 0, while the real diagonal-side placeholder still
+      exists (3,024 faces, a sane size for just that one genuine gap) —
+      and confirmed visually with a rendered top-down comparison: the
+      placeholder now appears ONLY along the real diagonal edge, with the
+      other three sides fully real terrain, no seam or border. Re-verified
+      both regression cases: Fermoy (fully covered) still shows no
+      placeholder at all (0.35s, no OSM fetch), and R32 E4F8's real
+      20ha/10.7ha partially-covered parcels are unaffected
+      (`boundary_lidar_coverage_fraction` unchanged at 0.53/0.39).
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
