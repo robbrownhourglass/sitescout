@@ -312,6 +312,16 @@
 // with what /api/historical-tile actually serves.
 const HISTORICAL_LAYERS = {{ historical_layers | tojson }};
 
+// Also from historical_maps.py (MAX_USABLE_ZOOM) — the real zoom ceiling
+// shared by every one of these layers (all 10 share one identical LOD
+// pyramid, confirmed live — see that module's own docstring), past which
+// there's no real extra resolution to show. Real user report: zooming
+// past this just showed Tailte's own "Data not available at this scale"
+// placeholder tiling the screen. See setBaseLayer() below for how this
+// caps the map itself, not just what tiles get requested.
+const HISTORICAL_MAX_ZOOM = {{ historical_max_zoom | tojson }};
+const STANDARD_MAX_ZOOM = 21;
+
 const statusEl = document.getElementById('topbarStatus');
 const heroStatusEl = document.getElementById('heroStatus');
 const heroStatusTextEl = document.getElementById('heroStatusText');
@@ -360,6 +370,7 @@ let resultsModeEntered = false;
 let searchGeneration = 0;  // bumped per search; guards against a stale background fetch from a previous search overwriting the current one
 let currentLoc = null;
 let currentEircode = null;
+let currentSectionNames = []; // from /api/scout's own response — reused by refetchAllSectionsAt() when the confirmed plot corrects the query point (see confirmPlotSelection)
 let allParcels = [];
 let selectedParcelIds = new Set();
 let pickerLayerGroup = null;
@@ -584,7 +595,10 @@ function ensureMap(){
   HISTORICAL_LAYERS.forEach(entry => {
     baseLayers[entry.key] = L.tileLayer(`/api/historical-tile/${entry.key}/{z}/{x}/{y}.png`, {
       attribution: 'Tailte Éireann (MapGenie), personal/non-commercial use — see CLAUDE.md',
-      maxZoom: 21, maxNativeZoom: 19,
+      // Capped at the real ceiling all 10 of these layers share (see
+      // HISTORICAL_MAX_ZOOM above) — not 21 like Street/Satellite, since
+      // there's no real extra resolution past this for ANY of them.
+      maxZoom: HISTORICAL_MAX_ZOOM, maxNativeZoom: HISTORICAL_MAX_ZOOM,
     });
   });
 
@@ -698,6 +712,21 @@ function setBaseLayer(key){
   baseLayers[key].addTo(map);
   activeBaseKey = key;
   updateBaseLayerToggleUI();
+
+  // Real user report: switching to a historical layer (see
+  // HISTORICAL_LAYERS/HISTORICAL_MAX_ZOOM above) while already zoomed in
+  // past its own real resolution just showed a screen full of Tailte's
+  // "Data not available at this scale" placeholder. Capping the MAP's own
+  // zoom ceiling (not just the layer's maxZoom) means the zoom
+  // controls/scroll-wheel themselves stop at the real limit while a
+  // historical layer is active — asked for directly, not just "let it
+  // blur past that point" — and immediately backing the current zoom
+  // down to that cap if already past it is the "already zoomed in too
+  // much, back out" half of the same ask. Restored to the normal ceiling
+  // the moment the user switches back to Street/Satellite.
+  const cap = HISTORICAL_LAYERS.some(e => e.key === key) ? HISTORICAL_MAX_ZOOM : STANDARD_MAX_ZOOM;
+  map.setMaxZoom(cap);
+  if(map.getZoom() > cap) map.setZoom(cap);
 }
 
 // Populates #baseLayerPanel (opened via the "..." button next to the
@@ -806,6 +835,87 @@ function geometryToRingSets(geometry){
   if(geometry.type === 'Polygon') return [ringsToLatLngs(geometry.coordinates)];
   if(geometry.type === 'MultiPolygon') return geometry.coordinates.map(poly => ringsToLatLngs(poly));
   return [];
+}
+
+// ---- Pin/parcel correction (see confirmPlotSelection): the geocoded
+// search pin is only ever area/postcode-level accurate (the Eircode
+// coordinate-precision saga in CLAUDE.md), and can genuinely land in a
+// DIFFERENT, nearby parcel from whichever one(s) the user actually
+// confirms in the picker. These two helpers find "the real point to use
+// from here on" once that's known — a real fix, not a display tweak,
+// since every point-based check (radius searches, point-in-polygon
+// overlaps like SMR Zone) fetched so far was anchored to the original pin.
+
+// Standard ray-casting point-in-polygon test — the same textbook
+// algorithm elevation.py's own _point_in_ring/_point_in_polygon already
+// uses server-side (CLAUDE.md item 19), ported here since this correction
+// needs it client-side. `ring` is a plain array of [lon, lat] pairs (the
+// raw cadastral convention returned by /api/scout — NOT the [lat, lng]
+// form ringsToLatLngs() produces for Leaflet).
+function pointInRing(lon, lat, ring){
+  let inside = false;
+  for(let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    if(((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)){
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// A cadastral parcel's `polygon_rings_wgs84` is [outer, ...holes] (Esri's
+// own `rings` convention, same as elsewhere in this app) — inside the
+// outer ring and outside every hole.
+function pointInParcel(lon, lat, parcel){
+  const rings = parcel.polygon_rings_wgs84;
+  if(!rings || !rings.length || !pointInRing(lon, lat, rings[0])) return false;
+  for(let h = 1; h < rings.length; h++){
+    if(pointInRing(lon, lat, rings[h])) return false;
+  }
+  return true;
+}
+
+// Area + area-weighted centroid of a single ring (shoelace formula,
+// standard textbook technique — treats lon/lat as flat Cartesian, an
+// accepted simplification at this scale/precision, same one the
+// point-in-polygon test above already makes). Returns null for a
+// degenerate (zero-area) ring, which real cadastral data never produces.
+function ringAreaCentroid(ring){
+  let a = 0, cx = 0, cy = 0;
+  for(let i = 0; i < ring.length - 1; i++){
+    const x0 = ring[i][0], y0 = ring[i][1];
+    const x1 = ring[i + 1][0], y1 = ring[i + 1][1];
+    const cross = x0 * y1 - x1 * y0;
+    a += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  a *= 0.5;
+  if(Math.abs(a) < 1e-14) return null;
+  return { area: Math.abs(a), lon: cx / (6 * a), lat: cy / (6 * a) };
+}
+
+// Area-weighted centroid across every selected parcel's own outer ring
+// (holes ignored — negligible effect on "roughly the middle of this
+// site"). Falls back to a plain vertex average if every ring is somehow
+// degenerate (never happens with real data, but never divide by zero).
+function parcelsCentroid(parcels){
+  let totalArea = 0, sumLon = 0, sumLat = 0;
+  const allPoints = [];
+  parcels.forEach(p => {
+    const outer = p.polygon_rings_wgs84 && p.polygon_rings_wgs84[0];
+    if(!outer || outer.length < 3) return;
+    outer.forEach(pt => allPoints.push(pt));
+    const c = ringAreaCentroid(outer);
+    if(c){ totalArea += c.area; sumLon += c.lon * c.area; sumLat += c.lat * c.area; }
+  });
+  if(totalArea > 0) return { lon: sumLon / totalArea, lat: sumLat / totalArea };
+  if(allPoints.length) return {
+    lon: allPoints.reduce((s, p) => s + p[0], 0) / allPoints.length,
+    lat: allPoints.reduce((s, p) => s + p[1], 0) / allPoints.length,
+  };
+  return null;
 }
 
 // Resets the map's overlays for a fresh search. Overlay visibility is now
@@ -1693,6 +1803,35 @@ function onSectionArrived(name){
   });
 }
 
+// Re-runs every non-boundary section against a corrected point — called
+// from confirmPlotSelection() when the original geocoded pin turns out
+// not to actually fall inside whatever the user just confirmed (see the
+// point-in-polygon/centroid helpers above). Every section fetched so far
+// was anchored to the OLD point, including any real overlap/radius check
+// (e.g. SMR Zone) that should have been checked against the actual
+// selected plot instead. Reuses fetchSectionsInBackground() exactly as
+// the initial search does; bumping searchGeneration both invalidates any
+// still-in-flight fetch from the old point and reuses that function's
+// own existing stale-fetch guard here too, so no separate guard is
+// needed for this second wave of fetches.
+function refetchAllSectionsAt(lat, lon){
+  const myGeneration = ++searchGeneration;
+
+  // Drop every already-built overlay layer group — each was built from
+  // the OLD point's data and would otherwise sit on the map duplicated
+  // alongside whatever the corrected re-fetch builds next.
+  Object.values(tileLayerGroups).flat().forEach(group => { if(map.hasLayer(group)) map.removeLayer(group); });
+  tileLayerGroups = {};
+
+  currentSectionNames.forEach(name => { delete sectionData[name]; delete sectionErrored[name]; });
+  TILE_SPECS.forEach(spec => { if(spec.key !== 'boundary') refreshTile(spec); });
+  if(activeTileKey && activeTileKey !== 'boundary'){
+    openDetail(TILE_SPECS.find(s => s.key === activeTileKey)); // shows the loading state again, same as the very first fetch
+  }
+
+  fetchSectionsInBackground(currentSectionNames, lat, lon, currentEircode, currentLoc && currentLoc.label, myGeneration);
+}
+
 // ---- Plot picker: draws every nearby cadastral parcel as a clickable
 // polygon. The one the search point actually landed in starts selected
 // (highlighted); clicking any parcel toggles it in/out of the selection.
@@ -1770,6 +1909,37 @@ function confirmPlotSelection(){
   if(pickerLayerGroup){ map.removeLayer(pickerLayerGroup); pickerLayerGroup = null; }
   plotPickerEl.style.display = 'none';
 
+  // Real user report: the geocoded search pin (area/postcode-level at
+  // best — see the coordinate-precision saga in CLAUDE.md) had landed in
+  // a DIFFERENT parcel from the one actually selected here, but every
+  // section fetched so far (radius searches, point-in-polygon overlaps
+  // like SMR Zone) was still anchored to that stale pin. Asked for
+  // directly: use the pin only if it's genuinely inside what got
+  // selected; otherwise re-anchor on the selection's own centre and
+  // re-fetch everything against THAT point instead.
+  const pinLon = currentLoc ? currentLoc.lon : null;
+  const pinLat = currentLoc ? currentLoc.lat : null;
+  const pinInsideSelection = pinLat != null && selected.some(p => pointInParcel(pinLon, pinLat, p));
+  let effectiveLat = pinLat, effectiveLon = pinLon;
+  if(!pinInsideSelection && selected.length){
+    const c = parcelsCentroid(selected);
+    if(c){ effectiveLat = c.lat; effectiveLon = c.lon; }
+  }
+  const pointCorrected = selected.length && currentLoc && (effectiveLat !== pinLat || effectiveLon !== pinLon);
+
+  // The pin only ever showed where the geocoder guessed, which can now be
+  // a visibly wrong spot relative to the plot actually confirmed (asked
+  // for directly: "we want the original search pin to disappear") — the
+  // boundary polygon drawn below is the real "where is this" indicator
+  // from here on.
+  if(marker){ map.removeLayer(marker); marker = null; }
+
+  if(pointCorrected){
+    currentLoc.lat = effectiveLat;
+    currentLoc.lon = effectiveLon;
+    refetchAllSectionsAt(effectiveLat, effectiveLon);
+  }
+
   // Always drawn once confirmed — no checkbox, no theme membership (asked
   // for directly: "we always have... the actual property boundary as
   // well", regardless of whichever theme is open).
@@ -1781,7 +1951,8 @@ function confirmPlotSelection(){
   // Zoom back out from plot-picking detail to see the wider 2km-radius
   // context (SMR zones, ecology designations, etc.) that the other
   // sections cover. flyTo (not setView) so this reads as one smooth,
-  // animated zoom-out rather than an instant jump.
+  // animated zoom-out rather than an instant jump. Centred on the
+  // (possibly just-corrected) point above, not the stale original pin.
   if(currentLoc) map.flyTo([currentLoc.lat, currentLoc.lon], 15, { duration: 1 });
 }
 
@@ -1797,6 +1968,7 @@ function startPlotConfirmation(data){
   const loc = data.location;
   currentLoc = loc;
   currentEircode = data.eircode;
+  currentSectionNames = data.section_names || [];
 
   ensureMap();
   clearOverlayLayers();

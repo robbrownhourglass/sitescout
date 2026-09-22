@@ -63,7 +63,11 @@ def index():
         {"key": key, "label": v["label"], "kind": v["kind"]}
         for key, v in historical_maps.HISTORICAL_LAYERS.items()
     ]
-    return render_template("index.html", historical_layers=historical_layers)
+    return render_template(
+        "index.html",
+        historical_layers=historical_layers,
+        historical_max_zoom=historical_maps.MAX_USABLE_ZOOM,
+    )
 
 
 @app.post("/api/scout")

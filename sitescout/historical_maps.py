@@ -81,6 +81,28 @@ log = logging.getLogger("sitescout.historical_maps")
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "historical_tiles"
 SOURCE_TILE_TIMEOUT_S = 15
 OUTPUT_TILE_SIZE = 256
+
+# Real user report: at a deep enough zoom, every one of these layers just
+# shows Tailte's own "Data not available at this scale" placeholder
+# (see _looks_like_placeholder_tile above) instead of rendering — asked
+# directly not to let the map zoom in further than these layers can
+# actually show. All 10 services share one identical 13-level LOD
+# pyramid (confirmed live for every one of them, not assumed to
+# generalize from checking just one or two — see module docstring),
+# bottoming out at 0.26458386250105836 m/px — converted to the nearest
+# equivalent standard Leaflet zoom at a representative Irish latitude
+# (53.35N, the same default map-centre latitude used elsewhere in this
+# app) via the standard Web-Mercator resolution formula, floored so this
+# never claims a finer real resolution than is actually confirmed. Sent
+# to the frontend (see webapp.py's index() route) as the real ceiling
+# for every historical layer's own Leaflet maxZoom/maxNativeZoom, and to
+# clamp the map back to it if the user switches to one of these layers
+# while already zoomed in past it.
+_HISTORICAL_LOD_FINEST_RESOLUTION_M = 0.26458386250105836
+_HISTORICAL_REFERENCE_LATITUDE = 53.35
+MAX_USABLE_ZOOM = math.floor(math.log2(
+    156543.03392 * math.cos(math.radians(_HISTORICAL_REFERENCE_LATITUDE)) / _HISTORICAL_LOD_FINEST_RESOLUTION_M
+))
 SOURCE_TILE_SIZE = 256
 MAX_SOURCE_TILES_PER_SIDE = 4  # a 256px output tile should only ever need 1-2 source tiles per side at a matched resolution; this is a safety cap, not a normal case
 
@@ -153,6 +175,30 @@ HISTORICAL_LAYERS = {
     },
 }
 
+# Tailte Éireann's own MapGenie tile cache serves a literal "Data not
+# available at this scale" placeholder image (with a diagonal "Tailte
+# Éireann" watermark baked in) for deep-zoom source tiles past wherever
+# real map/imagery content actually exists — confirmed by fetching one
+# directly and looking at it, not assumed from a metadata field: every
+# one of the 10 services' own tileInfo/maxScale claims genuine coverage
+# all the way to the deepest LOD (0.26m/px, level 12), but a real rural
+# tile at that exact depth came back as this placeholder instead (8-9
+# distinct RGB colours in a 256x256 crop, vs 130+ for the SAME area's
+# real content one LOD coarser, and vs several confirmed neighbouring
+# level-12 tiles all landing in that same 8-9 range) — real drawn map
+# detail or photographed imagery never comes close to that few distinct
+# colours, so this is a safe, general signal, not something tuned to one
+# specific tile. Since it's served with a normal 200 (not a 404), it
+# can't be filtered the same way as a genuine tile-cache gap — detected
+# instead by real content richness, checked once per fetched tile.
+_PLACEHOLDER_MAX_UNIQUE_COLORS = 24
+
+
+def _looks_like_placeholder_tile(img: np.ndarray) -> bool:
+    sample = img.reshape(-1, img.shape[-1])
+    return len(np.unique(sample, axis=0)) <= _PLACEHOLDER_MAX_UNIQUE_COLORS
+
+
 _tile_info_cache: dict = {}  # base_url -> parsed tileInfo, fetched once per running process
 
 
@@ -190,7 +236,10 @@ def _fetch_source_tile(layer_key: str, base_url: str, level: int, row: int, col:
     path = _source_cache_path(layer_key, level, row, col)
     if path.exists():
         try:
-            return np.array(Image.open(path).convert("RGB"))
+            img = np.array(Image.open(path).convert("RGB"))
+            if _looks_like_placeholder_tile(img):
+                return None
+            return img
         except Exception:
             pass  # corrupt cache entry -- fall through and refetch
     url = f"{base_url}/tile/{level}/{row}/{col}"
@@ -200,11 +249,20 @@ def _fetch_source_tile(layer_key: str, base_url: str, level: int, row: int, col:
             if resp.status_code == 404:
                 return None  # a real gap in this historical layer's own coverage here -- not every series covers every tile
             resp.raise_for_status()
+            img = np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+            if _looks_like_placeholder_tile(img):
+                # A real 200, but Tailte's own "no content at this scale
+                # here" placeholder (see _looks_like_placeholder_tile's own
+                # docstring above) -- treat it exactly like a genuine gap,
+                # and deliberately don't cache it: caching would just lock
+                # in a permanent false gap if this area ever gets deeper
+                # real coverage added upstream later.
+                return None
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_suffix(".tmp")
             tmp_path.write_bytes(resp.content)
             tmp_path.rename(path)
-            return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+            return img
         except Exception as exc:
             log.warning("Historical source tile fetch failed (attempt %d) for %s z=%d row=%d col=%d: %s",
                         attempt + 1, layer_key, level, row, col, exc)

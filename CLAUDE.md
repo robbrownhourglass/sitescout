@@ -2291,6 +2291,129 @@ app, rather than the documented-but-dead endpoints:
       spot-checked layers return real 256x256 PNGs at a known-covered
       location, and a bogus layer key correctly 404s.
 
+44. **Two real user-reported bugs with screenshots, both in the plot-
+    confirmation flow and the new historical-layers picker (item 43) —
+    fixed together.**
+    - **The geocoded search pin can land in a different parcel from the
+      one actually confirmed, and every point-based section stayed
+      anchored to that stale pin.** Reported with a screenshot: at
+      R32 F624, the pin (area/postcode-level only — the Eircode
+      coordinate-precision saga above) landed inside a small 1.994ha
+      parcel, but the user selected a different, much larger (20.266ha)
+      one in the picker; every background section (radius searches,
+      point-in-polygon overlap checks like SMR Zone) had already been
+      fetched against the ORIGINAL pin, before the user picked anything —
+      confirmed live: the pin genuinely sits outside the real selected
+      parcel's own polygon (a plain ray-cast point-in-polygon test against
+      the real captured geometry), a real correctness bug, not a display
+      glitch. Asked for directly: "if the pin is not inside any of the
+      parcels selected, let's just choose the center of the parcel as the
+      exact pin," and re-check everything against that corrected point —
+      plus make the original pin marker disappear once a plot's confirmed
+      (the boundary polygon is the real "where is this" indicator from
+      then on, and a leftover pin sitting outside it is actively
+      misleading).
+      - `pointInParcel()`/`pointInRing()` — the same textbook ray-casting
+        point-in-polygon algorithm `elevation.py`'s own
+        `_point_in_ring`/`_point_in_polygon` already use server-side (item
+        19), ported to JS since this correction has to happen client-side
+        (the picker already has full parcel geometry, no round-trip
+        needed). `ringAreaCentroid()`/`parcelsCentroid()` — a standard
+        shoelace-formula area-weighted polygon centroid (real, not
+        approximated by a plain vertex average, though that's the
+        fallback for the never-actually-happens degenerate-ring case) —
+        the same "verified textbook algorithm, not hand-waved" standard
+        this app holds itself to everywhere else geometry is involved.
+      - `confirmPlotSelection()`: checks whether the original pin falls
+        inside ANY selected parcel; if not, re-anchors on the selection's
+        own area-weighted centroid (across every selected parcel if
+        merged) and calls a new `refetchAllSectionsAt(lat, lon)` — which
+        clears every already-built overlay layer group (they were built
+        from the OLD point's data and would otherwise sit on the map
+        duplicated), resets every non-boundary tile back to its pending
+        state, and re-runs `fetchSectionsInBackground()` exactly as the
+        initial search does, reusing its own `searchGeneration` guard so
+        a still-in-flight fetch from the stale point can't land after and
+        overwrite the corrected results. The marker is removed
+        unconditionally on confirm (not just when a correction happens),
+        matching "we want the original search pin to disappear" literally.
+      - **Deliberately scoped to correcting the QUERY POINT, not to a
+        full point-in-polygon(check every layer overlaps the parcel's
+        real shape)** — the user's own SMR Zone example was diagnosing
+        WHY the bug mattered ("it only flags if there's a zone literally
+        over the pin, whereas any overlap with the parcel would be an
+        issue"), not asking for a second, much larger project (every
+        polygon-based source becoming a real polygon-vs-polygon
+        intersection query instead of point-radius). Re-anchoring on the
+        real parcel's own centre directly addresses the reported failure
+        mode without that much larger scope change — a genuinely
+        different, bigger ask were it to come up on its own.
+      - Verified end-to-end via the same jsdom+Leaflet-mock pattern used
+        throughout this session, this time against the REAL captured
+        `/api/scout` response for R32 F624 (not synthetic parcels): three
+        scenarios confirmed — (1) the exact reported case (deselect the
+        pin's own small parcel, select the real large one) correctly
+        removes the marker, corrects `currentLoc` to the selected
+        parcel's real computed centroid, and re-fetches every section
+        with that corrected lat/lon in the request; (2) the pin already
+        inside the confirmed selection (the common case) still removes
+        the marker but leaves `currentLoc` and all fetched data untouched
+        — no wasted re-fetch; (3) confirming with nothing selected at all
+        doesn't throw and leaves the point unchanged (nothing to correct
+        against).
+    - **Historical map/imagery layers (item 43) showed Tailte Éireann's
+      own "Data not available at this scale" placeholder tiling the whole
+      screen once zoomed in far enough.** Confirmed directly, not
+      assumed: fetched the exact real source tile at the zoom level where
+      this appeared and looked at it — a genuine upstream placeholder
+      image (with a diagonal "Tailte Éireann" watermark) baked into a
+      normal 200 response, not a 404 our own gap-handling already caught.
+      All 10 MapGenie services share one identical 13-level LOD pyramid
+      (confirmed live for every one of them, not just the 2 the original
+      module docstring checked), bottoming out at a real 0.26458m/px —
+      but that deepest level turns out to be genuinely SPARSE (real
+      content in some areas, this placeholder in others, e.g. confirmed a
+      real rural Laois parcel has none at that depth even though the
+      service's own metadata claims full coverage to it), so a purely
+      metadata-driven cutoff wasn't enough on its own.
+      - **Two complementary fixes, not alternatives**: (1)
+        `_looks_like_placeholder_tile()` in `historical_maps.py` — the
+        placeholder has dramatically less real colour variety than any
+        genuine map/imagery content (confirmed directly: 8-9 distinct
+        RGB colours in a 256x256 crop for several confirmed placeholder
+        tiles, vs 130+ for the SAME area's real content one LOD coarser;
+        real drawn maps or photographed imagery never come close to that
+        few distinct colours, so this is safe for every layer including
+        satellite imagery, not tuned to one tile). A detected placeholder
+        is treated exactly like a genuine tile-cache 404 (returns `None`,
+        the Flask route 404s, the frontend shows a blank/transparent tile
+        instead of ugly text) and deliberately NOT written to the on-disk
+        cache, so it re-checks rather than permanently locking in a false
+        gap. (2) `MAX_USABLE_ZOOM` — the deepest LOD's real resolution
+        converted to an equivalent standard Leaflet zoom (18, confirmed:
+        z17 in the real test case picks the coarser, always-real LOD 11;
+        z18 is exactly where LOD 12's placeholder risk starts) is now
+        exposed to the frontend (`webapp.py`'s `index()` route) and used
+        as every historical layer's own `maxZoom`/`maxNativeZoom` —
+        deliberately lower than Street/Satellite's 21, since there's no
+        real extra resolution to show any of these 10 layers past it.
+      - **The zoom ceiling is enforced on the MAP itself, not just the
+        layer, and applied retroactively** — asked for directly ("don't
+        allow ourselves to zoom in more than technically able to... if
+        already zoomed in too much, back out to the maximum zoom that
+        layer will allow"). `setBaseLayer()` now calls `map.setMaxZoom()`
+        on every switch (18 for a historical layer, back to 21 for
+        Street/Satellite) and immediately `map.setZoom()`s down if the
+        current zoom is already past the new cap — a genuine "back out"
+        on switch, not just a quiet cap on future zooming-in.
+      - Verified live end-to-end: the exact real tile that showed the
+        placeholder before this fix now 404s cleanly (confirmed via a
+        cleared cache directory, so it wasn't just serving a stale
+        already-cached response); a real z17 tile for the same layer/area
+        still returns genuine content unaffected; a spot-checked
+        satellite-imagery tile is unaffected by the new placeholder check
+        (real photos never trip the low-colour-variety threshold).
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
