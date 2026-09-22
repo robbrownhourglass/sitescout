@@ -241,6 +241,13 @@ def print_report(report: dict) -> None:
             depth_label = f"{well['water_strike_m']}m water strike" if well["water_strike_m"] is not None else "no recorded depth"
             print(f"    - {well['gsi_ref']} ({well['source_type'] or 'unknown type'}): {depth_label}")
         print(f"  {w['caveat']}")
+        for source_type, est in (w.get("depth_estimates") or {}).items():
+            if est.get("estimated_depth_m") is not None:
+                print(f"  Estimated {source_type.lower()} water-strike depth: ~{est['estimated_depth_m']}m "
+                      f"(from {est['sample_count']} real record(s) within {est['search_radius_m']}m, "
+                      f"range {est['min_depth_m']}-{est['max_depth_m']}m)")
+            else:
+                print(f"  {est.get('note')}")
 
     if "biodiversity" in s:
         b = s["biodiversity"]
@@ -528,6 +535,13 @@ def _to_markdown(report: dict) -> str:
             depth_label = f"{well['water_strike_m']}m water strike" if well["water_strike_m"] is not None else "no recorded depth"
             lines.append(f"- {well['gsi_ref']} ({well['source_type'] or 'unknown type'}): {depth_label}")
         lines.append(f"> {w['caveat']}")
+        for source_type, est in (w.get("depth_estimates") or {}).items():
+            if est.get("estimated_depth_m") is not None:
+                lines.append(f"- Estimated {source_type.lower()} water-strike depth: ~{est['estimated_depth_m']}m "
+                              f"(from {est['sample_count']} real record(s) within {est['search_radius_m']}m, "
+                              f"range {est['min_depth_m']}-{est['max_depth_m']}m)")
+            else:
+                lines.append(f"- {est.get('note')}")
         lines.append("")
 
     if "biodiversity" in s:

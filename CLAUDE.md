@@ -2661,6 +2661,81 @@ app, rather than the documented-but-dead endpoints:
       not an error), and the map layer's marker sizing/popup content for
       both a well with and without a recorded depth.
 
+49. **Follow-up to item 48: a distance-weighted water-table depth
+    ESTIMATE, asked for directly** ("could we model the aquifer depth...
+    based on the samples we do have?") — but only built after real
+    investigation confirmed it was justified, not assumed reasonable:
+    - **Checked real published hydrogeology first**: the Hydrogeology
+      Journal's typology of Irish hard-rock aquifers confirms Irish
+      bedrock groundwater flow is fracture-controlled, concentrated near
+      the surface, declining with depth. The user's own hypothesis
+      ("depth increases with yield needed") was checked against this and
+      REJECTED with real data, not assumed either way: boreholes with a
+      "Poor" yield OUTCOME struck water deeper on average (36.6m) than
+      "Excellent"/"Good" ones (29-31m) in a 1,970-record national sample
+      — the opposite of "drill deeper for more yield." The real
+      mechanism: a shallow strike usually means hitting a well-connected
+      near-surface fracture (good yield); if that's dry, drilling
+      continues into progressively worse, more isolated deeper fractures
+      (poor yield) — consistent with the published science, not just a
+      story fit to the numbers afterward.
+    - **Checked whether "nearby data is relevant" is even true in THIS
+      dataset, via a real semivariogram-style analysis** (787 Dublin/
+      Meath/Kildare/Wicklow boreholes with a real recorded depth, ~56,000
+      pairwise distance/depth-difference comparisons) before writing any
+      modeling code: median water-strike depth difference between two
+      real boreholes is just 2.3m at <500m apart, growing smoothly to
+      9.2m by 2-5km, then PLATEAUING (8.5m at 5-10km — no better than the
+      dataset's own 11m national median difference). This is the
+      standard geostatistical signature of real, decaying spatial
+      correlation with a ~2-5km range — genuine justification for a
+      distance-WEIGHTED estimate (not a flat average of everything within
+      some radius), and confirmation that widening the search radius
+      indefinitely wouldn't help (records past ~5-10km add little real
+      information, just noise).
+    - **`wells.get_water_table_estimate()`**: a separate, adaptive-radius
+      (`ESTIMATE_RADII_M`: 5/10/20/40km, widening only if fewer than
+      `ESTIMATE_MIN_SAMPLES` real records are found) inverse-distance-
+      weighted estimate per hole type (Borehole vs. Dug well — never
+      pooled, since items 48's own investigation already showed these are
+      fundamentally different constructions with very different depth
+      distributions). Uses a NEW `where` parameter added to `arcgis.py`'s
+      `point_query`/`point_query_full` (confirmed live: ArcGIS ANDs a
+      `where` filter together with the spatial `distance` filter) so the
+      server-side filter does the real work (`SOURCETYP='Borehole' AND
+      H2OSTRIKE1 IS NOT NULL`) instead of wasting `result_record_count`
+      fetching records the caller would just discard — every existing
+      caller of these two functions is unaffected (the parameter defaults
+      to `None`, omitted from the request exactly as before).
+    - **A real bug, caught by the numbers looking absurd, not assumed
+      correct**: the first version computed distances using the layer's
+      own `X_ING`/`Y_ING` attribute fields, assuming — reasonably, since
+      the values are a similar order of magnitude — that they were the
+      same ITM (EPSG:2157) CRS the layer's geometry is stored in.
+      Wrong: confirmed live that computed distances came out at 600km+
+      for records the spatial query had ALREADY verified were within
+      5-40km of the point — a dead giveaway. The field's own alias says
+      "X/Y Easting/Northing (ING)" — Irish National Grid (EPSG:29903), a
+      different, older Irish CRS with a different origin than ITM. Fixed
+      by using each record's own real `return_geometry=True` centroid
+      (already computed via `boundary.ring_set_to_polygon()`, WGS84)
+      instead of trusting an ambiguously-named attribute field's CRS —
+      confirmed the fix live: every computed distance now correctly falls
+      within its own record's search radius. A new `boundary.distance_m()`
+      (the same flat lat/lon approximation already established for
+      `radius_covering_m()`) does the actual two-point distance, avoiding
+      pyproj/ITM entirely for this feature.
+    - Every estimate is reported ALONGSIDE its own real spread (sample
+      count, min/max, the single closest real record and its distance) —
+      never a lone confident number, since even the tightest semivariogram
+      bucket (<500m) still had a real ~2-6m spread. Explicitly disclosed
+      as "not a substitute for a hydrogeological site investigation," not
+      framed as a firm answer. Verified end-to-end at 3 real sites (Trim,
+      Dublin, Fermoy) through the live server, the CLI report, and a
+      jsdom-rendered card check against real captured data — including
+      the honest "no nearby data of this type" case, which correctly
+      shows its own note rather than a fabricated number or a crash.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

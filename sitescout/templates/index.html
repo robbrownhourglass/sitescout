@@ -2537,6 +2537,30 @@ function wellsCard(w){
   }
   let html = verdict(verdictText, verdictCls);
 
+  // Distance-weighted estimate per hole type (wells.get_water_table_estimate())
+  // — asked for directly ("could we model the aquifer depth... based on
+  // the samples we do have?"), only built after confirming it was
+  // empirically justified (a real semivariogram check — see that
+  // function's own docstring). Shown up front, above the raw well list,
+  // since it directly answers "how deep would I need to dig/drill here,"
+  // the practical question that prompted it — but always alongside its
+  // own real sample count/spread, never as a lone confident number.
+  const estimates = w.depth_estimates || {};
+  const estimateRows = Object.values(estimates).filter(est => est.estimated_depth_m != null);
+  if(estimateRows.length){
+    html += `<div style="margin-top:10px"><strong>Estimated water-strike depth here</strong> <span class="muted">(distance-weighted from real nearby records)</span></div>`;
+    html += '<ul>' + estimateRows.map(est =>
+      `<li>${est.source_type}: <strong>~${est.estimated_depth_m}m</strong> ` +
+      `<span class="muted">(${est.sample_count} record(s) within ${(est.search_radius_m / 1000).toFixed(0)}km, range ${est.min_depth_m}-${est.max_depth_m}m; closest ${est.closest_record_depth_m}m at ${est.closest_record_distance_m}m away)</span></li>`
+    ).join('') + '</ul>';
+  }
+  Object.values(estimates).filter(est => est.estimated_depth_m == null).forEach(est => {
+    html += `<div class="muted" style="margin-top:4px">${est.note}</div>`;
+  });
+  if(estimateRows.length){
+    html += `<div class="muted" style="margin-top:2px">Not a substitute for a hydrogeological site investigation — a distance-weighted estimate from real nearby records, with real spread even at close range.</div>`;
+  }
+
   html += `<div style="margin-top:10px"><strong>${w.well_count} well(s)/spring(s)/borehole(s) within ${(w.search_radius_m / 1000).toFixed(1)}km</strong>` +
     (w.wells_with_depth_count ? ` <span class="muted">(${w.wells_with_depth_count} with a recorded depth)</span>` : '') + '</div>';
 

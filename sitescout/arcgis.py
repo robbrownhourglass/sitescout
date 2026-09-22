@@ -24,11 +24,22 @@ def point_query_full(
     return_geometry: bool = False,
     result_record_count: Optional[int] = None,
     order_by: Optional[str] = None,
+    where: Optional[str] = None,
 ) -> dict:
     """Queries an ArcGIS `.../query` endpoint for features intersecting (or
     within `distance_m` of) a WGS84 point. Returns the raw parsed response
     (not just `features`) so callers can check `exceededTransferLimit` —
     i.e. tell "exactly N found" from "N found, capped, more exist".
+
+    `where` (optional) is a plain attribute filter ANDed together with the
+    spatial filter server-side (confirmed live — ArcGIS applies both
+    together, same as attribute_query()'s own filter) — added for
+    wells.py's depth-estimate feature, which needs "real records of a
+    specific hole type with a recorded depth within this radius" rather
+    than every nearby feature regardless of type, so `result_record_count`
+    isn't wasted on records the caller would just filter out client-side
+    anyway. Every existing caller omits it (unchanged behaviour — ArcGIS's
+    own `/query` operation defaults `where` to `1=1` when not supplied).
     """
     params = {
         "geometry": f"{lon},{lat}",
@@ -39,6 +50,8 @@ def point_query_full(
         "f": "json",
         "returnGeometry": "true" if return_geometry else "false",
     }
+    if where:
+        params["where"] = where
     if return_geometry:
         params["outSR"] = "4326"
     if distance_m:
@@ -65,12 +78,14 @@ def point_query(
     distance_m: Optional[int] = None,
     return_geometry: bool = False,
     result_record_count: Optional[int] = None,
+    where: Optional[str] = None,
 ) -> list[dict]:
     """Convenience wrapper around `point_query_full()` for the common case
     of just wanting the `features` list.
     """
     data = point_query_full(
         layer_url, lon, lat, out_fields, distance_m, return_geometry, result_record_count,
+        where=where,
     )
     return data.get("features", [])
 

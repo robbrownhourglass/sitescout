@@ -94,6 +94,19 @@ def radius_covering_m(lat: float, lon: float, ring_sets: Optional[list], minimum
     return max(minimum_m, max_dist + 200)  # +200m margin — a candidate search radius, not the overlap test itself
 
 
+def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Plain two-point distance in metres — the same flat lat/lon
+    degrees-to-metres approximation as `radius_covering_m()` above (see
+    its own note on why this is an accepted convention at this scale,
+    already used elsewhere in this app). Good enough for ranking/weighting
+    nearby real records by distance (wells.py's depth estimate); NOT
+    precise enough to trust for survey-grade measurement.
+    """
+    dlat_m = (lat2 - lat1) * 111_000
+    dlon_m = (lon2 - lon1) * 111_000 * math.cos(math.radians(lat1))
+    return math.hypot(dlat_m, dlon_m)
+
+
 def geojson_geometry_to_ring_sets(geometry: Optional[dict]) -> list:
     """A GeoJSON Polygon/MultiPolygon geometry (as returned by a WFS
     GetFeature response, `srsName=EPSG:4326` — see wfs.py) -> this app's
