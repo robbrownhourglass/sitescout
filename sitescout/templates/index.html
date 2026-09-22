@@ -393,6 +393,7 @@ const CATEGORY_COLORS = {
   epa: '#c1440e',
   geohazards: '#8a6d3b',
   waterQuality: '#2a7f9e',
+  wells: '#4a6fa5',
   grid: '#b8860b',
   biodiversity: '#b0306e',
   terrain: '#5b6b52',
@@ -487,6 +488,14 @@ const TILE_ICONS = {
       <path d="M3 6c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
       <path d="M3 12c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
       <path d="M3 18c2.5 0 2.5 3 5 3s2.5-3 5-3 2.5 3 5 3 2.5-3 5-3"/>
+    </svg>`,
+  // a well shaft (rim + walls) with a line marking the water level partway
+  // down — distinct from the plain droplet (a classification, no depth)
+  // and the winding river (surface water body status, not a borehole)
+  wells: `<svg ${ICON_ATTRS}>
+      <ellipse cx="12" cy="5.5" rx="6" ry="2.2"/>
+      <path d="M6 5.5v10c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2v-10"/>
+      <path d="M8.3 12h7.4"/>
     </svg>`,
   // a paw print — species records (distinct from ecology's single leaf,
   // which is about designated AREAS, not individual species)
@@ -1338,6 +1347,30 @@ function buildWaterQualityLayer(wq){
   return group;
 }
 
+// Wells/springs/boreholes (GSI) — marker size/opacity by whether a real
+// water-strike depth was actually recorded, so a well that's just a dot
+// on the map with no real depth data doesn't visually compete with one
+// that has the figure this whole section exists to surface.
+function buildWellsLayer(w){
+  const group = L.layerGroup();
+  (w && w.wells || []).forEach(well => {
+    if(well.lat == null || well.lon == null) return;
+    const hasDepth = well.water_strike_m != null;
+    L.circleMarker([well.lat, well.lon], {
+      radius: hasDepth ? 6 : 4, color: CATEGORY_COLORS.wells, weight: 2,
+      fillOpacity: hasDepth ? 0.75 : 0.35, pane: 'pointsPane',
+    })
+      .bindPopup(
+        `<strong>${well.name || well.gsi_ref}</strong> <span class="muted">(${well.source_type || 'unknown type'})</span>` +
+        (well.name ? `<br><span class="muted">GSI ref: ${well.gsi_ref}</span>` : '') + // matches the card's own list, which always shows the gsi_ref
+        (hasDepth ? `<br>Water struck at ${well.water_strike_m}m` : '<br><span class="muted">No recorded water-strike depth</span>') +
+        (well.hole_depth_m != null ? `<br>Hole depth: ${well.hole_depth_m}m` : '')
+      )
+      .addTo(group);
+  });
+  return group;
+}
+
 // EirGrid transmission infrastructure — existing (solid) vs committed/
 // planned (dashed) drawn with the same color, distinguished by line style
 // only, matching the current-vs-future-scenario convention already used
@@ -1667,6 +1700,7 @@ const TILE_SPECS = [
   { key: 'epa', title: 'Environmental hazards (EPA)', deps: ['epa'], build: () => epaCard(sectionData.epa) },
   { key: 'geohazards', title: 'Geohazards & aquifer', deps: ['geohazards'], build: () => geohazardsCard(sectionData.geohazards) },
   { key: 'waterQuality', title: 'Water body status (EPA WFD)', deps: ['water_quality'], build: () => waterQualityCard(sectionData.water_quality) },
+  { key: 'wells', title: 'Wells, springs & boreholes', deps: ['wells'], build: () => wellsCard(sectionData.wells) },
   { key: 'biodiversity', title: 'Species records (GBIF)', deps: ['biodiversity'], build: () => biodiversityCard(sectionData.biodiversity) },
   { key: 'terrain', title: 'Terrain & elevation', deps: ['terrain'], build: () => terrainCard(sectionData.terrain) },
   { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
@@ -1681,7 +1715,7 @@ const TILE_SPECS = [
 // heritage/protection status, environmental hazards, planning/utilities).
 const THEMES = [
   { key: 'ground', title: 'Ground & Terrain', tileKeys: ['geology', 'soil', 'terrain', 'geohazards'] },
-  { key: 'water', title: 'Water', tileKeys: ['water', 'waterQuality'] },
+  { key: 'water', title: 'Water', tileKeys: ['water', 'waterQuality', 'wells'] },
   { key: 'heritage', title: 'Heritage & Protected Areas', tileKeys: ['archaeology', 'niah', 'rpsAca'] },
   { key: 'environment', title: 'Environment & Hazards', tileKeys: ['ecology', 'epa', 'biodiversity'] },
   { key: 'planning', title: 'Planning & Utilities', tileKeys: ['planning', 'utilities'] },
@@ -1739,6 +1773,9 @@ const SECTION_OVERLAY_BUILDERS = {
   ],
   water_quality: [
     ['Water body status (EPA WFD)', buildWaterQualityLayer],
+  ],
+  wells: [
+    ['Wells, springs & boreholes (GSI)', buildWellsLayer],
   ],
   utilities: [
     ['Transmission grid (EirGrid)', buildGridLayer],
@@ -2475,6 +2512,52 @@ function waterQualityCard(wq){
 
   return card('Water body status (EPA WFD)', verdictCls, 'Live', 'live', html,
     'Source: <a href="https://www.epa.ie" target="_blank">EPA</a> Water Framework Directive (WFD) water body status — groundwater, river, lake, coastal &amp; transitional');
+}
+
+// Directly answers a real user question ("how deep is the water table
+// here?") — wells.get_nearby_wells()'s own docstring has the full
+// investigation writeup (why the app's other groundwater sources are all
+// categorical, not a real depth). A shallow recorded water strike gets
+// the same plain-language warn banding radon/WFD status get elsewhere,
+// since it's a genuine foundation/septic-percolation consideration, not
+// just a curiosity.
+function wellsCard(w){
+  if(!w){
+    return card('Wells, springs & boreholes', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
+  }
+  const verdictCls = w.severity;
+  let verdictText;
+  if(w.shallowest_water_strike_m != null){
+    verdictText = `Shallowest recorded water-strike depth nearby: ${w.shallowest_water_strike_m}m` +
+      (w.shallowest_water_strike_m <= 2 ? ' — shallow, a real foundation/septic-percolation consideration' : '');
+  } else if(w.well_count){
+    verdictText = `${w.well_count} well(s)/spring(s) nearby, but none have a recorded water-strike depth`;
+  } else {
+    verdictText = `No wells, springs, or boreholes recorded within ${(w.search_radius_m / 1000).toFixed(1)}km`;
+  }
+  let html = verdict(verdictText, verdictCls);
+
+  html += `<div style="margin-top:10px"><strong>${w.well_count} well(s)/spring(s)/borehole(s) within ${(w.search_radius_m / 1000).toFixed(1)}km</strong>` +
+    (w.wells_with_depth_count ? ` <span class="muted">(${w.wells_with_depth_count} with a recorded depth)</span>` : '') + '</div>';
+
+  if(w.wells.length){
+    const sorted = [...w.wells].sort((a, b) => {
+      if(a.water_strike_m == null && b.water_strike_m == null) return 0;
+      if(a.water_strike_m == null) return 1;
+      if(b.water_strike_m == null) return -1;
+      return a.water_strike_m - b.water_strike_m;
+    });
+    html += '<ul>' + sorted.slice(0, 10).map(well => {
+      const depthLabel = well.water_strike_m != null
+        ? `water struck at <strong>${well.water_strike_m}m</strong>`
+        : '<span class="muted">no recorded depth</span>';
+      const holeLabel = well.hole_depth_m != null ? `, ${well.hole_depth_m}m hole` : '';
+      return `<li>${well.gsi_ref} <span class="muted">(${well.source_type || 'unknown type'})</span>: ${depthLabel}${holeLabel}</li>`;
+    }).join('') + '</ul>';
+  }
+
+  return card('Wells, springs & boreholes', verdictCls, 'Live', 'live', html,
+    'Source: <a href="https://www.gsi.ie" target="_blank">Geological Survey Ireland (GSI)</a> Wells, Springs &amp; Boreholes — ' + w.caveat);
 }
 
 function biodiversityCard(b){

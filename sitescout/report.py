@@ -229,6 +229,19 @@ def print_report(report: dict) -> None:
             print("  No nearby surface water bodies mapped")
         print(f"  {wq['caveat']}")
 
+    if "wells" in s:
+        w = s["wells"]
+        print(f"\n-- Wells, springs & boreholes (GSI; {w['well_count']} within {w['search_radius_m']}m) --")
+        if w["shallowest_water_strike_m"] is not None:
+            print(f"  Shallowest recorded water-strike depth nearby: {w['shallowest_water_strike_m']}m "
+                  f"({w['wells_with_depth_count']} of {w['well_count']} well(s) have a recorded depth)")
+        else:
+            print(f"  No depth-to-water data recorded at any of the {w['well_count']} well(s)/spring(s) nearby")
+        for well in sorted(w["wells"], key=lambda x: (x["water_strike_m"] is None, x["water_strike_m"]))[:8]:
+            depth_label = f"{well['water_strike_m']}m water strike" if well["water_strike_m"] is not None else "no recorded depth"
+            print(f"    - {well['gsi_ref']} ({well['source_type'] or 'unknown type'}): {depth_label}")
+        print(f"  {w['caveat']}")
+
     if "biodiversity" in s:
         b = s["biodiversity"]
         print(f"\n-- Species records (GBIF; {b['total_record_count']} occurrence record(s) within {b['search_radius_km']}km) --")
@@ -501,6 +514,20 @@ def _to_markdown(report: dict) -> str:
         if not wq["surface_water_bodies"]:
             lines.append("- No nearby surface water bodies mapped")
         lines.append(f"> {wq['caveat']}")
+        lines.append("")
+
+    if "wells" in s:
+        w = s["wells"]
+        lines.append(f"## Wells, springs & boreholes (GSI; {w['well_count']} within {w['search_radius_m']}m)")
+        if w["shallowest_water_strike_m"] is not None:
+            lines.append(f"- Shallowest recorded water-strike depth nearby: {w['shallowest_water_strike_m']}m "
+                          f"({w['wells_with_depth_count']} of {w['well_count']} well(s) have a recorded depth)")
+        else:
+            lines.append(f"- No depth-to-water data recorded at any of the {w['well_count']} well(s)/spring(s) nearby")
+        for well in sorted(w["wells"], key=lambda x: (x["water_strike_m"] is None, x["water_strike_m"]))[:8]:
+            depth_label = f"{well['water_strike_m']}m water strike" if well["water_strike_m"] is not None else "no recorded depth"
+            lines.append(f"- {well['gsi_ref']} ({well['source_type'] or 'unknown type'}): {depth_label}")
+        lines.append(f"> {w['caveat']}")
         lines.append("")
 
     if "biodiversity" in s:

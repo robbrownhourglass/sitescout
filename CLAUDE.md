@@ -78,6 +78,11 @@ sitescout/
                              river/lake/coastal/transitional water bodies — off the same EPA
                              GeoServer as epa.py, via wfs.py; its own section/tile, not folded
                              into epa.py's already-crowded environmental hazards card
+  wells.py                  nearby wells/springs/boreholes (GSI drilling records) — the closest
+                             thing to a real, on-the-ground water-table depth this app has
+                             (H2OSTRIKE1-4, a genuine measured depth, not a modeled category like
+                             gsi.py's vulnerability or geohazards.py's aquifer type); radius
+                             search, honestly sparse — see item 48
   biodiversity.py           species occurrence records + IUCN Red List threatened species nearby,
                              via GBIF (not NBDC's own map viewer directly — see its docstring for
                              why: a real bug on NBDC's server, found and worked around, not a
@@ -323,6 +328,7 @@ project. Full URLs are in the relevant module — this is a quick index.
 | Species occurrence records + IUCN Red List threatened species | GBIF (Global Biodiversity Information Facility) public REST API (`api.gbif.org`), not NBDC's own map viewer — see below | `biodiversity.py` |
 | Precise terrain elevation (~2m grid or better, ground + surface where available) | OPW, TII, and Westmeath Co Co's own LIDAR survey tiles (`LIDAR_SOURCES`, priority order — GeoTIFF, real float32 metres, ~30% of the country combined, confirmed via a real geometric union — see CLAUDE.md item 24) — downloaded + cached on demand, not a live API (none exists — see below) | `elevation.py` |
 | National elevation contours (10m interval, 20m grid, fallback) | GSI/EPA "Hydrologically Corrected DTM" contour `MapServer` — attribute-only query, no map geometry (see below) | `elevation.py` |
+| Wells, springs & boreholes (real per-well water-strike depth, hole depth, yield) | GSI `IE_GSI_Groundwater_Wells_Springs_100K_IE26_ITM` — radius search, honestly sparse (see item 48) | `wells.py` |
 
 Radon risk zones are drawn as a real map overlay (dashed, low-opacity
 polygon), not just a text readout — but the raw polygons are large enough
@@ -2583,6 +2589,77 @@ app, rather than the documented-but-dead endpoints:
     "lowest" marker at all (nothing to compare against), and an exit
     point can correctly win "lowest" against a real sink when it genuinely
     is lower.
+
+48. **Wells, springs & boreholes — real per-well water-table depth, asked
+    for directly after a real user question ("does any of the hydrology
+    tell us about the aquifer and how deep the water table is?").**
+    Investigated before building anything: confirmed live that every
+    existing groundwater source in this app (`gsi.py`'s vulnerability
+    category, `geohazards.py`'s aquifer type/productivity band,
+    `water_quality.py`'s WFD status) is categorical — none give an actual
+    depth-to-water figure. Also checked `gwlevel.ie` (GSI's real-time
+    groundwater level monitoring network) — a genuine, live, custom
+    Leaflet app, but its data API couldn't be pinned down through static
+    JS-bundle analysis in reasonable time (only one `/api/download`
+    string found anywhere in its ~450KB minified bundle; the actual
+    station-list fetch is built via variable concatenation the minifier
+    obscures), and even if found would likely cover far fewer locations
+    nationally than the source below (a handful of monitoring boreholes
+    vs. thousands of drilling records).
+    - Found on the SAME `gsi.geodata.gov.ie` ArcGIS server `gsi.py`/
+      `geohazards.py` already use (no new reverse-engineering needed —
+      its own `Groundwater` folder listing, already used for aquifer/
+      vulnerability/karst/source-protection, also has
+      `IE_GSI_Groundwater_Wells_Springs_100K_IE26_ITM`). Its
+      `H2OSTRIKE1`-`H2OSTRIKE4` fields ("First/Second/Third/Fourth
+      reported waterstrike met when drilling (m)") are a genuine,
+      directly-measured depth-to-water at that exact well — confirmed
+      live at 4 diverse real sites (rural Meath, rural Laois, Dublin city
+      centre, Fermoy) with real variation (2.1m-73.1m across different
+      wells), not a placeholder or modeled value.
+    - **A real, confirmed sparse-data gotcha, not assumed**: roughly half
+      of nearby wells in any given sample have every `H2OSTRIKE` field
+      null (no water-strike depth was ever recorded for that well) —
+      matches the layer's own description text exactly ("It is NOT a
+      comprehensive database... You should not rely only on this
+      database"). `wells.py` reports the shallowest REAL recorded depth
+      among nearby wells, with an explicit count of how many (out of how
+      many total) actually have one, rather than silently treating a
+      well with no data as "no water here."
+    - **A second real gotcha, confirmed by sampling, not assumed**:
+      `DRILL_DATE` uses a literal sentinel value for "no date recorded"
+      (`-2209161600000`ms, i.e. 1899-12-30) — appeared in nearly half of
+      a 43-well Dublin sample. `_drill_year()` treats any year before
+      1950 as unrecorded rather than displaying a fake 1899 drilling
+      date (this field isn't currently surfaced in the UI at all, but the
+      filtering is in place for if/when it is).
+    - **Geometry is `esriGeometryPolygon`, not a point** — each well is a
+      small circle sized by its own location-accuracy (per the layer's
+      description), not a literal shape worth drawing. Reused
+      `boundary.ring_set_to_polygon()` (already a verified shapely-based
+      helper, added for the real boundary-overlap fix — item 45) to get
+      each well's real polygon centroid for its map marker, rather than
+      hand-rolling a second centroid calculation.
+    - **A shallow water strike gets the same plain-language severity
+      banding radon/WFD status get elsewhere** (`SHALLOW_WATER_STRIKE_M
+      = 2.0`) — a genuine foundation/septic-percolation due-diligence
+      signal, not just a number to report inertly, matching this app's
+      established pattern of translating a raw figure into a practical
+      read (see radonBand()'s own reasoning).
+    - New "Wells, springs & boreholes" tile under the "Water" theme
+      (alongside "Water table & flood risk" and "Water body status
+      (WFD)") — a 5km radius search (the user's own specified figure),
+      map markers sized/opacity'd by whether a real depth was actually
+      recorded so a data-less dot doesn't visually compete with one
+      carrying the figure this section exists to surface. Verified
+      end-to-end via the same jsdom + hand-written Leaflet-mock harness
+      used throughout this session, against real captured data for Trim,
+      Co. Meath (28 wells, 3 with a recorded depth, shallowest 2.1m):
+      confirmed the tile/theme wiring, the detail card's real depth/count
+      rendering (including the null-input Error state and the genuine
+      zero-wells-found state, which correctly reads as "none nearby,"
+      not an error), and the map layer's marker sizing/popup content for
+      both a well with and without a recorded depth.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority

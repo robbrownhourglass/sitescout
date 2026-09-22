@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Optional
 
-from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohazards, gsi, heritage, rps, soil, utilities, planning, report, water_quality
+from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohazards, gsi, heritage, rps, soil, utilities, planning, report, water_quality, wells
 
 log = logging.getLogger("sitescout.pipeline")
 
@@ -103,6 +103,7 @@ SECTION_SPECS = {
     "epa": lambda lat, lon, eircode, label, boundary_ring_sets: epa.get_environmental_hazards(lat, lon, boundary_ring_sets),
     "geohazards": lambda lat, lon, eircode, label, boundary_ring_sets: geohazards.get_geohazards(lat, lon),
     "water_quality": lambda lat, lon, eircode, label, boundary_ring_sets: water_quality.get_water_body_status(lat, lon, boundary_ring_sets),
+    "wells": lambda lat, lon, eircode, label, boundary_ring_sets: wells.get_nearby_wells(lat, lon),
     "biodiversity": lambda lat, lon, eircode, label, boundary_ring_sets: biodiversity.get_species_records(lat, lon),
     "terrain": lambda lat, lon, eircode, label, boundary_ring_sets: elevation.get_terrain(lat, lon),
     "utilities": lambda lat, lon, eircode, label, boundary_ring_sets: _utilities(lat, lon, label or ""),
