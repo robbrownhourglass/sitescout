@@ -161,7 +161,7 @@ async function main(){
 }
 
 function buildScene(mesh, ringSets){
-  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat, boundary_lidar_coverage_fraction: boundaryCoverage } = mesh;
+  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat, boundary_lidar_coverage_fraction: boundaryCoverage, no_data_overlay: noDataOverlay } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
 
   // Only warn about a coverage gap INSIDE the plot boundary itself — a gap
@@ -173,7 +173,7 @@ function buildScene(mesh, ringSets){
     const pct = Math.round(boundaryCoverage * 100);
     const warningEl = document.getElementById('coverageWarning');
     warningEl.style.display = 'block';
-    warningEl.textContent = `⚠ Only ~${pct}% of your plot boundary has real LIDAR coverage in this view — the rest shows as a gap in the terrain (see the "not full national coverage" note on the Terrain & elevation card).`;
+    warningEl.textContent = `⚠ Only ~${pct}% of your plot boundary has real LIDAR coverage in this view — the flat gray patch shows the rest of your property's real shape where no elevation data exists (see the "not full national coverage" note on the Terrain & elevation card).`;
   }
 
   // Legend
@@ -264,6 +264,31 @@ function buildScene(mesh, ringSets){
   overlayTexture.colorSpace = THREE.SRGBColorSpace;
   const material = new THREE.MeshStandardMaterial({ vertexColors: true, map: overlayTexture, side: THREE.DoubleSide, roughness: 0.9, metalness: 0 });
   scene.add(new THREE.Mesh(geometry, material));
+
+  // Flat "no data here" placeholder (elevation.get_terrain_mesh()'s
+  // no_data_overlay) — asked for directly: rather than a hole in the
+  // mesh through which part of the property's own real shape just
+  // vanishes, this fills every part of the PLOT BOUNDARY ITSELF that has
+  // no real LIDAR coverage with a flat, deliberately-plain gray patch, so
+  // the site's full real outline is always visible. Flush with the
+  // lowest point in the scene (its own z is already min_elevation_m, same
+  // baseline the black box below sits at) and rendered unlit/semi-
+  // transparent specifically so it reads as an obvious placeholder, never
+  // mistaken for real textured/lit terrain.
+  if(noDataOverlay && noDataOverlay.faces.length){
+    const ndPositions = [];
+    for(const [x, y, z] of noDataOverlay.vertices) ndPositions.push(x, terrainY(z), -y);
+    const ndIndices = [];
+    for(const face of noDataOverlay.faces) ndIndices.push(face[0], face[1], face[2]);
+    const noDataGeometry = new THREE.BufferGeometry();
+    noDataGeometry.setAttribute('position', new THREE.Float32BufferAttribute(ndPositions, 3));
+    noDataGeometry.setIndex(ndIndices);
+    const noDataMaterial = new THREE.MeshBasicMaterial({
+      color: 0x888888, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    scene.add(new THREE.Mesh(noDataGeometry, noDataMaterial));
+  }
 
   // Buildings (OpenStreetMap, via buildings.py) — merged into one shared
   // geometry (typically only a handful per site, but one draw call either

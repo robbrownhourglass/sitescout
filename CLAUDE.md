@@ -1888,6 +1888,62 @@ app, rather than the documented-but-dead endpoints:
       at all (nothing to fit) and R32 E4F8's own vertex/face counts are
       unaffected anywhere outside the fitted boundary's own band.
 
+37. **Real user report with two screenshots: a genuinely half-covered plot
+    (visibly real terrain colour on the 2D map for roughly half the
+    boundary) showed "no precise LIDAR coverage for this plot boundary"
+    outright on /terrain-3d — a total failure, not the partial-coverage
+    handling items 33-36 were all built for.** Traced to a real
+    architectural bug in `_find_touching_tiles()`, not anything in the
+    boundary-smoothing work itself: it requires (a) some tile's own bbox
+    to contain the EXACT query point, and (b) that exact pixel to have
+    real, non-NoData data — both correct requirements for
+    `get_precise_elevation()`'s actual job (report ONE point's value,
+    where "does this exact point have data" is exactly the right
+    question) but wrong for `get_terrain_mesh()`'s: `mesh_center_and_radius()`
+    picks the plot's own bounding-box CENTRE, not a guaranteed-covered
+    point, and a large or oddly-shaped real plot can easily have its own
+    centre land in its own uncovered half — reproduced directly: two real
+    nearby parcels (10.7ha, 20.3ha) at the reported site both hit this
+    exact failure, while a smaller parcel at the same site worked fine.
+    - **Fix: `require_data_at_point: bool` on `_find_touching_tiles()`/
+      `_mosaic_dtm()`**, defaulting to the existing (correct, unchanged)
+      behaviour for `get_precise_elevation()`/`render_dtm_image()`.
+      `get_terrain_mesh()` AND `get_flow_analysis()` (the same bug
+      applies to it too — also an area-based caller, same fix) now call
+      with it `False`: relaxes both the bbox-containment and exact-pixel
+      checks down to "this source has SOME real data anywhere in the
+      search radius" (`_tiles_have_any_real_data()` — the area-search
+      equivalent of the existing `_point_has_real_data()`, same "still
+      try the next source if this one's tiles are entirely empty"
+      fallback spirit). Confirmed live: both previously-failing parcels
+      now build real meshes, with `boundary_lidar_coverage_fraction` of
+      0.39 and 0.53 — matching the user's own "about half the plot" —
+      and confirmed the untouched default path (Fermoy full coverage,
+      `get_precise_elevation()`) is completely unaffected.
+    - **Second, explicit ask in the same report: "show the full shape of
+      the property, but show zero elevation for every area that's not
+      covered"** — rather than a mesh hole through which part of a real
+      plot's own outline just vanishes. New `no_data_overlay` in
+      `get_terrain_mesh()`'s response: a flat placeholder patch (its own
+      separate vertices/faces, all at `min_elevation_m`) for every part of
+      the PLOT BOUNDARY ITSELF (not the wider padded context, same
+      boundary-only scoping as `boundary_lidar_coverage_fraction`) that
+      has no real LIDAR data. "Zero elevation" is interpreted as flush
+      with the scene's own established baseline (`min_elevation_m`, same
+      level item 32's black box already sits at) rather than literally 0m
+      — a true sea-level zero would be a physically meaningless flat plane
+      at most Irish inland sites (this one alone is 88-104m ASL).
+      Verified visually: rendering the real terrain (green) and the
+      placeholder (gray) together with the real plot outline overlaid
+      shows the two fitting together EXACTLY, filling the entire real
+      property boundary with no gap and no overlap. Rendered client-side
+      as a separate, deliberately plain/unlit, semi-transparent gray mesh
+      (never blended into the real terrain's own lit, textured material)
+      so it can never be mistaken for real data — confirmed via a mock
+      harness test against real captured data, including that the
+      full-coverage case (nothing to show) correctly omits it entirely
+      rather than sending an empty overlay.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

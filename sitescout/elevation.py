@@ -271,13 +271,29 @@ def _read_pixel(
 IMAGE_RADIUS_M = 1000  # "cover a 1km radius" — a square crop of this half-width, not a strict circle (simpler; visually equivalent for this purpose)
 
 
-def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optional[str], list[dict]]:
+def _find_touching_tiles(lat: float, lon: float, radius_m: float, require_data_at_point: bool = True) -> tuple[Optional[str], list[dict]]:
     """All tiles from the FIRST LIDAR_SOURCES entry that actually covers
     the exact point, intersecting a radius_m buffer around it — used to
     build a multi-tile mosaic instead of a single ~2km tile, since a 1km
     radius can straddle up to 4 tiles depending on where the point falls
     relative to the grid (confirmed live: Trinity College Dublin sits
     close enough to a boundary that its 1km radius touches exactly 4).
+
+    `require_data_at_point=False` (used by `get_terrain_mesh()` via
+    `_mosaic_dtm()`) relaxes BOTH the "some tile's bbox contains this
+    exact point" and "that exact pixel has real data" requirements down to
+    "this source has SOME real data somewhere in the search radius" —
+    real bug, found from a real user report with a screenshot: a large or
+    oddly-shaped plot's own bounding-box centre (`mesh_center_and_radius()`
+    picks the plot's own bbox centre, not a guaranteed-covered point) can
+    easily land in that plot's own uncovered half even when a genuinely
+    large, meaningful portion of the plot DOES have real coverage — the
+    default (point-focused) behaviour below would then report "no
+    coverage" outright, for a plot the user could see was clearly half
+    covered on the 2D map. `get_precise_elevation()`/`render_dtm_image()`
+    still use the default: those report one SPECIFIC point's value, where
+    "does this exact point have real data" remains exactly the right
+    question — only the AREA-based mesh build needed the relaxed version.
 
     **Gotcha, confirmed by testing — search a circle bigger than the
     square you're about to crop to.** The final mosaic is cropped to a
@@ -333,13 +349,14 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
             continue
 
         exts = {id(f): _tile_extent(f) for f in feats}
-        contains_point = any(
-            ext is not None and ext[0] <= itm_x <= ext[2] and ext[3] <= itm_y <= ext[1]
-            for ext in exts.values()
-        )
-        if not contains_point:
-            log.info("-> %s has tiles nearby but none covering the exact point — trying next source", source_label)
-            continue
+        if require_data_at_point:
+            contains_point = any(
+                ext is not None and ext[0] <= itm_x <= ext[2] and ext[3] <= itm_y <= ext[1]
+                for ext in exts.values()
+            )
+            if not contains_point:
+                log.info("-> %s has tiles nearby but none covering the exact point — trying next source", source_label)
+                continue
 
         tiles = []
         for f in feats:
@@ -366,19 +383,25 @@ def _find_touching_tiles(lat: float, lon: float, radius_m: float) -> tuple[Optio
                 "nodata": nodata,
             })
 
-        if not tiles or not _point_has_real_data(tiles, itm_x, itm_y):
-            # A tile's bounding box containing the point is NOT the same
-            # as that exact pixel having real data — confirmed live: a
-            # real query point sat inside an OPW NASC tile's own square,
-            # but its survey (like TII's corridor survey, or any real
-            # LIDAR flight) doesn't fill every tile edge-to-edge, so the
-            # actual pixel there was NoData. Committing to this source
-            # anyway (the original behaviour) would report "no coverage"
-            # even when a LOWER-priority source (confirmed: TII, at this
-            # exact point) has real data — exactly undoing the point of
-            # having multiple sources. So: fall through to the next
-            # source instead of stopping at the first bbox match.
-            log.info("-> %s tile bounding box covers the point, but that exact pixel is NoData — trying next source", source_label)
+        if not tiles:
+            continue
+        if require_data_at_point:
+            if not _point_has_real_data(tiles, itm_x, itm_y):
+                # A tile's bounding box containing the point is NOT the same
+                # as that exact pixel having real data — confirmed live: a
+                # real query point sat inside an OPW NASC tile's own square,
+                # but its survey (like TII's corridor survey, or any real
+                # LIDAR flight) doesn't fill every tile edge-to-edge, so the
+                # actual pixel there was NoData. Committing to this source
+                # anyway (the original behaviour) would report "no coverage"
+                # even when a LOWER-priority source (confirmed: TII, at this
+                # exact point) has real data — exactly undoing the point of
+                # having multiple sources. So: fall through to the next
+                # source instead of stopping at the first bbox match.
+                log.info("-> %s tile bounding box covers the point, but that exact pixel is NoData — trying next source", source_label)
+                continue
+        elif not _tiles_have_any_real_data(tiles):
+            log.info("-> %s has tiles in the search radius, but none contain any real data at all — trying next source", source_label)
             continue
 
         log.info("-> %s: %d tile(s) found (search radius %dm, for a %dm-radius square crop)", source_label, len(tiles), search_radius_m, radius_m)
@@ -417,6 +440,24 @@ def _point_has_real_data(tiles: list, itm_x: float, itm_y: float) -> bool:
     return False
 
 
+def _tiles_have_any_real_data(tiles: list) -> bool:
+    """Whether ANY pixel in ANY of these tiles has real (non-NoData)
+    elevation data — the area-search equivalent of `_point_has_real_data()`,
+    used by `get_terrain_mesh()` (see `_find_touching_tiles()`'s
+    `require_data_at_point=False` mode) where the question isn't "does
+    THIS exact point have data" but "is this source worth mosaicking at
+    all here" — a source whose nearby tiles are 100% NoData throughout
+    should still fall through to the next source in priority order, same
+    spirit as `_point_has_real_data()`'s own fallback, just checked over
+    the whole tile instead of one pixel.
+    """
+    for t in tiles:
+        arr = tifffile.imread(str(t["dtm_path"]))
+        if (arr > t.get("nodata", -9999.0)).any():
+            return True
+    return False
+
+
 def _tile_extent(feature: dict) -> Optional[tuple]:
     """A coverage-index tile's real-world ITM extent (left, top, right,
     bottom) — from the tile's own EXT_* attributes when present (OPW's own
@@ -449,20 +490,24 @@ def _itm_bounds_to_wgs84(ext: tuple) -> list:
     return [[lat_sw, lon_sw], [lat_ne, lon_ne]]
 
 
-def _mosaic_dtm(lat: float, lon: float, radius_m: float) -> Optional[dict]:
+def _mosaic_dtm(lat: float, lon: float, radius_m: float, require_data_at_point: bool = True) -> Optional[dict]:
     """Downloads every DTM tile touching a radius_m buffer around
     (lat, lon) from one LIDAR source, stitches them into one array
     positioned by each tile's own real ITM extent (all confirmed on the
     same regular 2km grid — tiles fit together exactly edge-to-edge, no
     reprojection/resampling needed), then crops to a radius_m square
-    around the point. Returns None if no source covers the point.
+    around the point. Returns None if no source has any usable data
+    (see `require_data_at_point` — `_find_touching_tiles()`'s own
+    docstring covers the real bug this parameter fixes).
 
     Shared by get_precise_elevation() (point value + bounds + range) and
     render_dtm_image() (the actual picture) so both are guaranteed
     consistent — computed from the exact same assembled data, not two
-    independently-built mosaics that could drift apart.
+    independently-built mosaics that could drift apart. get_terrain_mesh()
+    also shares it, but with `require_data_at_point=False` — see
+    `_find_touching_tiles()`.
     """
-    source_label, tiles = _find_touching_tiles(lat, lon, radius_m)
+    source_label, tiles = _find_touching_tiles(lat, lon, radius_m, require_data_at_point=require_data_at_point)
     if not tiles:
         return None
 
@@ -1205,7 +1250,7 @@ def get_terrain_mesh(
     center_lon, center_lat, radius_m = center
     center_x, center_y = _to_itm.transform(center_lon, center_lat)
 
-    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m)
+    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m, require_data_at_point=False)
     if not mosaic:
         log.info("-> No precise LIDAR coverage for this plot boundary")
         return None
@@ -1399,6 +1444,57 @@ def get_terrain_mesh(
     boundary_total = int(inside_boundary.sum())
     boundary_covered = int((inside_boundary & coarse_valid).sum())
     boundary_lidar_coverage_fraction = round(boundary_covered / boundary_total, 3) if boundary_total else None
+    min_elevation_m = min(valid_heights)
+
+    # A flat placeholder patch for any part of the PLOT BOUNDARY ITSELF
+    # (not the wider padded context, same "boundary, not context" scoping
+    # as boundary_lidar_coverage_fraction above) that has NO real LIDAR
+    # data at all — asked for directly, alongside the warning: "show the
+    # full shape of the property, but show zero elevation for every area
+    # that's not covered," rather than a mesh hole through which the
+    # property's own true outline can't be seen at all. Deliberately a
+    # SEPARATE mesh (own vertices/faces, own flat elevation) rather than
+    # blended into the real terrain — it must never be mistaken for real
+    # data. "Zero elevation" here means flush with `min_elevation_m` (the
+    # exact same baseline the black box's own base plane already sits at,
+    # see terrain3d.html's minSceneY) — a real sea-level-relative zero
+    # would be a physically meaningless flat plane at most Irish inland
+    # sites (routinely 50-200m+ ASL), so the frontend's already-established
+    # "lowest point in the scene" baseline is the one honest, consistent
+    # choice available, not an arbitrary pick.
+    col_centers = [(grid_xs[ci] + grid_xs[ci + 1]) / 2 for ci in range(ncols - 1)]
+    row_centers = [(grid_ys[ri] + grid_ys[ri + 1]) / 2 for ri in range(nrows - 1)]
+    cell_cx, cell_cy = np.meshgrid(col_centers, row_centers)
+    cell_inside_boundary = shapely.contains_xy(plot_geom, cell_cx, cell_cy)
+
+    no_data_vertices: list = []
+    no_data_faces: list = []
+    no_data_cache: dict = {}
+
+    def add_no_data_vertex(itm_x: float, itm_y: float) -> int:
+        key = (round(itm_x, 3), round(itm_y, 3))
+        idx = no_data_cache.get(key)
+        if idx is not None:
+            return idx
+        idx = len(no_data_vertices)
+        no_data_vertices.append([round(itm_x - center_x, 2), round(itm_y - center_y, 2), round(min_elevation_m, 2)])
+        no_data_cache[key] = idx
+        return idx
+
+    for ri in range(nrows - 1):
+        for ci in range(ncols - 1):
+            if not cell_inside_boundary[ri, ci]:
+                continue  # outside the plot boundary — the wider padded context is EXPECTED to have gaps, no placeholder needed there
+            if coarse_valid[ri, ci] or coarse_valid[ri, ci + 1] or coarse_valid[ri + 1, ci] or coarse_valid[ri + 1, ci + 1]:
+                continue  # at least one real corner here — the main loop above already drew something real (possibly a partial cut), no placeholder needed
+            x0, x1 = grid_xs[ci], grid_xs[ci + 1]
+            y0, y1 = grid_ys[ri], grid_ys[ri + 1]
+            i00 = add_no_data_vertex(x0, y0)
+            i10 = add_no_data_vertex(x1, y0)
+            i01 = add_no_data_vertex(x0, y1)
+            i11 = add_no_data_vertex(x1, y1)
+            no_data_faces.append([i00, i10, i01])
+            no_data_faces.append([i10, i11, i01])
 
     # Overlay texture: the plot boundary is drawn now (always available);
     # roads are drawn later by attach_features() once the concurrent OSM
@@ -1435,6 +1531,7 @@ def get_terrain_mesh(
         "origin_lat": center_lat,
         "grid_extent": {"x_min": extent[0], "x_max": extent[1], "y_min": extent[2], "y_max": extent[3]},
         "boundary_lidar_coverage_fraction": boundary_lidar_coverage_fraction,
+        "no_data_overlay": {"vertices": no_data_vertices, "faces": no_data_faces} if no_data_faces else None,
         "overlay_texture_png_base64": _encode_overlay(),
         "buildings": [],
         "road_count": 0,
@@ -2152,7 +2249,7 @@ def get_flow_analysis(polygon_ring_sets_wgs84: list) -> Optional[dict]:
     center_lon, center_lat, radius_m = center
     center_x, center_y = _to_itm.transform(center_lon, center_lat)
 
-    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m)
+    mosaic = _mosaic_dtm(center_lat, center_lon, radius_m, require_data_at_point=False)
     if not mosaic:
         return None
 
