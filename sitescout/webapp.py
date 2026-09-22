@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from . import autoaddress, buildings, cadastral, config, elevation, geocode, pipeline, report
+from . import autoaddress, buildings, cadastral, config, elevation, geocode, historical_maps, pipeline, report
 
 log = config.setup_logging(verbose=False)
 
@@ -50,7 +50,20 @@ app = Flask(__name__)
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    # historical_layers passed straight from historical_maps.HISTORICAL_LAYERS
+    # (single source of truth — the frontend's own base-layer picker builds
+    # its "time travel" list directly from this, rather than a second
+    # hand-kept-in-sync copy), trimmed to just what the picker needs
+    # (key/label/kind, not the internal base_url etc.). A LIST, not a
+    # dict — Flask's own JSON encoder sorts dict keys by default, which
+    # would silently alphabetise the deliberate newest-to-oldest ordering
+    # already documented on HISTORICAL_LAYERS itself (confirmed live: it
+    # did exactly that before this fix, "1995" ended up first).
+    historical_layers = [
+        {"key": key, "label": v["label"], "kind": v["kind"]}
+        for key, v in historical_maps.HISTORICAL_LAYERS.items()
+    ]
+    return render_template("index.html", historical_layers=historical_layers)
 
 
 @app.post("/api/scout")
@@ -306,6 +319,30 @@ def terrain_3d():
     page in this app only ever depending on its own URL, not hidden state.
     """
     return render_template("terrain3d.html")
+
+
+@app.get("/api/historical-tile/<layer_key>/<int:z>/<int:x>/<int:y>.png")
+def api_historical_tile(layer_key: str, z: int, x: int, y: int):
+    """One real Web Mercator XYZ tile (what Leaflet actually requests),
+    reprojected server-side from Tailte Éireann's own historical MapGenie
+    tile caches — see historical_maps.py's own module docstring for why
+    this needs real reprojection (not a simple URL rewrite) and for the
+    licensing basis for calling their service at all (personal,
+    non-commercial use, confirmed directly against GeoHive's own Terms of
+    Use, not assumed). A 404 here is a normal, expected "no coverage at
+    this exact tile" response, same as any other missing map tile — not
+    logged as an error.
+    """
+    try:
+        png_bytes = historical_maps.get_historical_tile(layer_key, z, x, y)
+    except Exception as exc:
+        log.error("Historical tile fetch failed (%s z=%d x=%d y=%d): %s", layer_key, z, x, y, exc)
+        return _error(f"historical tile fetch failed: {exc}", 502)
+
+    if not png_bytes:
+        return _error("no coverage at this tile", 404)
+
+    return Response(png_bytes, mimetype="image/png")
 
 
 def _slim_options(options: list[dict]) -> list[dict]:

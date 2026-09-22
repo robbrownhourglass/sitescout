@@ -150,25 +150,50 @@
   }
   .layer-row.pending .row-spinner, .boundary-row.pending .row-spinner{ display:block; }
 
-  /* ---- Base map toggle (Street/Satellite) — replaces Leaflet's own
-     L.control.layers, which used to also list every overlay layer;
-     overlays are now controlled entirely from the category panel above.
-     Google Maps style, asked for directly: one small square thumbnail
-     showing a real preview of whichever layer you'd SWITCH TO (not the
-     one currently showing), with its name overlaid at the bottom —
-     clicking it toggles. Bottom-left, matching Google's own placement —
-     also deliberately NOT top-left, where Leaflet's own zoom control
-     already lives (a real reported overlap otherwise). */
+  /* ---- Base map control (Street/Satellite + "time travel" historical
+     imagery & historic maps) — replaces Leaflet's own L.control.layers,
+     which used to also list every overlay layer; overlays are now
+     controlled entirely from the category panel above. The main
+     thumbnail keeps its original Google Maps-style behaviour (one click
+     = quick-flip Street<->Satellite, always showing a real preview of
+     whichever you'd switch TO); the small "..." button next to it opens
+     a panel listing every other option (historical imagery epochs,
+     historic map series) without disturbing that already-tuned quick
+     toggle. Bottom-left, matching Google's own placement — deliberately
+     NOT top-left, where Leaflet's own zoom control already lives. */
+  #baseLayerControl{ position:absolute; bottom:24px; left:14px; z-index:1000; }
   #baseLayerToggle{
-    position:absolute; bottom:24px; left:14px; z-index:1000; width:76px; height:76px; padding:0;
-    border:2px solid #fff; border-radius:6px; overflow:hidden; cursor:pointer;
-    background:#ccc no-repeat center/cover; box-shadow:0 2px 8px rgba(0,0,0,.3);
+    width:76px; height:76px; padding:0; border:2px solid #fff; border-radius:6px; overflow:hidden;
+    cursor:pointer; background:#ccc no-repeat center/cover; box-shadow:0 2px 8px rgba(0,0,0,.3);
   }
   #baseLayerToggle:hover{ border-color:var(--moss); }
   #baseLayerToggle .toggle-label{
     position:absolute; left:0; right:0; bottom:0; padding:4px 0 3px; text-align:center;
     font-size:11px; font-weight:700; color:#fff; background:linear-gradient(transparent, rgba(0,0,0,.6));
   }
+  #baseLayerMoreBtn{
+    position:absolute; top:-8px; right:-8px; width:22px; height:22px; border-radius:50%;
+    border:2px solid #fff; background:var(--card); color:var(--ink); font-size:13px; font-weight:700;
+    line-height:1; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.3); padding:0;
+  }
+  #baseLayerMoreBtn:hover{ background:#eaf0ec; }
+  #baseLayerPanel{
+    display:none; position:absolute; bottom:0; left:88px; width:230px; max-height:min(70vh,480px);
+    overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:8px;
+    box-shadow:0 4px 16px rgba(0,0,0,.25); padding:6px 0;
+  }
+  #baseLayerPanel.open{ display:block; }
+  #baseLayerPanel .group-title{
+    padding:8px 14px 4px; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--muted);
+  }
+  #baseLayerPanel .group-title:not(:first-child){ border-top:1px solid var(--line); margin-top:4px; }
+  #baseLayerPanel button{
+    display:block; width:100%; text-align:left; padding:7px 14px; border:none; background:none;
+    font-size:13px; color:var(--ink); cursor:pointer;
+  }
+  #baseLayerPanel button:hover{ background:#f3f1ea; }
+  #baseLayerPanel button.active{ background:#eaf0ec; color:var(--moss-dark); font-weight:600; }
 
   #plotPicker{
     flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
@@ -266,7 +291,11 @@
 
   <main id="mapWrap">
     <div id="map"></div>
-    <button type="button" id="baseLayerToggle"><span class="toggle-label"></span></button>
+    <div id="baseLayerControl">
+      <button type="button" id="baseLayerToggle"><span class="toggle-label"></span></button>
+      <button type="button" id="baseLayerMoreBtn" title="More map options (historical imagery &amp; maps)">&#8943;</button>
+      <div id="baseLayerPanel"></div>
+    </div>
     <nav id="categoryPanel"></nav>
     <aside id="detailPanel">
       <button id="detailClose" class="detail-close" aria-label="Close">×</button>
@@ -277,6 +306,12 @@
 </div>
 
 <script>
+// Passed from webapp.py's index() route — single source of truth for
+// historical_maps.py's own HISTORICAL_LAYERS (key -> {label, kind}), so
+// the base-layer picker's "time travel" list can't drift out of sync
+// with what /api/historical-tile actually serves.
+const HISTORICAL_LAYERS = {{ historical_layers | tojson }};
+
 const statusEl = document.getElementById('topbarStatus');
 const heroStatusEl = document.getElementById('heroStatus');
 const heroStatusTextEl = document.getElementById('heroStatusText');
@@ -292,6 +327,8 @@ const scoutBtnLabel = scoutBtnEl.textContent;
 const mapWrapEl = document.getElementById('mapWrap');
 const categoryPanelEl = document.getElementById('categoryPanel');
 const baseLayerToggleEl = document.getElementById('baseLayerToggle');
+const baseLayerMoreBtnEl = document.getElementById('baseLayerMoreBtn');
+const baseLayerPanelEl = document.getElementById('baseLayerPanel');
 const detailPanelEl = document.getElementById('detailPanel');
 const detailContentEl = document.getElementById('detailContent');
 const plotPickerEl = document.getElementById('plotPicker');
@@ -535,12 +572,47 @@ function ensureMap(){
   );
   baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
 
+  // "Time travel" — historical satellite imagery (6 real epochs,
+  // 1995-2018) and historic OS maps, asked for directly. Each is a plain
+  // Leaflet XYZ layer pointed at THIS app's own /api/historical-tile
+  // route — the backend does the real reprojection (see
+  // historical_maps.py's own docstring for why a direct client-side URL
+  // to Tailte Éireann's own service wouldn't work: their tiles are
+  // native ITM, not Web Mercator). Cheap to construct all of them up
+  // front, same as contourTileLayer below — an L.tileLayer never fetches
+  // a single real tile until it's actually added to the map.
+  HISTORICAL_LAYERS.forEach(entry => {
+    baseLayers[entry.key] = L.tileLayer(`/api/historical-tile/${entry.key}/{z}/{x}/{y}.png`, {
+      attribution: 'Tailte Éireann (MapGenie), personal/non-commercial use — see CLAUDE.md',
+      maxZoom: 21, maxNativeZoom: 19,
+    });
+  });
+
   // Google-Maps-style single-thumbnail toggle (see #baseLayerToggle) —
   // replacing Leaflet's own L.control.layers, asked for directly. One
   // click flips whichever base layer is on the map; streetLayer starts
   // added (matches updateBaseLayerToggleUI()'s own initial call below).
+  // Deliberately unchanged by the "time travel" panel below: a quick
+  // click always resolves to plain Street/Satellite, a predictable "back
+  // to normal, or into satellite" shortcut regardless of whether a
+  // historical layer happens to be active.
   baseLayerToggleEl.addEventListener('click', () => setBaseLayer(activeBaseKey === 'Street' ? 'Satellite' : 'Street'));
   updateBaseLayerToggleUI();
+
+  // The "..." button opens a small panel listing every other option
+  // (Street/Satellite too, for completeness) without disturbing the
+  // quick-toggle above. Closes on an outside click, same as the
+  // category-panel detail flow's own click-away conventions elsewhere.
+  buildBaseLayerPanel();
+  baseLayerMoreBtnEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    baseLayerPanelEl.classList.toggle('open');
+  });
+  document.addEventListener('click', (e) => {
+    if(baseLayerPanelEl.classList.contains('open') && !baseLayerPanelEl.contains(e.target) && e.target !== baseLayerMoreBtnEl){
+      baseLayerPanelEl.classList.remove('open');
+    }
+  });
 
   // Contour lines (EPA/GSI, 10m interval) — a general reference layer, not
   // section-specific data, so it's created once here rather than through
@@ -626,6 +698,40 @@ function setBaseLayer(key){
   baseLayers[key].addTo(map);
   activeBaseKey = key;
   updateBaseLayerToggleUI();
+}
+
+// Populates #baseLayerPanel (opened via the "..." button next to the
+// quick Street/Satellite toggle) with every base layer option, grouped —
+// Standard, then the historical imagery/maps "time travel" layers from
+// HISTORICAL_LAYERS (see historical_maps.py), newest-to-oldest within
+// each group since that's the order the backend already sends them in.
+function buildBaseLayerPanel(){
+  baseLayerPanelEl.innerHTML = '';
+  const addGroup = (title, entries) => {
+    if(!entries.length) return;
+    const t = document.createElement('div');
+    t.className = 'group-title';
+    t.textContent = title;
+    baseLayerPanelEl.appendChild(t);
+    entries.forEach(([key, label]) => baseLayerPanelEl.appendChild(makeBaseLayerOption(key, label)));
+  };
+  addGroup('Standard', [['Street', 'Map'], ['Satellite', 'Satellite (current)']]);
+  addGroup('Satellite — time travel', HISTORICAL_LAYERS.filter(e => e.kind === 'imagery').map(e => [e.key, e.label.replace('Satellite — ', '')]));
+  addGroup('Historic maps', HISTORICAL_LAYERS.filter(e => e.kind === 'map').map(e => [e.key, e.label.replace('Historic Map — ', '')]));
+}
+
+function makeBaseLayerOption(key, label){
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = label;
+  btn.dataset.key = key;
+  if(key === activeBaseKey) btn.classList.add('active');
+  btn.addEventListener('click', () => {
+    setBaseLayer(key);
+    baseLayerPanelEl.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.key === key));
+    baseLayerPanelEl.classList.remove('open');
+  });
+  return btn;
 }
 
 window.addEventListener('resize', () => { if(map) map.invalidateSize(); });

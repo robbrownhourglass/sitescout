@@ -119,6 +119,15 @@ sitescout/
                              combined Overpass query (get_nearby_features(), on-disk cached) — used
                              only by the /terrain-3d page's elevation.get_terrain_mesh(), not a
                              pipeline.py SECTION_SPECS entry (nothing to do with the report itself)
+  historical_maps.py        historical satellite imagery (6 epochs, 1995-2018) + historic OS maps
+                             (4 series, 1837-1913), reprojected on demand from Tailte Éireann's
+                             native-ITM ArcGIS tile caches into standard Web Mercator XYZ tiles
+                             (get_historical_tile(), on-disk cached, gitignored, no TTL — survey-era
+                             imagery never changes) — served by webapp.py's own
+                             /api/historical-tile route as extra options in index.html's base-layer
+                             picker, not a pipeline.py SECTION_SPECS entry; see CLAUDE.md item 43
+                             for the licensing basis (personal non-commercial use, confirmed with
+                             the user directly) and why /export doesn't work on these services
   planning.py               planning applications (National Planning Application Database,
                              radius search + a bonus exact-Eircode match) and flood risk (OPW
                              CFRAM via wms.py — fluvial/coastal/pluvial x current/mid-future/
@@ -2172,6 +2181,115 @@ app, rather than the documented-but-dead endpoints:
       PINNED "Property boundary" detail (not part of any theme at all)
       stays open regardless of which theme gets opened or closed
       afterward, since `theme.tileKeys` never contains `'boundary'`.
+
+43. **Historical satellite imagery + historic OS maps ("time travel" base
+    layers) — asked for directly: go back in time on satellite imagery,
+    then further back with overlaid historical maps.** New module
+    `historical_maps.py` + `GET /api/historical-tile/<layer_key>/<z>/<x>/
+    <y>.png`, wired into `index.html`'s base-layer picker as 10 extra
+    options alongside the existing Street/Satellite toggle.
+    - **Licensing checked and cleared with the user directly before
+      building anything** — asked first (AskUserQuestion) once the
+      source was found to be access-gated. The user's own answer is the
+      operative authorization: "If we're able to pull the tiles directly
+      from them and serve them internally, that's fine... this is not a
+      commercial product... I don't think we're breaching any licenses."
+      Verified against the actual governing text, not just the user's
+      framing: fetched and read Tailte Éireann's real Terms of Use in
+      full (via the GeoHive Hub Page item's own `/data?f=json` resource),
+      which distinguishes "personal non-commercial use... free of
+      charge" (permitted) from "commercial purposes... without obtaining,
+      in advance, a licence" (prohibited without permission) — matches
+      this app's own stated non-commercial personal-tool framing exactly.
+    - **Found via the same AGO app-config reverse-engineering technique
+      already used repeatedly in this doc** (see the "second batch"
+      writeup above), this time against `owner:GeoHiveApplications`:
+      `GET .../sharing/rest/search?q=owner:GeoHiveApplications` listed a
+      Dashboard app; its own `/data?f=json` has
+      `desktopView.widgets[].mapWidget.itemId` pointing to a separate Web
+      Map item; THAT item's own `/data?f=json` has
+      `baseMap.baseMapLayers[]` with the real underlying MapServer URLs
+      for 6 satellite-imagery epochs (1995, 1996-2000, 2001-2005,
+      2006-2012, 2011-2013, 2013-2018) and 4 historic OS map series
+      (6" first edition B&W 1837-1842, 6" first edition colour, 6" last
+      edition, 25" 1888-1913) — all real, confirmed-live
+      `utility.arcgis.com/usrsvcs/servers/<guid>/rest/services/
+      MapGenie*ITM/MapServer` services.
+    - **A genuinely new finding: `capabilities` listing "Map" does NOT
+      guarantee `/export` works — confirmed by a real 500, not assumed
+      from the string.** Every one of these MapGenie services reports
+      `capabilities: "Map,TilesOnly,Tilemap"`, and `/export` (the
+      technique already used for the contour layer, item 14) returns a
+      hard `500 "Error invoking service"` on all of them — `TilesOnly`
+      genuinely means no dynamic render, despite "Map" appearing in the
+      same capabilities string. This is a real, previously-undocumented
+      distinction from the GSI contour MapServer already in production
+      use, which DOES support `/export`. Fixed by going to the service's
+      own native ArcGIS Server tile cache instead — `/tile/{level}/{row}/
+      {col}` (Esri's standard tile-cache REST convention, row=y/col=x,
+      confirmed live) — and reprojecting server-side rather than relying
+      on `/export` to do it.
+    - **Native ITM (EPSG:2157) tile pyramid, reprojected into standard Web
+      Mercator XYZ tiles Leaflet expects — the inverse of `elevation.py`'s
+      own `_fetch_map_mosaic()` pattern, not a copy of it.** There: a
+      WGS84 area's bounds drive which XYZ tiles to fetch, mosaicked into
+      one texture. Here: one small OUTPUT Web Mercator tile's own bounds
+      are computed first, then reprojected pixel-by-pixel (vectorized
+      `pyproj` transforms, same verified-dependency discipline as every
+      other ITM transform in this app — see item 14's own reasoning for
+      why this is a "verify a real library" problem, not a hand-roll-able
+      one) to find which ITM-native source tiles cover it and where each
+      output pixel lands inside them, nearest-neighbor sampled into a
+      stitched mosaic. `_get_tile_info()` reads each service's own
+      `tileInfo` (origin + LOD list) rather than assuming a fixed
+      resolution — confirmed each of the 10 services' LOD pyramids
+      independently before relying on this.
+    - **Verified live, visually, across all 4 kinds spot-checked
+      (2013-2018 imagery, 1995 imagery, 25" map, 6" first-edition B&W
+      map) at the SAME real location (Fermoy, Co. Cork)** — consistent
+      field-boundary/river shapes across all four and legible "FER..."
+      text in the historic map tiles, confirming the reprojection lands
+      pixels in the right place, not just that it returns SOME image.
+      Performance: ~0.9s cold (source tiles fetched + reprojected),
+      ~0.03s warm (`.cache/historical_tiles/`, on-disk, same
+      atomic-write-then-rename convention as every other cache in this
+      app) — survey-era imagery never changes, so no TTL/expiry needed,
+      unlike `buildings.py`'s 30-day OSM cache.
+    - **A real gotcha confirmed while sourcing preview tiles for the
+      existing Google-Maps-style toggle, kept here since it applies to
+      this whole "hit a tile server directly" class of code:** a bare
+      `tile.openstreetmap.org` request (no subdomain, generic
+      `python-requests` User-Agent) can return HTTP 200 while the BODY is
+      OSM's own "access blocked... not following tile usage policy"
+      notice image — invisible to a plain status-code check. Fixed by
+      using the same `a.`-subdomain-rotated form + descriptive User-Agent
+      the live Street layer already uses. Don't add a new direct
+      tile-server fetch anywhere in this app without checking the actual
+      image content once, not just the status code.
+    - **Frontend: extended the existing Google-Maps-style base-layer
+      toggle (item 41) rather than replacing it** — the quick
+      Street/Satellite thumbnail-click stays exactly as-is (always
+      resolves to plain Street/Satellite regardless of which historical
+      layer happens to be active, a predictable "back to normal, or into
+      satellite" shortcut), with a small new "..." button next to it
+      opening a grouped panel (Standard / "Satellite — time travel" /
+      "Historic maps") listing all 12 base-layer options, closing on
+      outside-click or on selection. `HISTORICAL_LAYERS` is passed from
+      `webapp.py`'s `index()` route as an explicit ordered LIST (not a
+      dict) — Flask's `tojson` filter sorts dict keys alphabetically by
+      default, which silently broke the intended newest-to-oldest display
+      order (confirmed live: "1995" rendered before "2013–2018" until
+      this was caught and fixed).
+    - Verified end-to-end via the same jsdom + hand-written Leaflet-mock
+      harness used for item 40's redesign (built fresh, cleaned up after
+      — never committed, per this session's established pattern): panel
+      groups/option counts correct, open/close-on-outside-click works,
+      selecting a historical option updates the active state and closes
+      the panel, and the quick toggle still correctly resolves to
+      Street/Satellite from an active historical layer. Also verified
+      live via curl through the actual running Flask server: all 4
+      spot-checked layers return real 256x256 PNGs at a known-covered
+      location, and a bogus layer key correctly 404s.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
