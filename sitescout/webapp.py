@@ -146,11 +146,21 @@ def _run_from_resolved(query: str, resolved: autoaddress.ResolvedAddress):
     })
 
 
-@app.get("/api/scout/section/<name>")
+@app.route("/api/scout/section/<name>", methods=["GET", "POST"])
 def api_scout_section(name: str):
     """Fetches one section for a point already resolved by /api/scout —
     called once per name in pipeline.SECTION_NAMES, in parallel, while the
-    user is on the plot-confirmation step (see module docstring).
+    user is on the plot-confirmation step (see module docstring). GET
+    (lat/lon as query params only) is what the initial speculative fetch
+    uses, before any plot's been confirmed. POST (lat/lon still in the
+    query string, plus an optional `boundary_ring_sets` in the JSON body)
+    is what the frontend re-fetches with once a plot's actually confirmed
+    — the real boundary polygon is a genuine payload (potentially several
+    merged parcels' full ring geometry), not something that belongs in a
+    URL, same reasoning as /api/terrain-mesh's own POST body. Sections
+    that support it (see pipeline.SECTION_SPECS) use the boundary for a
+    real polygon-overlap check instead of a single point; every other
+    section just ignores it, same either way.
     """
     try:
         lat = float(request.args["lat"])
@@ -159,9 +169,13 @@ def api_scout_section(name: str):
         return _error("lat and lon query params are required", 400)
     eircode = request.args.get("eircode") or None
     label = request.args.get("label") or None
+    boundary_ring_sets = None
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        boundary_ring_sets = body.get("boundary_ring_sets") or None
 
     try:
-        data = pipeline.run_section(name, lat, lon, eircode, label)
+        data = pipeline.run_section(name, lat, lon, eircode, label, boundary_ring_sets)
     except ValueError as exc:
         return _error(str(exc), 404)
     except Exception as exc:

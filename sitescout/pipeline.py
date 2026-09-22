@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from typing import Optional
 
 from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohazards, gsi, heritage, rps, soil, utilities, planning, report, water_quality
 
@@ -76,30 +77,45 @@ def attach_boundaries(planning_applications: dict) -> None:
 # (comes from the user's confirmed plot selection, not a fresh point
 # query), but the CLI still fetches it here like everything else since it
 # has no picker UI to get a selection from.
+#
+# Every lambda takes the same 5 args, `boundary_ring_sets` included, even
+# though most sections ignore it — uniform enough for run()/run_section()
+# to call every entry the same way. Only the "is this site WITHIN/does
+# this OVERLAP a mapped zone" sections (as opposed to a plain "what's
+# nearby" radius search — the user drew this exact distinction directly)
+# actually use it, doing a real polygon-vs-polygon overlap test against
+# the confirmed plot boundary instead of a single point (see boundary.py's
+# own docstring, and CLAUDE.md for the full writeup). It's None for the
+# CLI (no plot picker at all) and for the web UI's own initial
+# speculative fetch (before a boundary's been confirmed) — every function
+# below falls back to its original point-based behaviour in that case.
 SECTION_SPECS = {
-    "geology": lambda lat, lon, eircode, label: gsi.get_geology(lat, lon),
-    "soil": lambda lat, lon, eircode, label: soil.get_soil_survey(lat, lon),
-    "groundwater": lambda lat, lon, eircode, label: gsi.get_groundwater(lat, lon),
-    "archaeology": lambda lat, lon, eircode, label: heritage.get_archaeology(lat, lon),
-    "smr_zone": lambda lat, lon, eircode, label: heritage.get_smr_zone(lat, lon),
-    "niah": lambda lat, lon, eircode, label: heritage.get_niah(lat, lon),
-    "planning_applications": lambda lat, lon, eircode, label: _planning_applications(lat, lon, eircode),
-    "flood_risk": lambda lat, lon, eircode, label: planning.get_flood_risk(lat, lon),
-    "ecology": lambda lat, lon, eircode, label: ecology.get_protected_sites(lat, lon),
-    "rps_aca": lambda lat, lon, eircode, label: rps.get_protected_structures(lat, lon),
-    "epa": lambda lat, lon, eircode, label: epa.get_environmental_hazards(lat, lon),
-    "geohazards": lambda lat, lon, eircode, label: geohazards.get_geohazards(lat, lon),
-    "water_quality": lambda lat, lon, eircode, label: water_quality.get_water_body_status(lat, lon),
-    "biodiversity": lambda lat, lon, eircode, label: biodiversity.get_species_records(lat, lon),
-    "terrain": lambda lat, lon, eircode, label: elevation.get_terrain(lat, lon),
-    "utilities": lambda lat, lon, eircode, label: _utilities(lat, lon, label or ""),
-    "planning": lambda lat, lon, eircode, label: planning.get_planning_links(lat, lon),
+    "geology": lambda lat, lon, eircode, label, boundary_ring_sets: gsi.get_geology(lat, lon),
+    "soil": lambda lat, lon, eircode, label, boundary_ring_sets: soil.get_soil_survey(lat, lon),
+    "groundwater": lambda lat, lon, eircode, label, boundary_ring_sets: gsi.get_groundwater(lat, lon),
+    "archaeology": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_archaeology(lat, lon),
+    "smr_zone": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_smr_zone(lat, lon, boundary_ring_sets),
+    "niah": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_niah(lat, lon),
+    "planning_applications": lambda lat, lon, eircode, label, boundary_ring_sets: _planning_applications(lat, lon, eircode),
+    "flood_risk": lambda lat, lon, eircode, label, boundary_ring_sets: planning.get_flood_risk(lat, lon),
+    "ecology": lambda lat, lon, eircode, label, boundary_ring_sets: ecology.get_protected_sites(lat, lon, boundary_ring_sets),
+    "rps_aca": lambda lat, lon, eircode, label, boundary_ring_sets: rps.get_protected_structures(lat, lon, boundary_ring_sets),
+    "epa": lambda lat, lon, eircode, label, boundary_ring_sets: epa.get_environmental_hazards(lat, lon, boundary_ring_sets),
+    "geohazards": lambda lat, lon, eircode, label, boundary_ring_sets: geohazards.get_geohazards(lat, lon),
+    "water_quality": lambda lat, lon, eircode, label, boundary_ring_sets: water_quality.get_water_body_status(lat, lon, boundary_ring_sets),
+    "biodiversity": lambda lat, lon, eircode, label, boundary_ring_sets: biodiversity.get_species_records(lat, lon),
+    "terrain": lambda lat, lon, eircode, label, boundary_ring_sets: elevation.get_terrain(lat, lon),
+    "utilities": lambda lat, lon, eircode, label, boundary_ring_sets: _utilities(lat, lon, label or ""),
+    "planning": lambda lat, lon, eircode, label, boundary_ring_sets: planning.get_planning_links(lat, lon),
 }
 
 SECTION_NAMES = tuple(SECTION_SPECS.keys())
 
 
-def run_section(name: str, lat: float, lon: float, eircode: str | None = None, label: str | None = None) -> dict:
+def run_section(
+    name: str, lat: float, lon: float, eircode: str | None = None, label: str | None = None,
+    boundary_ring_sets: Optional[list] = None,
+) -> dict:
     """Runs exactly one named section — used by the web UI's per-section
     endpoint so the browser can fetch all of them in parallel and update
     the sidebar as each one lands, instead of waiting on one big response.
@@ -109,20 +125,32 @@ def run_section(name: str, lat: float, lon: float, eircode: str | None = None, l
     """
     if name not in SECTION_SPECS:
         raise ValueError(f"Unknown section: {name}")
-    return SECTION_SPECS[name](lat, lon, eircode, label)
+    return SECTION_SPECS[name](lat, lon, eircode, label, boundary_ring_sets)
 
 
 def run(query: str, resolved, geo) -> dict:
     sections = {}
 
+    boundary_ring_sets = None
     try:
         sections["boundary"] = cadastral.get_boundary(geo.lat, geo.lon)
+        # boundary.py's convention is a LIST of ring-sets (one per parcel,
+        # for the web UI's possibly-merged selection) — get_boundary()
+        # returns a single ring-set (one parcel, the CLI has no picker to
+        # merge several), so wrap it. Real overlap checks (SMR Zone, radon,
+        # etc. — see SECTION_SPECS above) benefit here too, not just the
+        # web UI: the CLI's own single-point "in zone" checks had the exact
+        # same point-vs-real-shape gap this was built to fix.
+        if sections["boundary"].get("found"):
+            rings = sections["boundary"].get("polygon_rings_itm_wgs84")
+            if rings:
+                boundary_ring_sets = [rings]
     except Exception as exc:
         log.error("Cadastral boundary lookup failed: %s", exc)
 
     def _run_one(name):
         try:
-            return name, run_section(name, geo.lat, geo.lon, resolved.eircode, geo.label), None
+            return name, run_section(name, geo.lat, geo.lon, resolved.eircode, geo.label, boundary_ring_sets), None
         except Exception as exc:
             return name, None, exc
 

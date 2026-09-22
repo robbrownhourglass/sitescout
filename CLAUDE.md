@@ -52,6 +52,12 @@ sitescout/
   wfs.py                    shared helper for EPA's GeoServer (gis.epa.ie) via WFS GetFeature —
                              extracted from epa.py once water_quality.py needed the same
                              bbox+CRS-suffix query primitive (see its own gotcha note)
+  boundary.py                shared helper (shapely-based) for real polygon-vs-polygon overlap
+                             checks against the user's CONFIRMED plot boundary — as opposed to a
+                             single representative point — used by heritage.get_smr_zone(),
+                             epa.get_radon_risk(), ecology.get_protected_sites(),
+                             water_quality.get_water_body_status(), and rps._query_aca(); see
+                             CLAUDE.md item 45 for the real user report that led to this
   gsi.py                    geology (bedrock, subsoil) + groundwater vulnerability
   soil.py                   pedological soil survey (texture, drainage, depth, soil organic
                              carbon) — the Irish Soil Information System (ISIS), off the same EPA
@@ -2413,6 +2419,115 @@ app, rather than the documented-but-dead endpoints:
         still returns genuine content unaffected; a spot-checked
         satellite-imagery tile is unaffected by the new placeholder check
         (real photos never trip the low-colour-variety threshold).
+
+45. **Real user report with a screenshot: an SMR Zone visibly overlapped
+    the confirmed plot boundary on the map, but the card still said "not
+    within an SMR Zone."** Traced directly to a real architectural gap
+    across several modules, not a one-off bug: every "is this site
+    WITHIN/does this OVERLAP a mapped zone" category (as the user put it
+    themselves, explicitly distinguishing this from a plain "what's
+    nearby" radius search — "the point... should only be used in overall
+    distance measurements... we choose that around the point") only ever
+    tested a single representative POINT against the zone, never the
+    site's own real shape. Item 44's pin/parcel correction fixed WHICH
+    point gets used, but even the CORRECT point is still just one point —
+    a real, larger boundary (especially a merged multi-parcel selection)
+    can genuinely overlap a zone across most of its own shape while that
+    one point sits just outside it, or straddle two DIFFERENT zones a
+    single point could only ever see one of (the user's own examples:
+    "two different zones with regard to radon," "the property has two
+    different groundwater bodies").
+    - **New shared module `boundary.py`**: `ring_set_to_polygon()`/
+      `ring_sets_to_shape()` convert this app's existing ring-set
+      conventions (cadastral.py's own `polygon_ring_sets_wgs84`, and
+      every other module's own per-feature `rings`/GeoJSON
+      `coordinates`) into real shapely geometry — `shapely` was already a
+      verified dependency (item 20), reused here rather than adding a
+      second geometry approach. `find_overlapping(boundary_ring_sets,
+      candidates)` does the actual polygon-vs-polygon `.intersects()`
+      test and returns which candidates genuinely overlap, or `None`
+      (deliberately not an empty set) when no boundary was given at all —
+      so callers can tell "no boundary known yet, fall back to point-
+      based behaviour" apart from "boundary known, nothing really
+      overlaps." `radius_covering_m()` widens an existing fixed-radius
+      search just enough to comfortably cover a whole confirmed boundary
+      (which can be genuinely bigger than any single source's own default
+      search radius) before running the real overlap test on the
+      returned candidates — never shrinks a radius that was already
+      bigger. Verified directly before wiring in anywhere: a synthetic
+      boundary against a partially-overlapping, a fully-separate, and a
+      fully-containing candidate polygon each classified correctly.
+    - **Five modules updated to accept an optional
+      `boundary_ring_sets_wgs84` parameter**, each falling back to its
+      EXACT original point-only behaviour when it's `None` (the CLI has
+      no plot picker at all; the web UI's own initial speculative section
+      fetch — fired the moment the point resolves, before the user's
+      picked anything, see webapp.py's docstring — genuinely doesn't know
+      the boundary yet either):
+      `heritage.get_smr_zone()` (the reported case), `epa.get_radon_risk()`,
+      `water_quality.get_water_body_status()` (groundwater body only —
+      the surface water layers are already "what's nearby" radius
+      searches, not a zone-membership check, so the user's own drawn
+      distinction says leave those alone), `ecology.get_protected_sites()`
+      (SAC/SPA/NHA/pNHA — arguably the single most consequential category
+      in the report, per that module's own docstring, so it earned the
+      same fix even without being named directly), and `rps._query_aca()`.
+      **Deliberately NOT touched in this pass**: `geohazards.py`'s four
+      layers (landslide/aquifer/karst/source-protection — different
+      geometry primitives per layer, real risk of a rushed pass getting
+      one of them subtly wrong) and flood risk (`planning.py`'s WMS
+      `GetFeatureInfo` calls are a fundamentally different query
+      mechanism — pixel + small bbox, not a feature-return spatial query
+      — needing its own investigation before this same pattern could
+      apply). Left as an honest, explicit follow-up rather than silently
+      skipped.
+    - **`radon`/`water_quality` needed a real schema change, not just a
+      bug fix, since a boundary can genuinely find MORE than one real
+      zone**: both now always carry a plural list (`radon.zones`,
+      `water_quality.groundwater_bodies` — length 1 in the point-only
+      path too, so the frontend can loop it uniformly either way) with
+      each zone's own real description/status, while keeping their
+      original singular fields (`risk_description`, `groundwater_body`)
+      for backward-compatible verdict-line rendering — set to the WORST
+      band/status found, not an arbitrary one. `heritage.get_smr_zone()`
+      similarly gained `overlapping_zone_count` alongside its existing
+      singular `zone_id` (the first genuinely-overlapping zone). Verified
+      live, not just reasoned through: the exact reported site's real 20ha
+      parcel POSTed as a boundary correctly flips SMR Zone from "not
+      within" to "within," ecology from `any_within: false` to `true`,
+      and radon from 1 zone to 2 genuinely different real classifications
+      overlapping the same boundary — the precise scenario the user
+      described, reproduced with real data, not a synthetic example.
+    - **Frontend/transport**: `/api/scout/section/<name>` now accepts
+      POST as well as GET — GET (unchanged) is what the initial
+      speculative fetch still uses; POST carries the confirmed boundary's
+      full ring geometry as a real JSON body (same reasoning as
+      `/api/terrain-mesh`'s own POST body — a merged multi-parcel
+      boundary's geometry doesn't belong in a URL). `confirmPlotSelection()`
+      now calls `refetchAllSectionsAt()` UNCONDITIONALLY once anything's
+      selected (item 44 only did this when the point itself needed
+      correcting) — even an already-correct point is still just one
+      point, and the overlap categories need the real boundary regardless.
+      Map layer builders for radon and groundwater bodies were updated to
+      loop the new plural lists (each zone/body drawn with its OWN
+      description/status) instead of a single shared one, so two
+      genuinely different overlapping zones no longer get mislabeled with
+      each other's text.
+    - Verified end-to-end via the same jsdom + hand-written Leaflet-mock
+      harness used throughout this session, built fresh against the real
+      captured `/api/scout` response for the reported site: confirming
+      the real large parcel correctly triggers a POST re-fetch (not GET)
+      carrying exactly that parcel's own ring geometry as the JSON body;
+      and separately, direct calls to the card-rendering functions
+      (`epaCard`, `archaeologyCard`, `waterQualityCard`) with synthetic
+      multi-zone/multi-body data confirmed the new plural UI text (e.g.
+      "worst of 2 zones overlapping this plot," "Boundary overlaps 2 SMR
+      Zones") renders correctly. Also re-ran the CLI against an existing,
+      long-standing regression site (Trim Castle — no cadastral parcel at
+      that exact point, so the boundary-aware path correctly falls back
+      to the original point-only check, logged explicitly as "for map
+      display" with no "+ boundary overlap check" suffix) to confirm the
+      fallback path itself is unaffected, not just the new one.
 
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority

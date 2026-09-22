@@ -1193,11 +1193,19 @@ function buildRadonLayer(e){
   const group = L.layerGroup();
   const radon = e && e.radon;
   if(!radon || !radon.found) return group;
-  (radon.polygon_ring_sets_wgs84 || []).forEach(ringSet => {
-    ringsToLatLngs(ringSet).forEach(ring => {
-      L.polygon(ring, { color: CATEGORY_COLORS.epa, weight: 1.5, fillOpacity: 0.06, dashArray: '2 4', pane: 'polygonsPane' })
-        .bindPopup(`<strong>Radon risk</strong><br>${radon.risk_description}` + (radon.more_info_url ? `<br><a href="${radon.more_info_url}" target="_blank">Test your home</a>` : ''))
-        .addTo(group);
+  // `zones` always carries at least one entry (see epa.get_radon_risk) —
+  // looping it, each with its OWN description/rings, instead of the old
+  // single radon.polygon_ring_sets_wgs84/risk_description, is what lets a
+  // real boundary spanning two genuinely different radon classifications
+  // draw and label each one correctly instead of mislabeling the second
+  // zone's shape with the first zone's own description.
+  (radon.zones || []).forEach(zone => {
+    (zone.polygon_ring_sets_wgs84 || []).forEach(ringSet => {
+      ringsToLatLngs(ringSet).forEach(ring => {
+        L.polygon(ring, { color: CATEGORY_COLORS.epa, weight: 1.5, fillOpacity: 0.06, dashArray: '2 4', pane: 'polygonsPane' })
+          .bindPopup(`<strong>Radon risk</strong><br>${zone.risk_description}` + (zone.more_info_url ? `<br><a href="${zone.more_info_url}" target="_blank">Test your home</a>` : ''))
+          .addTo(group);
+      });
     });
   });
   return group;
@@ -1303,7 +1311,11 @@ function buildWaterQualityLayer(wq){
   const group = L.layerGroup();
   if(!wq) return group;
   const bodies = [...(wq.surface_water_bodies || [])];
-  if(wq.groundwater_body) bodies.push(Object.assign({ type: 'groundwater' }, wq.groundwater_body));
+  // groundwater_bodies (plural — see water_quality.get_water_body_status):
+  // draws EVERY genuinely overlapping body, not just wq.groundwater_body
+  // (the single worst-status one, kept for backward-compatible verdict
+  // text) — a real boundary can straddle more than one.
+  (wq.groundwater_bodies || []).forEach(gw => bodies.push(Object.assign({ type: 'groundwater' }, gw)));
   bodies.forEach(body => {
     const geom = body.geometry;
     if(!geom) return;
@@ -1767,12 +1779,25 @@ function addSectionOverlays(name, data){
 // user spends on the plot picker, rather than making them wait for one
 // big response. `generation` guards against a stale fetch from a
 // previous search landing after a new one has already started.
-function fetchSectionsInBackground(names, lat, lon, eircode, label, generation){
+// `boundaryRingSets` (optional — see refetchAllSectionsAt) is the
+// CONFIRMED plot boundary's own polygon_ring_sets_wgs84. When present,
+// this switches to a POST with the boundary as a real JSON body (a
+// merged multi-parcel boundary's full ring geometry doesn't belong in a
+// URL — same reasoning as /api/terrain-mesh) so backend sections that
+// support it (see pipeline.SECTION_SPECS) can do a real polygon-overlap
+// check instead of a single point. The initial speculative fetch (fired
+// before any plot's confirmed — see startPlotConfirmation) always omits
+// it and stays a plain GET.
+function fetchSectionsInBackground(names, lat, lon, eircode, label, generation, boundaryRingSets){
   names.forEach(name => {
     const params = new URLSearchParams({ lat: String(lat), lon: String(lon) });
     if(eircode) params.set('eircode', eircode);
     if(label) params.set('label', label);
-    fetch(`/api/scout/section/${encodeURIComponent(name)}?${params}`)
+    const url = `/api/scout/section/${encodeURIComponent(name)}?${params}`;
+    const fetchOpts = boundaryRingSets
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boundary_ring_sets: boundaryRingSets }) }
+      : undefined;
+    fetch(url, fetchOpts)
       .then(res => res.json().catch(() => ({})).then(body => ({ ok: res.ok, body })))
       .then(({ ok, body }) => {
         if(generation !== searchGeneration) return;
@@ -1803,23 +1828,30 @@ function onSectionArrived(name){
   });
 }
 
-// Re-runs every non-boundary section against a corrected point — called
-// from confirmPlotSelection() when the original geocoded pin turns out
-// not to actually fall inside whatever the user just confirmed (see the
-// point-in-polygon/centroid helpers above). Every section fetched so far
-// was anchored to the OLD point, including any real overlap/radius check
-// (e.g. SMR Zone) that should have been checked against the actual
-// selected plot instead. Reuses fetchSectionsInBackground() exactly as
-// the initial search does; bumping searchGeneration both invalidates any
-// still-in-flight fetch from the old point and reuses that function's
-// own existing stale-fetch guard here too, so no separate guard is
-// needed for this second wave of fetches.
-function refetchAllSectionsAt(lat, lon){
+// Re-runs every non-boundary section once a plot's actually confirmed —
+// called from confirmPlotSelection() unconditionally whenever at least
+// one parcel was selected (not just when the pin needed correcting, see
+// the point-in-polygon/centroid helpers above). Two independent reasons
+// the first, speculative fetch (fired the moment the point resolved,
+// before the user picked anything — see startPlotConfirmation) can be
+// wrong: (1) it was anchored to the geocoded pin, which can land outside
+// the real selected parcel entirely; (2) even when the pin WAS inside the
+// right parcel, it's still just one point — a real, larger boundary can
+// genuinely overlap TWO zones (two SMR Zones, two radon classifications,
+// two groundwater bodies — all asked about directly) that a single-point
+// check would only ever see one of, or none. Passing the confirmed
+// boundary here is what lets the relevant backend sections (see
+// pipeline.SECTION_SPECS) do a real polygon-overlap check instead.
+// Reuses fetchSectionsInBackground() exactly as the initial search does;
+// bumping searchGeneration both invalidates any still-in-flight fetch
+// from the first wave and reuses that function's own existing
+// stale-fetch guard here too, so no separate guard is needed.
+function refetchAllSectionsAt(lat, lon, boundaryRingSets){
   const myGeneration = ++searchGeneration;
 
   // Drop every already-built overlay layer group — each was built from
-  // the OLD point's data and would otherwise sit on the map duplicated
-  // alongside whatever the corrected re-fetch builds next.
+  // the FIRST wave's data and would otherwise sit on the map duplicated
+  // alongside whatever this corrected re-fetch builds next.
   Object.values(tileLayerGroups).flat().forEach(group => { if(map.hasLayer(group)) map.removeLayer(group); });
   tileLayerGroups = {};
 
@@ -1829,7 +1861,7 @@ function refetchAllSectionsAt(lat, lon){
     openDetail(TILE_SPECS.find(s => s.key === activeTileKey)); // shows the loading state again, same as the very first fetch
   }
 
-  fetchSectionsInBackground(currentSectionNames, lat, lon, currentEircode, currentLoc && currentLoc.label, myGeneration);
+  fetchSectionsInBackground(currentSectionNames, lat, lon, currentEircode, currentLoc && currentLoc.label, myGeneration, boundaryRingSets);
 }
 
 // ---- Plot picker: draws every nearby cadastral parcel as a clickable
@@ -1925,8 +1957,6 @@ function confirmPlotSelection(){
     const c = parcelsCentroid(selected);
     if(c){ effectiveLat = c.lat; effectiveLon = c.lon; }
   }
-  const pointCorrected = selected.length && currentLoc && (effectiveLat !== pinLat || effectiveLon !== pinLon);
-
   // The pin only ever showed where the geocoder guessed, which can now be
   // a visibly wrong spot relative to the plot actually confirmed (asked
   // for directly: "we want the original search pin to disappear") — the
@@ -1934,10 +1964,18 @@ function confirmPlotSelection(){
   // from here on.
   if(marker){ map.removeLayer(marker); marker = null; }
 
-  if(pointCorrected){
+  // Real user report, a second one on the same underlying theme: even
+  // once the point itself is correct, a real overlap check (SMR Zone,
+  // radon, groundwater body — any "is this site WITHIN a mapped zone"
+  // category, as distinct from a plain "what's nearby" radius search —
+  // the user drew this exact line themselves) needs the actual confirmed
+  // BOUNDARY, not a single point, since a real plot can genuinely overlap
+  // more than one zone. So this refetches unconditionally once anything's
+  // selected, not just when the pin needed correcting.
+  if(selected.length && currentLoc){
     currentLoc.lat = effectiveLat;
     currentLoc.lon = effectiveLon;
-    refetchAllSectionsAt(effectiveLat, effectiveLon);
+    refetchAllSectionsAt(effectiveLat, effectiveLon, sectionData.boundary.polygon_ring_sets_wgs84);
   }
 
   // Always drawn once confirmed — no checkbox, no theme membership (asked
@@ -2129,7 +2167,11 @@ function archaeologyCard(a, zone){
   const countLabel = a.monument_count + (a.more_exist ? '+' : '');
   let verdictText, verdictCls;
   if(zone && zone.in_zone){
-    verdictText = `Within SMR Zone ${zone.zone_id} — notification required before ground disturbance`;
+    // zone.overlapping_zone_count (see heritage.get_smr_zone): a real
+    // boundary can overlap more than one SMR Zone — asked for directly.
+    verdictText = zone.overlapping_zone_count > 1
+      ? `Boundary overlaps ${zone.overlapping_zone_count} SMR Zones — notification required before ground disturbance`
+      : `Within SMR Zone ${zone.zone_id} — notification required before ground disturbance`;
     verdictCls = 'warn';
   } else if(a.monument_count){
     verdictText = `Not within an SMR Zone, but ${countLabel} recorded monument(s) within 2km`;
@@ -2269,7 +2311,11 @@ function epaCard(e){
     const regNote = band.regulatory
       ? ' — meets Ireland’s regulatory "High Radon Area" threshold (≥10% probability); radon protective measures required for new construction.'
       : ' — below the regulatory "High Radon Area" threshold.';
-    verdictText = `${band.label} radon zone: ${radon.risk_description}${regNote}`;
+    // radon.multiple_zones (see epa.get_radon_risk): the boundary genuinely
+    // spans more than one classification — shown as the worst of them,
+    // flagged explicitly rather than silently picking one.
+    const spanNote = radon.multiple_zones ? ` (worst of ${radon.zones.length} zones overlapping this plot)` : '';
+    verdictText = `${band.label} radon zone: ${radon.risk_description}${spanNote}${regNote}`;
     verdictCls = band.cls;
   } else {
     verdictText = 'No radon classification returned at this point';
@@ -2280,6 +2326,11 @@ function epaCard(e){
   html += `<div style="margin-top:10px"><strong>Radon zone: ${band ? band.label : '<span class="muted">Unknown</span>'}</strong> ${radon.found ? `<span class="muted">(${radon.risk_description})</span>` : ''}</div>`;
   if(radon.found && radon.more_info_url){
     html += `<div class="muted" style="margin-top:2px"><a href="${radon.more_info_url}" target="_blank">Test your home</a></div>`;
+  }
+  if(radon.multiple_zones){
+    html += '<ul style="margin-top:6px">' + radon.zones.map(z =>
+      `<li>${z.risk_description}</li>`
+    ).join('') + '</ul>';
   }
 
   html += `<div style="margin-top:10px"><strong>${lfCountLabel} closed landfill(s) within 1km</strong></div>`;
@@ -2386,6 +2437,7 @@ function waterQualityCard(wq){
     return card('Water body status (EPA WFD)', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   const gw = wq.groundwater_body;
+  const groundwaterBodies = wq.groundwater_bodies || (gw ? [gw] : []);
   const surfaceBodies = wq.surface_water_bodies || [];
 
   let verdictText;
@@ -2403,7 +2455,15 @@ function waterQualityCard(wq){
 
   let html = verdict(verdictText, verdictCls);
 
-  html += `<div style="margin-top:10px"><strong>Groundwater body:</strong> ${gw ? `${gw.name} — ${gw.status}` : '<span class="muted">no data at this exact point</span>'}</div>`;
+  if(groundwaterBodies.length > 1){
+    // wq.multiple_groundwater_bodies (see water_quality.get_water_body_status):
+    // the confirmed boundary genuinely straddles more than one — asked
+    // for directly, list every one rather than picking just the worst.
+    html += `<div style="margin-top:10px"><strong>Groundwater bodies (${groundwaterBodies.length}, boundary overlaps all):</strong></div>`;
+    html += '<ul>' + groundwaterBodies.map(b => `<li>${b.name} <span class="muted">(${b.status || 'unknown'})</span></li>`).join('') + '</ul>';
+  } else {
+    html += `<div style="margin-top:10px"><strong>Groundwater body:</strong> ${gw ? `${gw.name} — ${gw.status}` : '<span class="muted">no data found</span>'}</div>`;
+  }
 
   html += `<div style="margin-top:10px"><strong>${surfaceBodies.length} nearby surface water body(ies)</strong></div>`;
   if(surfaceBodies.length){

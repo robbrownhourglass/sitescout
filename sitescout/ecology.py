@@ -21,7 +21,9 @@ what else this app reports.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
+from . import boundary
 from .arcgis import point_query, point_query_full
 
 log = logging.getLogger("sitescout.ecology")
@@ -57,52 +59,75 @@ def _site_dict(key: str, label: str, attrs: dict, rings=None, contains_site: boo
     }
 
 
-def get_protected_sites(lat: float, lon: float) -> dict:
+def get_protected_sites(lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
     """Two queries per designation type, mirroring heritage.get_smr_zone():
     an exact point-intersect (does the site fall inside this designation?)
     and a buffered search at SEARCH_RADIUS_M (every nearby designated area,
     for drawing as shaded regions on the map).
+
+    When `boundary_ring_sets_wgs84` (the CONFIRMED plot boundary — see
+    boundary.py) is given, "within this designation type" is decided by a
+    real polygon-vs-polygon overlap test against every candidate returned
+    by the buffered search, instead of a single point — same class of fix
+    as heritage.get_smr_zone(), applied here since this is arguably the
+    single most consequential category in the whole report (see this
+    module's own docstring) and deserves the same correctness. Falls back
+    to the original point-only check when no boundary is available (CLI,
+    or the web UI's own pre-confirmation fetch).
     """
     within = {}
     sites = []
     more_exist = False
+    search_radius_m = (
+        boundary.radius_covering_m(lat, lon, boundary_ring_sets_wgs84, SEARCH_RADIUS_M)
+        if boundary_ring_sets_wgs84 else SEARCH_RADIUS_M
+    )
 
     for key, layer_url, label in DESIGNATION_TYPES:
-        log.info("Checking %s at the exact site point…", label)
-        exact_feats = point_query(layer_url, lon, lat, out_fields=OUT_FIELDS)
-        current_code = None
-        if exact_feats:
-            attrs = exact_feats[0]["attributes"]
-            current_code = attrs.get("SITECODE")
-            within[key] = _site_dict(key, label, attrs, contains_site=True)
-        else:
-            within[key] = None
-
-        log.info("Querying %s within %dm (for map display)…", label, SEARCH_RADIUS_M)
+        log.info("Querying %s within %dm (for map display + overlap check)…", label, search_radius_m)
         data = point_query_full(
             layer_url, lon, lat,
             out_fields=OUT_FIELDS,
-            distance_m=SEARCH_RADIUS_M,
+            distance_m=search_radius_m,
             return_geometry=True,
             result_record_count=25,
         )
-        for f in data.get("features", []):
+        feats = data.get("features", [])
+
+        if boundary_ring_sets_wgs84:
+            overlapping_idx = boundary.find_overlapping(
+                boundary_ring_sets_wgs84,
+                [(i, [f.get("geometry", {}).get("rings")]) for i, f in enumerate(feats)],
+            ) or set()
+            current_code = None
+            for i in overlapping_idx:
+                current_code = feats[i]["attributes"].get("SITECODE")
+                break  # just need ONE for the singular `within[key]` summary below; every overlapping site is still marked individually
+        else:
+            log.info("Checking %s at the exact site point…", label)
+            exact_feats = point_query(layer_url, lon, lat, out_fields=OUT_FIELDS)
+            current_code = exact_feats[0]["attributes"].get("SITECODE") if exact_feats else None
+            overlapping_idx = (
+                {i for i, f in enumerate(feats) if f["attributes"].get("SITECODE") == current_code}
+                if current_code else set()
+            )
+
+        within[key] = _site_dict(key, label, feats[next(iter(overlapping_idx))]["attributes"], contains_site=True) if overlapping_idx else None
+
+        for i, f in enumerate(feats):
             attrs = f["attributes"]
             rings = f.get("geometry", {}).get("rings")
-            sites.append(_site_dict(
-                key, label, attrs, rings=rings,
-                contains_site=(attrs.get("SITECODE") == current_code and current_code is not None),
-            ))
+            sites.append(_site_dict(key, label, attrs, rings=rings, contains_site=(i in overlapping_idx)))
         if data.get("exceededTransferLimit"):
             more_exist = True
-            log.warning("-> %s: more sites exist within %dm than were returned", label, SEARCH_RADIUS_M)
+            log.warning("-> %s: more sites exist within %dm than were returned", label, search_radius_m)
 
     any_within = any(within.values())
     if any_within:
         log.info("-> Within: %s", ", ".join(v["type_label"] for v in within.values() if v))
     else:
-        log.info("-> Not within any NPWS-designated area at this exact point")
-    log.info("-> %d designated area(s) mapped within %dm%s", len(sites), SEARCH_RADIUS_M, " (capped, more exist)" if more_exist else "")
+        log.info("-> Not within any NPWS-designated area")
+    log.info("-> %d designated area(s) mapped within %dm%s", len(sites), search_radius_m, " (capped, more exist)" if more_exist else "")
 
     if any_within:
         names = "; ".join(f"{v['type_label']} — {v['site_name']} ({v['site_code']})" for v in within.values() if v)
@@ -115,9 +140,9 @@ def get_protected_sites(lat: float, lon: float) -> dict:
         )
     else:
         caveat = (
-            "Not within a mapped SAC, SPA, NHA, or proposed NHA at this exact point. Proximity to "
-            "one (see map) can still matter — Appropriate Assessment screening isn't strictly "
-            "bounded by the designation's own boundary."
+            "Not within a mapped SAC, SPA, NHA, or proposed NHA" + (" at this exact point" if not boundary_ring_sets_wgs84 else "") + ". "
+            "Proximity to one (see map) can still matter — Appropriate Assessment screening isn't "
+            "strictly bounded by the designation's own boundary."
         )
 
     return {

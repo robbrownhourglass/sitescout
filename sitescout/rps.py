@@ -25,7 +25,9 @@ SOURCES is keyed by that exact (all-caps) name.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
+from . import boundary
 from .arcgis import point_query, point_query_full
 from .local_authority import get_local_authority_raw
 
@@ -130,23 +132,47 @@ def _query_rps(cfg: dict, lat: float, lon: float) -> dict:
     }
 
 
-def _query_aca(cfg: dict, lat: float, lon: float) -> dict:
-    exact_feats = point_query(cfg["url"], lon, lat, out_fields=cfg["out_fields"])
-    in_aca = bool(exact_feats)
-    current = cfg["extract"](exact_feats[0]["attributes"]) if exact_feats else None
-
+def _query_aca(cfg: dict, lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
+    """When `boundary_ring_sets_wgs84` is given, "in an ACA" is decided by
+    a real polygon-vs-polygon overlap test against the confirmed plot
+    boundary instead of a single point — same class of fix as
+    heritage.get_smr_zone()/ecology.get_protected_sites(). Falls back to
+    the original point-only check otherwise.
+    """
+    search_radius_m = (
+        boundary.radius_covering_m(lat, lon, boundary_ring_sets_wgs84, ACA_SEARCH_RADIUS_M)
+        if boundary_ring_sets_wgs84 else ACA_SEARCH_RADIUS_M
+    )
     data = point_query_full(
         cfg["url"], lon, lat,
         out_fields=cfg["out_fields"],
-        distance_m=ACA_SEARCH_RADIUS_M,
+        distance_m=search_radius_m,
         return_geometry=True,
         result_record_count=25,
     )
+    feats = data.get("features", [])
+
+    if boundary_ring_sets_wgs84:
+        overlapping_idx = boundary.find_overlapping(
+            boundary_ring_sets_wgs84,
+            [(i, [f.get("geometry", {}).get("rings")]) for i, f in enumerate(feats)],
+        ) or set()
+    else:
+        exact_feats = point_query(cfg["url"], lon, lat, out_fields=cfg["out_fields"])
+        current = cfg["extract"](exact_feats[0]["attributes"]) if exact_feats else None
+        overlapping_idx = (
+            {i for i, f in enumerate(feats) if cfg["extract"](f["attributes"]).get("name") == current.get("name")}
+            if current else set()
+        )
+
+    in_aca = bool(overlapping_idx)
+    current = cfg["extract"](feats[next(iter(overlapping_idx))]["attributes"]) if overlapping_idx else None
+
     areas = []
-    for f in data.get("features", []):
+    for i, f in enumerate(feats):
         item = cfg["extract"](f["attributes"])
         item["polygon_rings_wgs84"] = f.get("geometry", {}).get("rings")
-        item["contains_site"] = in_aca and item.get("name") == (current or {}).get("name")
+        item["contains_site"] = i in overlapping_idx
         areas.append(item)
 
     return {
@@ -159,7 +185,7 @@ def _query_aca(cfg: dict, lat: float, lon: float) -> dict:
     }
 
 
-def get_protected_structures(lat: float, lon: float) -> dict:
+def get_protected_structures(lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
     authority_raw = get_local_authority_raw(lat, lon)
     authority = authority_raw.title() if authority_raw else None
     source = SOURCES.get(authority_raw) if authority_raw else None
@@ -180,7 +206,7 @@ def get_protected_structures(lat: float, lon: float) -> dict:
 
     log.info("Querying RPS/ACA for %s…", authority)
     rps = _query_rps(source["rps"], lat, lon) if source.get("rps") else {"available": False}
-    aca = _query_aca(source["aca"], lat, lon) if source.get("aca") else {"available": False}
+    aca = _query_aca(source["aca"], lat, lon, boundary_ring_sets_wgs84) if source.get("aca") else {"available": False}
 
     if rps.get("available"):
         log.info("-> %d RPS structure(s) within %dm", rps["structure_count"], RPS_SEARCH_RADIUS_M)

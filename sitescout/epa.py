@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from . import boundary
 from .wfs import wfs_query
 
 log = logging.getLogger("sitescout.epa")
@@ -150,23 +151,92 @@ def _first_point(geometry: Optional[dict]) -> tuple:
     return None, None
 
 
-def get_radon_risk(lat: float, lon: float) -> dict:
+RADON_ZONE_COUNT_CAP = 10  # generous — radon zones are typically large; a real plot spanning more than a couple would be exceptional
+
+# Same three fixed values radonBand() in index.html already maps to
+# High/Medium/Low — duplicated here (not imported, there's nothing to
+# import from JS) purely to rank multiple genuinely-overlapping zones by
+# severity, same class of small, deliberately-duplicated fixed table as
+# FLOW_DIR_OFFSETS (see CLAUDE.md) — kept in sync by both being this short.
+def _radon_badness(desc: Optional[str]) -> int:
+    if not desc:
+        return 0
+    if "1 in 5" in desc:
+        return 3
+    if "1 in 10" in desc:
+        return 2
+    if "1 in 20" in desc:
+        return 1
+    return 0
+
+
+def get_radon_risk(lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
+    """Real user report: a confirmed plot boundary can genuinely span TWO
+    different radon classifications, but the original point-only version
+    here (a 100m buffer, `max_features=1`) could only ever report one —
+    same underlying gap as heritage.get_smr_zone() (see its own docstring
+    and boundary.py). When `boundary_ring_sets_wgs84` is given, this widens
+    the search to comfortably cover the whole boundary, fetches every
+    candidate zone, and keeps only the ones that genuinely overlap it (a
+    real polygon-vs-polygon test, not just "returned by a nearby bbox
+    query") — `zones` always carries every one of those (length 1 in the
+    point-only path too, so the frontend map layer can loop it uniformly);
+    the top-level `risk_description`/`polygon_ring_sets_wgs84`/
+    `more_info_url` fields stay a single value for backward-compatible
+    verdict-line rendering — the WORST band found, not an arbitrary one.
+    """
     log.info("Querying EPA Radon Risk Map…")
-    feats = wfs_query(RADON_LAYER, lat, lon, RADON_SEARCH_HALF_M, max_features=1)["features"]
+    if boundary_ring_sets_wgs84:
+        half_m = boundary.radius_covering_m(lat, lon, boundary_ring_sets_wgs84, RADON_SEARCH_HALF_M)
+        max_features = RADON_ZONE_COUNT_CAP
+    else:
+        half_m = RADON_SEARCH_HALF_M
+        max_features = 1
+    feats = wfs_query(RADON_LAYER, lat, lon, half_m, max_features=max_features)["features"]
     if not feats:
         log.info("-> No radon classification returned at this exact point")
         return {
             "found": False,
+            "zones": [],
             "source": "EPA Radon Risk Map",
             "note": "No radon classification returned at this exact point.",
         }
-    props = feats[0]["properties"]
-    log.info("-> %s", props.get("Risk"))
+
+    candidates = [
+        {
+            "risk_description": f["properties"].get("Risk"),
+            "polygon_ring_sets_wgs84": _polygon_ring_sets(f.get("geometry"), simplify=True),
+            "more_info_url": f["properties"].get("URL"),
+        }
+        for f in feats
+    ]
+
+    if boundary_ring_sets_wgs84:
+        overlapping_idx = boundary.find_overlapping(
+            boundary_ring_sets_wgs84,
+            [(i, c["polygon_ring_sets_wgs84"]) for i, c in enumerate(candidates)],
+        ) or set()
+        zones = [c for i, c in enumerate(candidates) if i in overlapping_idx]
+        if not zones:
+            # The widened search should always find at least the zone the
+            # (corrected) point itself sits in — falling back to the raw
+            # candidate list rather than silently reporting nothing.
+            zones = candidates[:1]
+    else:
+        zones = candidates[:1]  # unchanged: "the one classification at this exact point"
+
+    worst = max(zones, key=lambda z: _radon_badness(z["risk_description"]))
+    if len(zones) > 1:
+        log.info("-> Boundary overlaps %d radon zones; worst: %s", len(zones), worst["risk_description"])
+    else:
+        log.info("-> %s", worst["risk_description"])
     return {
         "found": True,
-        "risk_description": props.get("Risk"),
-        "polygon_ring_sets_wgs84": _polygon_ring_sets(feats[0].get("geometry"), simplify=True),
-        "more_info_url": props.get("URL"),
+        "risk_description": worst["risk_description"],
+        "polygon_ring_sets_wgs84": worst["polygon_ring_sets_wgs84"],
+        "more_info_url": worst["more_info_url"],
+        "zones": zones,
+        "multiple_zones": len(zones) > 1,
         "source": "EPA Radon Risk Map",
     }
 
@@ -330,7 +400,7 @@ def get_major_industrial_facilities(lat: float, lon: float) -> dict:
     }
 
 
-def get_environmental_hazards(lat: float, lon: float) -> dict:
+def get_environmental_hazards(lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
     """One combined section — radon + closed landfills + licensed
     industrial facilities + historic mine sites + major industrial
     facilities (PRTR) — mirroring ecology.py's pattern of bundling several
@@ -338,7 +408,7 @@ def get_environmental_hazards(lat: float, lon: float) -> dict:
     than several separate ones.
     """
     return {
-        "radon": get_radon_risk(lat, lon),
+        "radon": get_radon_risk(lat, lon, boundary_ring_sets_wgs84),
         "landfills": get_closed_landfills(lat, lon),
         "ippc": get_ippc_facilities(lat, lon),
         "mines": get_historic_mines(lat, lon),

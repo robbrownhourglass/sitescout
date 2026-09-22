@@ -24,7 +24,9 @@ a 50km radius around Dublin and got a real spread: 79 Poor, 71 Moderate,
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
+from . import boundary
 from .wfs import wfs_query
 
 log = logging.getLogger("sitescout.water_quality")
@@ -47,22 +49,66 @@ SURFACE_WATER_LAYERS = [
 STATUS_BADNESS_RANK = {"High": 1, "Good": 2, "Moderate": 3, "Poor": 4, "Bad": 5}
 
 
-def get_water_body_status(lat: float, lon: float) -> dict:
+GROUNDWATER_SEARCH_HALF_M = 100  # a small buffer reliably hits the polygon at the point; widened when a boundary is given (see below)
+GROUNDWATER_BODY_COUNT_CAP = 5   # groundwater bodies are large; a real plot spanning more than a couple would be exceptional
+
+
+def get_water_body_status(lat: float, lon: float, boundary_ring_sets_wgs84: Optional[list] = None) -> dict:
+    """Real user report: a confirmed plot boundary can genuinely straddle
+    TWO groundwater bodies, but the original point-only version here (a
+    100m buffer, `max_features=1`) could only ever report one — same
+    underlying gap as heritage.get_smr_zone()/epa.get_radon_risk(). When
+    `boundary_ring_sets_wgs84` is given, widens the search to comfortably
+    cover the whole boundary and keeps only the bodies that genuinely
+    overlap it (a real polygon-vs-polygon test). `groundwater_bodies`
+    always carries every one found (length 0 or 1 in the point-only path
+    too, for a uniform frontend contract); `groundwater_body` stays a
+    single value for backward-compatible rendering — the WORST-status one.
+    """
     log.info("Querying EPA WFD groundwater body status…")
-    gw_feats = wfs_query(GROUNDWATER_BODY_LAYER, lat, lon, 100, max_features=1)["features"]
-    groundwater_body = None
-    if gw_feats:
-        p = gw_feats[0]["properties"]
-        groundwater_body = {
-            "name": p.get("Name"),
-            "code": p.get("European_Code"),
-            "status": p.get("Overall_GW_Status"),
-            "period": p.get("Period_for_WFD_Status"),
-            "geometry": gw_feats[0].get("geometry"),
-        }
-        log.info("-> Groundwater body: %s (%s)", groundwater_body["name"], groundwater_body["status"])
+    if boundary_ring_sets_wgs84:
+        half_m = boundary.radius_covering_m(lat, lon, boundary_ring_sets_wgs84, GROUNDWATER_SEARCH_HALF_M)
+        max_features = GROUNDWATER_BODY_COUNT_CAP
     else:
-        log.info("-> No groundwater body classification at this exact point")
+        half_m = GROUNDWATER_SEARCH_HALF_M
+        max_features = 1
+    gw_feats = wfs_query(GROUNDWATER_BODY_LAYER, lat, lon, half_m, max_features=max_features)["features"]
+
+    candidates = [
+        {
+            "name": f["properties"].get("Name"),
+            "code": f["properties"].get("European_Code"),
+            "status": f["properties"].get("Overall_GW_Status"),
+            "period": f["properties"].get("Period_for_WFD_Status"),
+            "geometry": f.get("geometry"),
+        }
+        for f in gw_feats
+    ]
+
+    if boundary_ring_sets_wgs84 and candidates:
+        overlapping_idx = boundary.find_overlapping(
+            boundary_ring_sets_wgs84,
+            [(i, boundary.geojson_geometry_to_ring_sets(c["geometry"])) for i, c in enumerate(candidates)],
+        ) or set()
+        groundwater_bodies = [c for i, c in enumerate(candidates) if i in overlapping_idx]
+        if not groundwater_bodies:
+            groundwater_bodies = candidates[:1]  # the widened search should always at least find the one under the (corrected) point
+    else:
+        groundwater_bodies = candidates[:1]  # unchanged: "the one body at this exact point"
+
+    groundwater_body = None
+    if groundwater_bodies:
+        groundwater_body = max(
+            groundwater_bodies,
+            key=lambda b: STATUS_BADNESS_RANK.get(b.get("status"), 0),
+        )
+        if len(groundwater_bodies) > 1:
+            log.info("-> Boundary overlaps %d groundwater bodies; worst: %s (%s)",
+                      len(groundwater_bodies), groundwater_body["name"], groundwater_body["status"])
+        else:
+            log.info("-> Groundwater body: %s (%s)", groundwater_body["name"], groundwater_body["status"])
+    else:
+        log.info("-> No groundwater body classification found")
 
     surface_water_bodies = []
     for water_type, layer, half_m in SURFACE_WATER_LAYERS:
@@ -83,8 +129,7 @@ def get_water_body_status(lat: float, lon: float) -> dict:
         log.info("   - %s (%s): %s", b["name"], b["type"], b["status"])
 
     all_statuses = [b["status"] for b in surface_water_bodies if b.get("status")]
-    if groundwater_body and groundwater_body.get("status"):
-        all_statuses.append(groundwater_body["status"])
+    all_statuses += [b["status"] for b in groundwater_bodies if b.get("status")]
     worst_status = max(all_statuses, key=lambda s: STATUS_BADNESS_RANK.get(s, 0), default=None)
     severity = (
         "bad" if worst_status in ("Poor", "Bad")
@@ -95,6 +140,8 @@ def get_water_body_status(lat: float, lon: float) -> dict:
 
     return {
         "groundwater_body": groundwater_body,
+        "groundwater_bodies": groundwater_bodies,
+        "multiple_groundwater_bodies": len(groundwater_bodies) > 1,
         "surface_water_bodies": surface_water_bodies,
         "surface_water_count": len(surface_water_bodies),
         "worst_status": worst_status,
