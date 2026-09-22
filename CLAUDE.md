@@ -2044,6 +2044,76 @@ app, rather than the documented-but-dead endpoints:
       20ha/10.7ha partially-covered parcels are unaffected
       (`boundary_lidar_coverage_fraction` unchanged at 0.53/0.39).
 
+40. **Main-page (index.html) redesign — asked for directly: "too many
+    different layers and interactions," so the map's base-layer switcher
+    and the sidebar's 15 flat individual tiles were both restructured.**
+    Confirmed the theme grouping with the user before implementing (a
+    5-option AskUserQuestion with concrete previews) rather than guessing
+    at an inherently subjective structure — a big, easy-to-get-wrong
+    decision that's expensive to redo once a large refactor is built on
+    top of it.
+    - **Base layer**: Leaflet's own `L.control.layers` — previously
+      showing BOTH the two base layers (Street/Satellite) AND every
+      section's own overlay (~20 entries across `SECTION_OVERLAY_BUILDERS`)
+      in one dropdown — is gone. `#baseLayerToggle`, a plain two-button
+      pill fixed over the map, is the only thing controlling which base
+      layer is shown (`setBaseLayer()` — exactly one of Street/Satellite
+      on the map at a time, no Leaflet control involved at all).
+    - **Sidebar**: the flat 15-tile icon strip is now a 5-theme accordion
+      (`THEMES`: Ground & Terrain, Water, Heritage & Protected Areas,
+      Environment & Hazards, Planning & Utilities — the user's own
+      confirmed grouping). Clicking a theme header expands it (single-open
+      — clicking a different theme collapses whichever was open) and
+      engages every layer inside it on the map at once; each layer row
+      inside an open theme has its own checkbox for fine-tuning (turn one
+      off while the rest of the theme stays on) plus a clickable title
+      that opens the SAME sliding detail panel/card the old flat tiles
+      used — that mechanism didn't need to change, only what triggers it.
+      Property boundary is pinned above the theme list, always shown on
+      the map once confirmed with no checkbox at all (asked for directly:
+      "we always have... the actual property boundary as well," not
+      something toggled by whichever theme happens to be open).
+    - **Overlay layers are no longer eagerly added to the map the instant
+      their section's data arrives** — `addSectionOverlays()` now just
+      *builds* each section's layer group and files it under the tile
+      that owns it (`tileLayerGroups`, keyed by tile via a new
+      `SECTION_TO_TILE_KEY` reverse lookup from each tile's own `deps`);
+      whether it's actually ON the map is decided entirely by
+      `setTileLayersVisible()`, driven by the checkbox/theme state. A
+      genuinely nice side effect, not just an implementation detail: the
+      precise-terrain image layer (`buildTerrainImageLayer()`) was already
+      documented as "fetched lazily... once this overlay is actually added
+      to the map" — it's now lazier still, only fetching once the user
+      actually opens Ground & Terrain, not merely once its background
+      section finishes loading.
+    - Elevation contours (a general reference layer, not tied to any
+      site's own data — previously registered directly on the old layer
+      control, off by default) is now an extra checkbox row folded into
+      Ground & Terrain, with no detail card of its own (nothing to show —
+      it's just a toggle).
+    - **Verified with a real DOM, not a hand-rolled partial mock**: no
+      browser automation (Playwright/Puppeteer/a real Chromium) was
+      available in this environment, so `jsdom` was installed temporarily
+      into the scratchpad (cleaned up afterward, never added to the
+      project's own `requirements.txt`/`package.json` — this app has
+      none) alongside a small but real Leaflet API mock (`L.map`,
+      `.addLayer`/`.removeLayer`/`.hasLayer`, panes, polygons/markers/
+      polylines, layer groups, `L.TileLayer.extend`), then the actual
+      page `<script>` was extracted and run against REAL captured
+      `/api/scout` + `/api/scout/section/*` responses for a real address —
+      not synthetic stubs, which caught a real gap in the test itself
+      (`L.polyline` initially missing from the mock, since
+      `buildWaterQualityLayer()` genuinely uses it) before it could hide
+      a real page bug the same way. Confirmed end-to-end: the toggle
+      swaps base layers correctly; the panel builds with 5 themes + a
+      pinned boundary row + an info row; boundary shows with no checkbox
+      once confirmed; opening a theme auto-checks its boxes and adds its
+      real built layers to the map; unchecking ONE box removes only that
+      layer; opening a different theme collapses and fully un-engages the
+      previous one (single-open accordion); clicking a layer's title (not
+      its checkbox) opens the correct detail card; the boundary row and
+      the contour checkbox both work as their own special cases.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

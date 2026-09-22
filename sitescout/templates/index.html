@@ -93,32 +93,76 @@
   #mapWrap.visible{ opacity:1; }
   #map{ position:absolute; inset:0; }
 
-  #tileStrip{
-    position:absolute; top:0; right:0; bottom:0; width:64px; z-index:1000;
+  /* ---- Right-hand category panel: a wider accordion (themes -> layer
+     rows with checkboxes) replacing the old icon-only tile strip — see
+     the JS section for the full rationale. Property boundary is pinned
+     above the theme list (always shown on the map once confirmed, no
+     checkbox); "Sources & methodology" stays a plain row at the bottom. */
+  #categoryPanel{
+    position:absolute; top:0; right:0; bottom:0; width:300px; max-width:82vw; z-index:1000;
     background:var(--card); border-left:1px solid var(--line);
-    display:flex; flex-direction:column; align-items:center; padding:14px 0; gap:10px; overflow-y:auto;
+    display:flex; flex-direction:column; overflow-y:auto;
   }
-  .tile-btn{
-    width:44px; height:44px; flex:none; border-radius:10px; border:1px solid var(--line); background:var(--paper);
-    display:flex; align-items:center; justify-content:center;
-    cursor:pointer; color:var(--ink); position:relative; padding:0;
+  .boundary-row, .info-row{
+    display:flex; align-items:center; gap:10px; width:100%; padding:14px 16px; border:none;
+    border-bottom:1px solid var(--line); background:var(--card); cursor:pointer;
+    font-size:13.5px; font-weight:600; color:var(--ink); text-align:left; position:relative;
   }
-  .tile-btn:hover{ border-color:var(--moss); }
-  .tile-btn.active{ border-color:var(--moss); background:#eaf0ec; }
-  .tile-btn svg{ width:22px; height:22px; transition:opacity .15s ease; }
-  .tile-btn.pending svg{ opacity:.2; }
-  .tile-spinner{
-    display:none; position:absolute; top:50%; left:50%; margin:-9px 0 0 -9px;
-    width:18px; height:18px; border:2px solid var(--line); border-top-color:var(--moss);
-    border-radius:50%; animation:spin .7s linear infinite;
+  .boundary-row:hover, .info-row:hover{ background:#f3f1ea; }
+  .boundary-row.active, .info-row.active{ background:#eaf0ec; }
+  .boundary-row svg, .info-row svg{ width:20px; height:20px; flex:none; color:var(--moss-dark); }
+  .row-title{ flex:1; }
+
+  .theme{ border-bottom:1px solid var(--line); }
+  .theme-header{
+    display:flex; align-items:center; gap:10px; width:100%; padding:14px 16px; border:none;
+    background:var(--card); cursor:pointer; font-size:13.5px; font-weight:600; color:var(--ink); text-align:left;
   }
-  .tile-btn.pending .tile-spinner{ display:block; }
-  .tile-dot{ width:7px; height:7px; border-radius:50%; background:var(--muted); position:absolute; top:4px; right:4px; }
-  .tile-dot.ok{ background:var(--ok); }
-  .tile-dot.warn{ background:var(--warn); }
-  .tile-dot.bad{ background:var(--bad); }
-  .tile-btn.pending .tile-dot{ display:none; }
-  .tile-strip-divider{ width:32px; height:1px; background:var(--line); margin:4px 0; flex:none; }
+  .theme-header:hover{ background:#f3f1ea; }
+  .theme-header.open{ background:#eaf0ec; }
+  .theme-title{ flex:1; }
+  .theme-chevron{ color:var(--muted); font-size:15px; transition:transform .15s ease; }
+  .theme-header.open .theme-chevron{ transform:rotate(90deg); }
+  .theme-body{ background:#faf9f5; }
+
+  .layer-row{ display:flex; align-items:center; gap:10px; padding:9px 16px 9px 32px; font-size:13px; position:relative; }
+  .layer-row input[type=checkbox]{ flex:none; width:15px; height:15px; cursor:pointer; accent-color:var(--moss); }
+  .layer-row .row-title{
+    flex:1; display:flex; align-items:center; gap:8px; cursor:pointer; color:var(--ink);
+  }
+  .layer-row .row-title:hover{ color:var(--moss-dark); text-decoration:underline; }
+  .layer-row .row-title svg{ width:16px; height:16px; flex:none; opacity:.75; color:var(--moss-dark); }
+  .layer-row.pending .row-title{ pointer-events:none; opacity:.5; }
+  .layer-row.extra{ padding-left:32px; }
+  .layer-row.active{ background:#eaf0ec; }
+
+  /* Status dots (theme header + per-row) and the loading-spinner state
+     they share, reused from the old .tile-dot/.tile-spinner styling. */
+  .row-dot, .theme-status-dot{ width:7px; height:7px; border-radius:50%; background:var(--muted); flex:none; }
+  .row-dot.ok, .theme-status-dot.ok{ background:var(--ok); }
+  .row-dot.warn, .theme-status-dot.warn{ background:var(--warn); }
+  .row-dot.bad, .theme-status-dot.bad{ background:var(--bad); }
+  .row-dot.pending, .boundary-row.pending .row-dot{ display:none; }
+  .theme-status-dot.pending{ background:var(--line); animation:card-dot-pulse 1.4s ease-in-out infinite; }
+  .row-spinner{
+    display:none; width:13px; height:13px; border:2px solid var(--line); border-top-color:var(--moss);
+    border-radius:50%; animation:spin .7s linear infinite; flex:none;
+  }
+  .layer-row.pending .row-spinner, .boundary-row.pending .row-spinner{ display:block; }
+
+  /* ---- Base map toggle (Street/Satellite) — replaces Leaflet's own
+     L.control.layers, which used to also list every overlay layer;
+     overlays are now controlled entirely from the category panel above. */
+  #baseLayerToggle{
+    position:absolute; top:14px; left:14px; z-index:1000; display:flex; background:var(--card);
+    border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.12);
+  }
+  #baseLayerToggle button{
+    border:none; background:transparent; padding:8px 14px; font-size:12.5px; font-weight:600;
+    color:var(--muted); cursor:pointer;
+  }
+  #baseLayerToggle button.active{ background:var(--moss); color:#fff; }
+  #baseLayerToggle button:not(.active):hover{ background:#f3f1ea; }
 
   #plotPicker{
     flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
@@ -133,7 +177,7 @@
   #plotPicker button:hover{ background:var(--moss-dark); }
 
   #detailPanel{
-    position:absolute; top:0; right:64px; bottom:0; width:400px; max-width:88vw;
+    position:absolute; top:0; right:300px; bottom:0; width:400px; max-width:88vw;
     background:var(--card); border-left:1px solid var(--line); box-shadow:-8px 0 20px rgba(0,0,0,.12);
     transform:translateX(100%); transition: transform .25s ease; z-index:999; overflow-y:auto; padding:22px 20px;
   }
@@ -216,7 +260,11 @@
 
   <main id="mapWrap">
     <div id="map"></div>
-    <nav id="tileStrip"></nav>
+    <div id="baseLayerToggle">
+      <button type="button" data-key="Street" class="active">Map</button>
+      <button type="button" data-key="Satellite">Satellite</button>
+    </div>
+    <nav id="categoryPanel"></nav>
     <aside id="detailPanel">
       <button id="detailClose" class="detail-close" aria-label="Close">×</button>
       <div id="detailContent"></div>
@@ -239,7 +287,8 @@ const addressInputEl = document.getElementById('addressInput');
 const scoutBtnEl = document.getElementById('scoutBtn');
 const scoutBtnLabel = scoutBtnEl.textContent;
 const mapWrapEl = document.getElementById('mapWrap');
-const tileStripEl = document.getElementById('tileStrip');
+const categoryPanelEl = document.getElementById('categoryPanel');
+const baseLayerToggleEl = document.getElementById('baseLayerToggle');
 const detailPanelEl = document.getElementById('detailPanel');
 const detailContentEl = document.getElementById('detailContent');
 const plotPickerEl = document.getElementById('plotPicker');
@@ -247,10 +296,16 @@ const confirmPlotBtnEl = document.getElementById('confirmPlotBtn');
 
 let map, marker;
 let baseLayers = {};      // built once, on first map init — "Street" / "Satellite"
-let overlayLayers = {};   // toggle label -> L.layerGroup, for the map's layer control
-let layerControl = null;
+let activeBaseKey = 'Street';
 let contourTileLayer = null; // built once — a general reference layer, not tied to any one search's data (see initMap)
-let tileButtons = {};     // category key -> tile <button>, for highlighting the active one
+let contourVisible = false;
+let boundaryLayerGroup = null; // always shown once confirmed — not a checkbox-controlled theme layer, see confirmPlotSelection()
+let tileLayerGroups = {};  // tile key -> [L.layerGroup, ...] built so far, as each section's data arrives (may be async — see addSectionOverlays)
+let tileLayerVisible = {}; // tile key -> bool, whether the user currently wants its layer(s) shown on the map
+let tileCheckboxes = {};   // tile key -> its <input type=checkbox> in the category panel
+let themeButtons = {};     // theme key -> { header, body } elements
+let activeThemeKey = null; // single-open accordion — see toggleTheme()
+let tileButtons = {};     // category key -> its row/button element (boundary row, layer row, or the info row), for highlighting the active one + patching its status dot
 let activeTileKey = null;
 let resultsModeEntered = false;
 
@@ -477,6 +532,15 @@ function ensureMap(){
   );
   baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
 
+  // Simple two-way toggle (see #baseLayerToggle) replacing Leaflet's own
+  // L.control.layers — asked for directly ("instead, I want to change
+  // that to just toggle between satellite and OpenStreetMap"). Only one
+  // base layer is ever on the map at once; streetLayer starts added
+  // (matches the toggle's own default-active button in the HTML).
+  baseLayerToggleEl.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => setBaseLayer(btn.dataset.key));
+  });
+
   // Contour lines (EPA/GSI, 10m interval) — a general reference layer, not
   // section-specific data, so it's created once here rather than through
   // SECTION_OVERLAY_BUILDERS. This layer's own vector geometry can't be
@@ -529,6 +593,18 @@ function ensureMap(){
   // ecology, etc.) have already loaded in the background.
   map.createPane('pickerPane');
   map.getPane('pickerPane').style.zIndex = 900;
+}
+
+// Swaps which base layer is on the map (exactly one at a time) and
+// updates the toggle button's own active state — see #baseLayerToggle.
+function setBaseLayer(key){
+  if(key === activeBaseKey || !baseLayers[key]) return;
+  if(map.hasLayer(baseLayers[activeBaseKey])) map.removeLayer(baseLayers[activeBaseKey]);
+  baseLayers[key].addTo(map);
+  activeBaseKey = key;
+  baseLayerToggleEl.querySelectorAll('button').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.key === key);
+  });
 }
 
 window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
@@ -605,36 +681,43 @@ function geometryToRingSets(geometry){
   return [];
 }
 
-// Resets the map's overlays for a fresh search, and — unlike before —
-// immediately recreates an (empty) layer control rather than leaving it
-// null until the first section arrives, so the base-layer switcher
-// (Street/Satellite) is available right away during plot-picking, not
-// just once background data starts coming in.
+// Resets the map's overlays for a fresh search. Overlay visibility is now
+// driven entirely by the category panel's own theme/checkbox state (see
+// setTileLayersVisible()/toggleTheme()) rather than Leaflet's own
+// L.control.layers, which used to list every overlay as well as the base
+// layers — asked for directly ("too many different layers and
+// interactions"). The base-layer toggle (#baseLayerToggle) is separate
+// and unaffected by a fresh search.
 function clearOverlayLayers(){
-  if(layerControl){ map.removeControl(layerControl); }
-  Object.values(overlayLayers).forEach(g => map.removeLayer(g));
-  overlayLayers = {};
-  layerControl = L.control.layers(baseLayers, overlayLayers, { collapsed: true, position: 'topleft' }).addTo(map);
-  // Registered here (not via addOverlay(), and not added to the map by
-  // default) since it's a general reference layer available everywhere,
-  // not a per-site finding — unlike every other overlay in this app, which
-  // auto-displays because it's specifically flagging something found near
-  // this site. Contour lines are dense enough countrywide that defaulting
-  // them on would clutter the view before the user's asked for them.
-  layerControl.addOverlay(contourTileLayer, 'Elevation contours (EPA)');
+  Object.values(tileLayerGroups).flat().forEach(g => { if(map.hasLayer(g)) map.removeLayer(g); });
+  tileLayerGroups = {};
+  tileLayerVisible = {};
+  if(map.hasLayer(contourTileLayer)) map.removeLayer(contourTileLayer);
+  contourVisible = false;
+  if(boundaryLayerGroup){ map.removeLayer(boundaryLayerGroup); boundaryLayerGroup = null; }
+  activeThemeKey = null;
 }
 
-// Adds `group` to the map and the layer-control list under `label`, unless
-// it's empty (nothing found for that category) — no point offering a
-// toggle for a layer with nothing in it. Sections now arrive one at a time
-// in the background rather than all at once, so this adds to the existing
-// control incrementally (L.Control.Layers.addOverlay) instead of the
-// control being built fresh at the end like before.
-function addOverlay(label, group){
-  if(!group.getLayers().length) return;
-  overlayLayers[label] = group;
-  group.addTo(map);
-  layerControl.addOverlay(group, label);
+// Turns `tileKey`'s built layer group(s) on/off on the map — called both
+// from a checkbox's own change handler and from toggleTheme() (which
+// flips every tile in a theme at once). Layers not built yet (a section
+// still loading) simply have nothing to add/remove yet; whenever
+// addSectionOverlays() does build one later, it checks tileLayerVisible
+// itself and adds it immediately if the box is already checked — so a
+// slow section arriving after its theme was opened still shows up
+// without needing the user to re-toggle anything.
+function setTileLayersVisible(tileKey, visible){
+  tileLayerVisible[tileKey] = visible;
+  (tileLayerGroups[tileKey] || []).forEach(g => {
+    if(visible){ if(!map.hasLayer(g)) g.addTo(map); }
+    else if(map.hasLayer(g)) map.removeLayer(g);
+  });
+}
+
+function setContourVisible(visible){
+  contourVisible = visible;
+  if(visible){ if(!map.hasLayer(contourTileLayer)) contourTileLayer.addTo(map); }
+  else if(map.hasLayer(contourTileLayer)) map.removeLayer(contourTileLayer);
 }
 
 // `b` comes from the confirmed plot selection (cadastral.summarise_selected_parcels()'s
@@ -1064,16 +1147,18 @@ function buildBiodiversityLayer(b){
 // a 1km radius can straddle up to 4 tiles depending on where the point
 // falls relative to the survey grid (confirmed at Trinity College
 // Dublin, which needs all 4). Fetched lazily (the browser only requests
-// /api/terrain-image once this overlay is actually added to the map,
-// i.e. once found via addOverlay() below) and rendered server-side in
+// /api/terrain-image once this overlay is actually added to the map —
+// now even lazier than before: not just once its section's data arrives,
+// but only once the user actually opens/checks Ground & Terrain, see
+// setTileLayersVisible()) and rendered server-side in
 // elevation.render_dtm_image() from the exact same cached tiles
 // get_precise_elevation() already assembled for its own point-value read.
 // L.imageOverlay bounded to the mosaic's real (cropped) WGS84 extent
 // (bounds_wgs84, computed via pyproj from the same ITM crop used to
 // build the image itself — guaranteed to match, not independently
-// derived). Wrapped in a layerGroup purely so addOverlay()'s existing
-// group.getLayers().length empty-check keeps working unmodified — an
-// L.imageOverlay isn't an L.layerGroup and has no such method itself.
+// derived). Wrapped in a layerGroup purely so addSectionOverlays()'s
+// existing group.getLayers().length empty-check keeps working unmodified
+// — an L.imageOverlay isn't an L.layerGroup and has no such method itself.
 function buildTerrainImageLayer(t){
   const group = L.layerGroup();
   const p = t && t.precise;
@@ -1106,56 +1191,181 @@ function statusFromCardNode(node){
 
 const INFO_SPEC = { key: 'info', title: 'Sources & methodology', deps: [], build: () => buildInfoCard() };
 
-// Builds every tile button ONCE per search, all showing a pending (grey,
-// pulsing) dot — unlike the old one-shot buildTileStrip(), this doesn't
-// get rebuilt as data arrives; refreshTile() below just patches one tile's
-// dot (and, if it's open, the detail panel) at a time as each section's
-// background fetch resolves. That's what makes the sidebar progressively
-// tick over instead of popping in all at once.
-function buildTileStripSkeleton(){
-  tileStripEl.innerHTML = '';
+// Builds the whole right-hand category panel ONCE per search: a pinned
+// "Property boundary" row (always shown once confirmed — no theme, no
+// checkbox, since the boundary itself is always drawn on the map too, see
+// confirmPlotSelection()), the 5 accordion theme sections (THEMES), and a
+// "Sources & methodology" row at the bottom. Unlike the old flat 15-tile
+// strip, this doesn't get rebuilt as data arrives — refreshTile() below
+// just patches one row's dot (and its theme's aggregate dot, and the
+// detail panel if it's open) at a time as each section's background fetch
+// resolves, same progressive-tick-over behaviour as before.
+function buildCategoryPanel(){
+  categoryPanelEl.innerHTML = '';
   tileButtons = {};
+  tileCheckboxes = {};
+  themeButtons = {};
 
-  TILE_SPECS.forEach(spec => {
-    const btn = document.createElement('button');
-    btn.className = 'tile-btn pending';
-    btn.type = 'button';
-    btn.title = spec.title;
-    btn.innerHTML = `${TILE_ICONS[spec.key] || ''}<span class="tile-spinner"></span><span class="tile-dot pending"></span>`;
-    btn.addEventListener('click', () => toggleDetail(spec));
-    tileButtons[spec.key] = btn;
-    tileStripEl.appendChild(btn);
+  const boundarySpec = TILE_SPECS.find(s => s.key === 'boundary');
+  const boundaryRow = document.createElement('button');
+  boundaryRow.type = 'button';
+  boundaryRow.className = 'boundary-row pending';
+  boundaryRow.innerHTML = `${TILE_ICONS.boundary}<span class="row-title">Property boundary</span><span class="row-spinner"></span><span class="row-dot pending"></span>`;
+  boundaryRow.addEventListener('click', () => toggleDetail(boundarySpec));
+  tileButtons.boundary = boundaryRow;
+  categoryPanelEl.appendChild(boundaryRow);
+
+  THEMES.forEach(theme => {
+    const themeEl = document.createElement('div');
+    themeEl.className = 'theme';
+
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'theme-header';
+    header.innerHTML = `<span class="theme-status-dot pending"></span><span class="theme-title">${theme.title}</span><span class="theme-chevron">&rsaquo;</span>`;
+    header.addEventListener('click', () => toggleTheme(theme.key));
+
+    const body = document.createElement('div');
+    body.className = 'theme-body';
+    body.style.display = 'none';
+
+    theme.tileKeys.forEach(key => {
+      const spec = TILE_SPECS.find(s => s.key === key);
+      const row = document.createElement('div');
+      row.className = 'layer-row pending';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.addEventListener('change', () => setTileLayersVisible(key, checkbox.checked));
+
+      const title = document.createElement('span');
+      title.className = 'row-title';
+      title.innerHTML = `${TILE_ICONS[key] || ''}<span>${spec.title}</span>`;
+      title.addEventListener('click', () => toggleDetail(spec));
+
+      const spinner = document.createElement('span');
+      spinner.className = 'row-spinner';
+      const dot = document.createElement('span');
+      dot.className = 'row-dot pending';
+
+      row.appendChild(checkbox);
+      row.appendChild(title);
+      row.appendChild(spinner);
+      row.appendChild(dot);
+      body.appendChild(row);
+
+      tileButtons[key] = row;
+      tileCheckboxes[key] = checkbox;
+    });
+
+    // Elevation contours (EPA/GSI) — a general reference layer, not tied
+    // to any one site's own fetched data (see clearOverlayLayers()'s own
+    // comment above), so it's an extra checkbox row with no detail card
+    // and no status dot, folded into Ground & Terrain rather than
+    // getting its own theme for one item.
+    if(theme.key === 'ground'){
+      const contourRow = document.createElement('div');
+      contourRow.className = 'layer-row extra';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.addEventListener('change', () => setContourVisible(cb.checked));
+      const title = document.createElement('span');
+      title.className = 'row-title';
+      title.style.cursor = 'default';
+      title.textContent = 'Elevation contours (EPA)';
+      contourRow.appendChild(cb);
+      contourRow.appendChild(title);
+      body.appendChild(contourRow);
+    }
+
+    themeEl.appendChild(header);
+    themeEl.appendChild(body);
+    categoryPanelEl.appendChild(themeEl);
+    themeButtons[theme.key] = { header, body };
   });
 
-  const divider = document.createElement('div');
-  divider.className = 'tile-strip-divider';
-  tileStripEl.appendChild(divider);
-
   const infoBtn = document.createElement('button');
-  infoBtn.className = 'tile-btn';
   infoBtn.type = 'button';
-  infoBtn.title = INFO_SPEC.title;
-  infoBtn.innerHTML = `${TILE_ICONS.info}<span class="tile-dot ok"></span>`;
+  infoBtn.className = 'info-row';
+  infoBtn.innerHTML = `${TILE_ICONS.info}<span class="row-title">Sources &amp; methodology</span>`;
   infoBtn.addEventListener('click', () => toggleDetail(INFO_SPEC));
   tileButtons.info = infoBtn;
-  tileStripEl.appendChild(infoBtn);
+  categoryPanelEl.appendChild(infoBtn);
 }
 
-// Patches one tile's dot to reflect its current state: still pending, or
-// (once every dependency has settled) the real ok/warn/bad read off the
-// card it would render — reusing the same *Card() functions the detail
-// panel itself uses, so the dot and the panel can never disagree.
+const STATUS_RANK = { ok: 0, warn: 1, bad: 2 };
+
+// Patches one tile's row dot to reflect its current state: still pending,
+// or (once every dependency has settled) the real ok/warn/bad read off
+// the card it would render — reusing the same *Card() functions the
+// detail panel itself uses, so the dot and the panel can never disagree.
+// Also refreshes its theme header's own aggregate dot (the worst status
+// among that theme's tiles) — boundary has no theme, refreshThemeStatus()
+// is a no-op for it.
 function refreshTile(spec){
-  const btn = tileButtons[spec.key];
-  if(!btn) return;
-  const dot = btn.querySelector('.tile-dot');
+  const row = tileButtons[spec.key];
+  if(!row) return;
+  const dot = row.querySelector('.row-dot');
   if(!isSpecReady(spec)){
-    btn.classList.add('pending');
-    dot.className = 'tile-dot pending';
+    row.classList.add('pending');
+    if(dot) dot.className = 'row-dot pending';
+  } else {
+    row.classList.remove('pending');
+    if(dot) dot.className = 'row-dot ' + (statusFromCardNode(spec.build()) || 'ok');
+  }
+  refreshThemeStatus(spec.key);
+}
+
+function refreshThemeStatus(tileKey){
+  const theme = THEMES.find(t => t.tileKeys.includes(tileKey));
+  if(!theme) return;
+  const dotEl = themeButtons[theme.key].header.querySelector('.theme-status-dot');
+  const statuses = theme.tileKeys.map(key => {
+    const row = tileButtons[key];
+    if(!row || row.classList.contains('pending')) return null;
+    const rowDot = row.querySelector('.row-dot');
+    return ['bad', 'warn', 'ok'].find(cls => rowDot.classList.contains(cls)) || 'ok';
+  });
+  if(statuses.some(s => s === null)){
+    dotEl.className = 'theme-status-dot pending';
     return;
   }
-  btn.classList.remove('pending');
-  dot.className = 'tile-dot ' + (statusFromCardNode(spec.build()) || 'ok');
+  const worst = statuses.reduce((acc, s) => (STATUS_RANK[s] > STATUS_RANK[acc] ? s : acc), 'ok');
+  dotEl.className = 'theme-status-dot ' + worst;
+}
+
+// Clicking a theme header expands/collapses it — only one theme open at a
+// time (asked for directly: "once you click on one of the categories, the
+// map layers change to reflect THAT" — singular, not an accumulating
+// multi-theme state) — and engages/disengages every layer inside it on
+// the map all at once; individual checkboxes then let the user fine-tune
+// within an already-open theme (turn off just one layer, keep the rest).
+function toggleTheme(themeKey){
+  const wasOpen = activeThemeKey === themeKey;
+  if(activeThemeKey) collapseTheme(THEMES.find(t => t.key === activeThemeKey));
+  if(wasOpen){ activeThemeKey = null; return; }
+  activeThemeKey = themeKey;
+  expandTheme(THEMES.find(t => t.key === themeKey));
+}
+
+function expandTheme(theme){
+  const { header, body } = themeButtons[theme.key];
+  header.classList.add('open');
+  body.style.display = 'block';
+  theme.tileKeys.forEach(key => {
+    tileCheckboxes[key].checked = true;
+    setTileLayersVisible(key, true);
+  });
+}
+
+function collapseTheme(theme){
+  const { header, body } = themeButtons[theme.key];
+  header.classList.remove('open');
+  body.style.display = 'none';
+  theme.tileKeys.forEach(key => {
+    tileCheckboxes[key].checked = false;
+    setTileLayersVisible(key, false);
+  });
 }
 
 function toggleDetail(spec){
@@ -1205,6 +1415,27 @@ const TILE_SPECS = [
   { key: 'planning', title: 'Planning context', deps: ['planning', 'planning_applications'], build: () => planningCard(sectionData.planning, sectionData.planning_applications) },
   { key: 'utilities', title: 'Utilities', deps: ['utilities'], build: () => utilitiesCard(sectionData.utilities) },
 ];
+
+// ---- Themes: groups TILE_SPECS into the categories shown in the new
+// category panel (boundary is pinned separately, always shown — see
+// buildCategoryPanel()). Asked for directly: fewer, broader groupings
+// instead of 15 flat individual tiles, organized around what a planner is
+// actually trying to answer at each stage (ground conditions, water,
+// heritage/protection status, environmental hazards, planning/utilities).
+const THEMES = [
+  { key: 'ground', title: 'Ground & Terrain', tileKeys: ['geology', 'soil', 'terrain', 'geohazards'] },
+  { key: 'water', title: 'Water', tileKeys: ['water', 'waterQuality'] },
+  { key: 'heritage', title: 'Heritage & Protected Areas', tileKeys: ['archaeology', 'niah', 'rpsAca', 'ecology'] },
+  { key: 'environment', title: 'Environment & Hazards', tileKeys: ['epa', 'biodiversity'] },
+  { key: 'planning', title: 'Planning & Utilities', tileKeys: ['planning', 'utilities'] },
+];
+
+// Reverse lookup: section name -> which TILE_SPEC key owns it. Each
+// section belongs to exactly one tile's own `deps` list, so this is
+// unambiguous — used by addSectionOverlays() to file a newly-built map
+// layer under the right tile.
+const SECTION_TO_TILE_KEY = {};
+TILE_SPECS.forEach(spec => spec.deps.forEach(d => { SECTION_TO_TILE_KEY[d] = spec.key; }));
 
 // A dependency counts as "settled" once it's either arrived or failed —
 // readiness means "stop showing a spinner", not "succeeded" (a failed
@@ -1267,8 +1498,22 @@ const SECTION_OVERLAY_BUILDERS = {
   // comment above for the full story.
 };
 
+// Builds each of `name`'s own map layer(s) (if any) and files them under
+// the tile that owns this section — NOT auto-added to the map any more
+// (that's now entirely the category panel's job, see setTileLayersVisible()).
+// If that tile's theme is already open when this section's data lands,
+// the newly-built layer is shown immediately (tileLayerVisible already
+// true); otherwise it just waits, built and ready, for whenever the user
+// opens that theme or checks that box.
 function addSectionOverlays(name, data){
-  (SECTION_OVERLAY_BUILDERS[name] || []).forEach(([label, builder]) => addOverlay(label, builder(data)));
+  const tileKey = SECTION_TO_TILE_KEY[name];
+  if(!tileKey) return;
+  (SECTION_OVERLAY_BUILDERS[name] || []).forEach(([, builder]) => {
+    const group = builder(data);
+    if(!group.getLayers().length) return; // nothing found for this category — no layer worth tracking
+    (tileLayerGroups[tileKey] = tileLayerGroups[tileKey] || []).push(group);
+    if(tileLayerVisible[tileKey]) group.addTo(map);
+  });
 }
 
 // Fires one request per section name, all in parallel (the browser and
@@ -1390,7 +1635,11 @@ function confirmPlotSelection(){
   if(pickerLayerGroup){ map.removeLayer(pickerLayerGroup); pickerLayerGroup = null; }
   plotPickerEl.style.display = 'none';
 
-  addOverlay('Property boundary', buildBoundaryLayer(sectionData.boundary));
+  // Always drawn once confirmed — no checkbox, no theme membership (asked
+  // for directly: "we always have... the actual property boundary as
+  // well", regardless of whichever theme is open).
+  boundaryLayerGroup = buildBoundaryLayer(sectionData.boundary);
+  boundaryLayerGroup.addTo(map);
   refreshTile(TILE_SPECS.find(s => s.key === 'boundary'));
   if(activeTileKey === 'boundary') openDetail(TILE_SPECS.find(s => s.key === 'boundary'));
 
@@ -1436,7 +1685,7 @@ function startPlotConfirmation(data){
   plotPickerEl.style.display = 'flex';
   updateConfirmButtonLabel();
 
-  buildTileStripSkeleton();
+  buildCategoryPanel();
 
   setLoading(false);
   setStatus('Found: ' + loc.label + (data.eircode ? ' (' + data.eircode + ')' : '') + ' — via ' + loc.source);
