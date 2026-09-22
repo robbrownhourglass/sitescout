@@ -152,17 +152,23 @@
 
   /* ---- Base map toggle (Street/Satellite) — replaces Leaflet's own
      L.control.layers, which used to also list every overlay layer;
-     overlays are now controlled entirely from the category panel above. */
+     overlays are now controlled entirely from the category panel above.
+     Google Maps style, asked for directly: one small square thumbnail
+     showing a real preview of whichever layer you'd SWITCH TO (not the
+     one currently showing), with its name overlaid at the bottom —
+     clicking it toggles. Bottom-left, matching Google's own placement —
+     also deliberately NOT top-left, where Leaflet's own zoom control
+     already lives (a real reported overlap otherwise). */
   #baseLayerToggle{
-    position:absolute; top:14px; left:14px; z-index:1000; display:flex; background:var(--card);
-    border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.12);
+    position:absolute; bottom:24px; left:14px; z-index:1000; width:76px; height:76px; padding:0;
+    border:2px solid #fff; border-radius:6px; overflow:hidden; cursor:pointer;
+    background:#ccc no-repeat center/cover; box-shadow:0 2px 8px rgba(0,0,0,.3);
   }
-  #baseLayerToggle button{
-    border:none; background:transparent; padding:8px 14px; font-size:12.5px; font-weight:600;
-    color:var(--muted); cursor:pointer;
+  #baseLayerToggle:hover{ border-color:var(--moss); }
+  #baseLayerToggle .toggle-label{
+    position:absolute; left:0; right:0; bottom:0; padding:4px 0 3px; text-align:center;
+    font-size:11px; font-weight:700; color:#fff; background:linear-gradient(transparent, rgba(0,0,0,.6));
   }
-  #baseLayerToggle button.active{ background:var(--moss); color:#fff; }
-  #baseLayerToggle button:not(.active):hover{ background:#f3f1ea; }
 
   #plotPicker{
     flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
@@ -260,10 +266,7 @@
 
   <main id="mapWrap">
     <div id="map"></div>
-    <div id="baseLayerToggle">
-      <button type="button" data-key="Street" class="active">Map</button>
-      <button type="button" data-key="Satellite">Satellite</button>
-    </div>
+    <button type="button" id="baseLayerToggle"><span class="toggle-label"></span></button>
     <nav id="categoryPanel"></nav>
     <aside id="detailPanel">
       <button id="detailClose" class="detail-close" aria-label="Close">×</button>
@@ -532,14 +535,12 @@ function ensureMap(){
   );
   baseLayers = { 'Street': streetLayer, 'Satellite': satelliteLayer };
 
-  // Simple two-way toggle (see #baseLayerToggle) replacing Leaflet's own
-  // L.control.layers — asked for directly ("instead, I want to change
-  // that to just toggle between satellite and OpenStreetMap"). Only one
-  // base layer is ever on the map at once; streetLayer starts added
-  // (matches the toggle's own default-active button in the HTML).
-  baseLayerToggleEl.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => setBaseLayer(btn.dataset.key));
-  });
+  // Google-Maps-style single-thumbnail toggle (see #baseLayerToggle) —
+  // replacing Leaflet's own L.control.layers, asked for directly. One
+  // click flips whichever base layer is on the map; streetLayer starts
+  // added (matches updateBaseLayerToggleUI()'s own initial call below).
+  baseLayerToggleEl.addEventListener('click', () => setBaseLayer(activeBaseKey === 'Street' ? 'Satellite' : 'Street'));
+  updateBaseLayerToggleUI();
 
   // Contour lines (EPA/GSI, 10m interval) — a general reference layer, not
   // section-specific data, so it's created once here rather than through
@@ -595,16 +596,36 @@ function ensureMap(){
   map.getPane('pickerPane').style.zIndex = 900;
 }
 
+// Fixed preview tiles for the base-layer toggle thumbnail (#baseLayerToggle)
+// — a real z15 tile near this app's own long-standing R32 E4F8 test site,
+// confirmed live before use, not a synthetic placeholder. Deliberately
+// uses the SAME `a.`-subdomain convention the live Street layer above
+// already uses, not the bare `tile.openstreetmap.org` host — confirmed
+// live that the bare host can return a 200 status with a fake "access
+// blocked" placeholder IMAGE instead of a real error under automated
+// access (per OSM's tile usage policy), which a plain status-code check
+// would miss entirely; the `{s}`-rotated subdomain form doesn't hit this.
+const SATELLITE_PREVIEW_TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/15/10312/16033';
+const STREET_PREVIEW_TILE_URL = 'https://a.tile.openstreetmap.org/15/16033/10312.png';
+
+// Google Maps' own convention: the thumbnail shows a preview of whichever
+// layer you'd SWITCH TO (not the one currently on the map), with its name
+// overlaid at the bottom — see #baseLayerToggle's own CSS comment.
+function updateBaseLayerToggleUI(){
+  const previewingSatellite = activeBaseKey === 'Street';
+  baseLayerToggleEl.style.backgroundImage = `url('${previewingSatellite ? SATELLITE_PREVIEW_TILE_URL : STREET_PREVIEW_TILE_URL}')`;
+  baseLayerToggleEl.querySelector('.toggle-label').textContent = previewingSatellite ? 'Satellite' : 'Map';
+  baseLayerToggleEl.title = previewingSatellite ? 'Switch to satellite view' : 'Switch to map view';
+}
+
 // Swaps which base layer is on the map (exactly one at a time) and
-// updates the toggle button's own active state — see #baseLayerToggle.
+// refreshes the toggle's own preview thumbnail — see #baseLayerToggle.
 function setBaseLayer(key){
   if(key === activeBaseKey || !baseLayers[key]) return;
   if(map.hasLayer(baseLayers[activeBaseKey])) map.removeLayer(baseLayers[activeBaseKey]);
   baseLayers[key].addTo(map);
   activeBaseKey = key;
-  baseLayerToggleEl.querySelectorAll('button').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.key === key);
-  });
+  updateBaseLayerToggleUI();
 }
 
 window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
@@ -1425,8 +1446,8 @@ const TILE_SPECS = [
 const THEMES = [
   { key: 'ground', title: 'Ground & Terrain', tileKeys: ['geology', 'soil', 'terrain', 'geohazards'] },
   { key: 'water', title: 'Water', tileKeys: ['water', 'waterQuality'] },
-  { key: 'heritage', title: 'Heritage & Protected Areas', tileKeys: ['archaeology', 'niah', 'rpsAca', 'ecology'] },
-  { key: 'environment', title: 'Environment & Hazards', tileKeys: ['epa', 'biodiversity'] },
+  { key: 'heritage', title: 'Heritage & Protected Areas', tileKeys: ['archaeology', 'niah', 'rpsAca'] },
+  { key: 'environment', title: 'Environment & Hazards', tileKeys: ['ecology', 'epa', 'biodiversity'] },
   { key: 'planning', title: 'Planning & Utilities', tileKeys: ['planning', 'utilities'] },
 ];
 

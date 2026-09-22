@@ -2114,6 +2114,39 @@ app, rather than the documented-but-dead endpoints:
       its checkbox) opens the correct detail card; the boundary row and
       the contour checkbox both work as their own special cases.
 
+41. **Follow-up to item 40, real user report with a screenshot: three
+    fixes to the just-shipped redesign.**
+    - **Ecology & nature conservation moved from Heritage & Protected
+      Areas to Environment & Hazards** in `THEMES` — a one-line
+      regrouping (`tileKeys` moved between the two theme entries), no
+      other logic changed.
+    - **The base-layer toggle was covering Leaflet's own zoom control** —
+      both were sitting at `top:14px; left:14px`. Moved the toggle to
+      `bottom:24px; left:14px` instead of relocating the zoom control,
+      which also happens to match where the fix below wanted it anyway.
+    - **Redesigned as a single Google Maps-style thumbnail**, asked for
+      directly, replacing the two-button pill: one small square button
+      showing a real preview of whichever layer you'd SWITCH TO (not the
+      one currently on the map), with its name overlaid at the bottom —
+      `updateBaseLayerToggleUI()` swaps both the CSS `background-image`
+      and the label text on every toggle.
+    - **A real, previously-undocumented gotcha found while sourcing the
+      preview tile images, confirmed by actually opening the response
+      body, not trusting the HTTP status alone**: a bare
+      `https://tile.openstreetmap.org/{z}/{x}/{y}.png` request (no
+      subdomain, a generic User-Agent) returned a plain 200 — but the
+      actual image content was OSM's own "Access blocked... not following
+      the tile usage policy" notice graphic, not a real map tile. A
+      naive `curl -o /dev/null -w '%{http_code}'` check would have missed
+      this entirely (confirmed directly — that's exactly what showed 200
+      first). Retried with the SAME `a.`-subdomain-rotated form the app's
+      own live Street layer already uses (`https://a.tile.openstreetmap.org/...`)
+      plus a descriptive User-Agent, and got a real tile back. The two
+      preview-thumbnail URLs (`SATELLITE_PREVIEW_TILE_URL`/
+      `STREET_PREVIEW_TILE_URL`) use a real, confirmed-live z15 tile near
+      this app's own long-standing R32 E4F8 test site, with the subdomain
+      form for the OSM one specifically because of this finding.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
