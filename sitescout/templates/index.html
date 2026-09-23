@@ -3,14 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Site Scout — Ireland</title>
+<title>InSite — Ireland</title>
+<link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/favicon-32.png') }}">
+<link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='img/favicon-16.png') }}">
+<link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='img/favicon-180.png') }}">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
+  /* Brand palette from the InSite roofline logo (sampled directly from the
+     PNG, not guessed): navy/blue family for the primary "ok/live/brand"
+     accent (was moss green), orange family for "warn" (was amber) — see
+     CLAUDE.md for the sampled hex values. --bad stays a red/rust: that's
+     a near-universal severity convention independent of brand identity,
+     and the logo has no red to draw from anyway. */
   :root{
     --ink:#1b2a24; --paper:#f6f4ee; --card:#ffffff; --line:#e2ddd0;
-    --moss:#2f5d4f; --moss-dark:#1f4237; --amber:#c07a2b; --rust:#a4472d;
-    --muted:#6b7570; --ok:#2f5d4f; --warn:#c07a2b; --bad:#a4472d;
+    --moss:#3158a0; --moss-dark:#284882; --amber:#a95408; --rust:#a4472d;
+    --muted:#6b7570; --ok:#3158a0; --warn:#a95408; --bad:#a4472d;
+    --tint-ok:#e8edf9; --tint-warn:#fbeee0; --tint-bad:#f6e6e1;
   }
   *{box-sizing:border-box;}
   html, body{ height:100%; margin:0; }
@@ -32,7 +42,8 @@
     padding:24px; text-align:center; transition: opacity .35s ease, transform .35s ease;
   }
   #landingHero.leaving{ opacity:0; transform:translateY(-30px); pointer-events:none; }
-  #landingHero h1{ margin:0; font-size:34px; letter-spacing:-0.01em; }
+  #landingHero .logo{ height:64px; width:auto; }
+  #landingHero .subtitle{ margin:0; font-size:15px; color:var(--muted); letter-spacing:.02em; }
   #landingHero .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
 
   .spinner{
@@ -54,7 +65,7 @@
     display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; border:1px solid var(--line);
     border-radius:6px; background:var(--paper); cursor:pointer; font-size:13.5px; color:var(--ink);
   }
-  .picker-box button.opt:hover{ border-color:var(--moss); background:#eaf0ec; }
+  .picker-box button.opt:hover{ border-color:var(--moss); background:var(--tint-ok); }
   .picker-box button.opt .tag{ float:right; font-size:11px; color:var(--muted); }
 
   .search-bar{ display:flex; gap:8px; width:min(620px,90vw); }
@@ -72,7 +83,7 @@
     background:transparent; color:var(--moss); border:1px solid var(--moss); border-radius:8px;
     padding:8px 14px; font-size:13px; cursor:pointer;
   }
-  button.ghost:hover{ background:#eaf0ec; }
+  button.ghost:hover{ background:var(--tint-ok); }
 
   #topbar{
     flex:none; height:64px; display:flex; align-items:center; gap:16px; padding:0 20px;
@@ -80,7 +91,7 @@
     opacity:0; transform:translateY(-10px); transition: opacity .3s ease, transform .3s ease;
   }
   #topbar.visible{ opacity:1; transform:translateY(0); }
-  #topbar h1{ margin:0; font-size:16px; font-weight:700; white-space:nowrap; flex:none; }
+  #topbar .logo{ height:26px; width:auto; flex:none; }
   #searchBarSlot{ flex:none; }
   #searchBarSlot .search-bar{ width:420px; max-width:40vw; }
   #topbarStatus{
@@ -109,7 +120,7 @@
     font-size:13.5px; font-weight:600; color:var(--ink); text-align:left; position:relative;
   }
   .boundary-row:hover, .info-row:hover{ background:#f3f1ea; }
-  .boundary-row.active, .info-row.active{ background:#eaf0ec; }
+  .boundary-row.active, .info-row.active{ background:var(--tint-ok); }
   .boundary-row svg, .info-row svg{ width:20px; height:20px; flex:none; color:var(--moss-dark); }
   .row-title{ flex:1; }
 
@@ -119,7 +130,7 @@
     background:var(--card); cursor:pointer; font-size:13.5px; font-weight:600; color:var(--ink); text-align:left;
   }
   .theme-header:hover{ background:#f3f1ea; }
-  .theme-header.open{ background:#eaf0ec; }
+  .theme-header.open{ background:var(--tint-ok); }
   .theme-title{ flex:1; }
   .theme-chevron{ color:var(--muted); font-size:15px; transition:transform .15s ease; }
   .theme-header.open .theme-chevron{ transform:rotate(90deg); }
@@ -134,7 +145,7 @@
   .layer-row .row-title svg{ width:16px; height:16px; flex:none; opacity:.75; color:var(--moss-dark); }
   .layer-row.pending .row-title{ pointer-events:none; opacity:.5; }
   .layer-row.extra{ padding-left:32px; }
-  .layer-row.active{ background:#eaf0ec; }
+  .layer-row.active{ background:var(--tint-ok); }
 
   /* Status dots (theme header + per-row) and the loading-spinner state
      they share, reused from the old .tile-dot/.tile-spinner styling. */
@@ -176,7 +187,7 @@
     border:2px solid #fff; background:var(--card); color:var(--ink); font-size:13px; font-weight:700;
     line-height:1; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.3); padding:0;
   }
-  #baseLayerMoreBtn:hover{ background:#eaf0ec; }
+  #baseLayerMoreBtn:hover{ background:var(--tint-ok); }
   #baseLayerPanel{
     display:none; position:absolute; bottom:0; left:88px; width:230px; max-height:min(70vh,480px);
     overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:8px;
@@ -193,11 +204,11 @@
     font-size:13px; color:var(--ink); cursor:pointer;
   }
   #baseLayerPanel button:hover{ background:#f3f1ea; }
-  #baseLayerPanel button.active{ background:#eaf0ec; color:var(--moss-dark); font-weight:600; }
+  #baseLayerPanel button.active{ background:var(--tint-ok); color:var(--moss-dark); font-weight:600; }
 
   #plotPicker{
     flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
-    margin:10px 20px 0; padding:10px 16px; background:#eaf0ec; border:1px solid var(--moss);
+    margin:10px 20px 0; padding:10px 16px; background:var(--tint-ok); border:1px solid var(--moss);
     border-radius:8px; font-size:12.5px; color:var(--moss-dark);
   }
   #plotPicker .plot-picker-text strong{ color:var(--ink); }
@@ -231,17 +242,17 @@
   .card .body{ font-size:13.5px; color:var(--ink); }
   .card .body .muted{ color:var(--muted); }
   .card .verdict{ font-size:13px; font-weight:600; padding:8px 10px; border-radius:6px; line-height:1.4; }
-  .card .verdict.ok{ background:#eaf0ec; color:var(--moss-dark); }
-  .card .verdict.warn{ background:#fbeee0; color:var(--amber); }
-  .card .verdict.bad{ background:#f6e6e1; color:var(--rust); }
+  .card .verdict.ok{ background:var(--tint-ok); color:var(--moss-dark); }
+  .card .verdict.warn{ background:var(--tint-warn); color:var(--amber); }
+  .card .verdict.bad{ background:var(--tint-bad); color:var(--rust); }
   .card ul{ margin:4px 0 0; padding-left:18px; }
   .card li{ margin-bottom:3px; }
   .badge{
     display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
-    padding:2px 8px; border-radius:999px; background:#eaf0ec; color:var(--moss-dark);
+    padding:2px 8px; border-radius:999px; background:var(--tint-ok); color:var(--moss-dark);
   }
-  .badge.live{ background:#eaf0ec; color:var(--moss-dark); }
-  .badge.manual{ background:#fbeee0; color:var(--amber); }
+  .badge.live{ background:var(--tint-ok); color:var(--moss-dark); }
+  .badge.manual{ background:var(--tint-warn); color:var(--amber); }
   .badge.link{ background:#f1eee4; color:var(--muted); }
   .card .src{ padding-top:10px; border-top:1px dashed var(--line); font-size:12px; }
   .card .src a{ color:var(--moss); text-decoration:none; }
@@ -265,7 +276,8 @@
 <div id="app">
 
   <div id="landingHero">
-    <h1>Site Scout — Ireland</h1>
+    <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
+    <p class="subtitle">Site scouting for Ireland</p>
     <p class="tagline">Enter an Eircode or address for a site. This pulls together geology &amp; subsoil, water table &amp; flood risk, archaeology &amp; heritage, protected structures, property boundary, planning applications, and utilities — from Ireland's public data sources.</p>
     <div id="searchBar" class="search-bar">
       <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
@@ -279,7 +291,7 @@
   </div>
 
   <header id="topbar">
-    <h1>Site Scout</h1>
+    <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
     <div id="searchBarSlot"></div>
     <div id="topbarStatus"></div>
   </header>

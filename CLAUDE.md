@@ -2736,6 +2736,52 @@ app, rather than the documented-but-dead endpoints:
       the honest "no nearby data of this type" case, which correctly
       shows its own note rather than a fabricated number or a crash.
 
+50. **Rebrand — "InSite," asked for directly after the user added
+    `roofline-insite.png` (repo root) as the new logo.** A pure UI/
+    branding change — no backend or data changes.
+    - Sampled the logo's own palette directly from the PNG (Python/PIL
+      pixel counting, not guessed): navy `#284882` / mid-blue `#3158a0`
+      dominate "IN," burnt-orange `#a95408` / lighter orange `#f69d4d`
+      dominate the rest. Both templates' `:root` palette updated —
+      `--moss`/`--moss-dark` (the app's primary/"ok" accent, previously a
+      moss green) now the new blue; `--amber`/`--warn` now the new
+      orange. `--bad`/`--rust` deliberately UNCHANGED (still a red/rust)
+      — red-for-bad is a near-universal severity convention independent
+      of brand identity, and the logo has no red to draw from regardless.
+      Also caught and fixed a real follow-on issue: several hardcoded
+      `#eaf0ec` pale-green tint backgrounds (hover/active states, verdict
+      boxes, "Live" badges) were paired with the old moss text colour —
+      left as-is they'd clash once that text became blue, so they're now
+      a proper `--tint-ok` CSS variable (a pale tint of the NEW blue,
+      `#e8edf9`) instead of a hardcoded green value. Contrast-checked
+      every new text/background pairing against WCAG AA (all ≥4.65:1,
+      most far higher) before shipping, not assumed fine from looking
+      similar in tone to the old palette.
+    - Logo assets derived from the source PNG (PIL): `insite-logo.png`
+      (the full wordmark, trimmed of ~280px of dead transparent space
+      below it) for the landing hero and topbar header; a square
+      `favicon-{16,32,180}.png` set cropped from just the "IN" portion
+      (the two orange letters read cleanly as a small monogram; the full
+      6-letter wordmark doesn't fit a square icon) padded onto a
+      transparent square canvas. All served from a new `sitescout/static/`
+      (Flask's own default static folder — no route code needed) via
+      `url_for('static', ...)` in both templates.
+    - Page `<title>`s and visible headers updated ("Site Scout — Ireland"
+      → "InSite" + a small "Site scouting for Ireland" subtitle under the
+      hero logo; the bare "Site Scout" topbar text replaced with the logo
+      image itself; terrain3d.html's title/favicon updated to match).
+      Deliberately scoped to user-FACING text only — the Python package
+      name (`sitescout`), CLAUDE.md's own prose, and README.md are
+      untouched; renaming those would be a much larger, unrequested
+      refactor with real risk (import paths, deploy config) for something
+      that's an internal engineering identifier, not the product's own
+      display name.
+    - `CATEGORY_COLORS` (the ~15-colour map-layer/data-visualization
+      palette — archaeology purple, ecology green, etc.) deliberately
+      left untouched: that's a functional palette tuned for mutual
+      distinguishability across many simultaneous map overlays, not
+      decorative brand chrome, and revisiting it wasn't asked for.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before

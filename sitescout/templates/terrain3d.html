@@ -3,10 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>3D Terrain — Ireland Site Scout</title>
+<title>3D Terrain — InSite</title>
+<link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/favicon-32.png') }}">
+<link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='img/favicon-16.png') }}">
 <style>
   :root {
-    --ink:#1b2a24; --paper:#f6f4ee; --muted:#6b7570; --moss:#2f5d4f; --moss-dark:#1f4237; --line:#e2ddd0;
+    /* Same InSite brand palette as index.html — see its own :root comment. */
+    --ink:#1b2a24; --paper:#f6f4ee; --muted:#6b7570; --moss:#3158a0; --moss-dark:#284882; --line:#e2ddd0;
   }
   html, body { margin:0; height:100%; background:#0e1512; color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
   #canvasHost { position:fixed; inset:0; }
