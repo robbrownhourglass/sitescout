@@ -91,6 +91,8 @@
     opacity:0; transform:translateY(-10px); transition: opacity .3s ease, transform .3s ease;
   }
   #topbar.visible{ opacity:1; transform:translateY(0); }
+  #topbar a{ display:flex; align-items:center; flex:none; line-height:0; opacity:1; transition:opacity .15s ease; }
+  #topbar a:hover{ opacity:.75; }
   #topbar .logo{ height:26px; width:auto; flex:none; }
   #searchBarSlot{ flex:none; }
   #searchBarSlot .search-bar{ width:420px; max-width:40vw; }
@@ -291,7 +293,7 @@
   </div>
 
   <header id="topbar">
-    <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
+    <a href="/" title="Back to home"><img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite"></a>
     <div id="searchBarSlot"></div>
     <div id="topbarStatus"></div>
   </header>
