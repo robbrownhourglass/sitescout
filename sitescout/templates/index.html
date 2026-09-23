@@ -33,18 +33,79 @@
   /* ---- App shell: a full-viewport flex column (topbar + map), with the
      landing hero as an absolutely-positioned overlay on top of it. The
      search bar itself is a single DOM node that gets physically moved
-     from the hero into the topbar on first search (see enterResultsMode). */
+     from the hero into the topbar on first search (see enterResultsMode).
+     #app itself stays overflow:hidden (needed for the fixed-viewport map
+     view) — the landing page scrolls WITHIN its own box instead, so this
+     doesn't disturb the results-mode layout at all. */
   #app{ position:relative; height:100vh; overflow:hidden; display:flex; flex-direction:column; }
 
   #landingHero{
-    position:absolute; inset:0; z-index:50; display:flex; flex-direction:column;
-    align-items:center; justify-content:center; gap:18px; background:var(--paper);
-    padding:24px; text-align:center; transition: opacity .35s ease, transform .35s ease;
+    position:absolute; inset:0; z-index:50; overflow-y:auto; background:var(--paper);
+    transition: opacity .35s ease, transform .35s ease;
   }
   #landingHero.leaving{ opacity:0; transform:translateY(-30px); pointer-events:none; }
-  #landingHero .logo{ height:64px; width:auto; }
-  #landingHero .subtitle{ margin:0; font-size:15px; color:var(--muted); letter-spacing:.02em; }
-  #landingHero .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
+
+  /* Asked for directly: "front and center" search, like a normal page's
+     hero, with real content below to scroll to — not a bare centered
+     box filling the whole screen like before. min-height (not a hard
+     100vh) leaves the next section peeking up from the bottom on a
+     typical screen, an invitation to scroll rather than a hard cutoff. */
+  .hero-inner{
+    min-height:min(680px,82vh); display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:18px; padding:48px 24px 12px; text-align:center;
+  }
+  .hero-inner .logo{ height:64px; width:auto; }
+  .hero-inner .subtitle{ margin:0; font-size:15px; color:var(--muted); letter-spacing:.02em; }
+  .hero-inner .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
+  .scroll-hint{
+    margin-top:10px; color:var(--muted); font-size:19px; line-height:1;
+    animation: hero-bounce 2.2s ease-in-out infinite;
+  }
+  @keyframes hero-bounce{ 0%,100%{ transform:translateY(0); opacity:.6; } 50%{ transform:translateY(7px); opacity:1; } }
+
+  /* ---- Below-the-fold landing content: what it does, how it works,
+     about — asked for directly ("a more normal web page... an About
+     section and more stuff underneath"). A plain centered column,
+     alternating background with the topbar/card colour so sections read
+     as distinct without needing heavy dividers. */
+  .landing-section{ max-width:920px; margin:0 auto; padding:44px 24px; text-align:left; }
+  .landing-section + .landing-section{ border-top:1px solid var(--line); }
+  .landing-section h2{ margin:0; font-size:21px; text-align:center; }
+  .landing-section .section-lede{
+    margin:0 auto 32px; max-width:600px; text-align:center; color:var(--muted); font-size:14px;
+  }
+  /* Small two-colour accent under each section heading — the same navy
+     and orange sampled from the logo, a deliberate small brand touch
+     rather than repainting every heading. */
+  .brand-rule{
+    height:3px; width:56px; margin:12px auto 24px; border-radius:2px;
+    background:linear-gradient(90deg, var(--moss), var(--amber));
+  }
+
+  .feature-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:18px; }
+  .feature-card{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  .feature-card svg{ width:24px; height:24px; color:var(--moss); }
+  .feature-card h3{ margin:12px 0 6px; font-size:14.5px; }
+  .feature-card p{ margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
+
+  .how-steps{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:22px; max-width:560px; margin-left:auto; margin-right:auto; }
+  .how-steps li{ display:flex; gap:16px; align-items:flex-start; }
+  .step-num{
+    flex:none; width:28px; height:28px; border-radius:50%; background:var(--moss); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px;
+  }
+  .how-steps h3{ margin:0 0 4px; font-size:14.5px; }
+  .how-steps p{ margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
+
+  .landing-about{ max-width:680px; }
+  .landing-about p{ font-size:14px; color:var(--ink); line-height:1.6; text-align:left; }
+  .landing-about p + p{ margin-top:12px; }
+
+  .landing-footer{
+    max-width:920px; margin:0 auto; padding:20px 24px 44px; text-align:center;
+    color:var(--muted); font-size:12.5px; border-top:1px solid var(--line);
+  }
+  .landing-footer p{ margin:0; }
 
   .spinner{
     width:15px; height:15px; border:2px solid rgba(0,0,0,.15); border-top-color:var(--moss);
@@ -278,18 +339,89 @@
 <div id="app">
 
   <div id="landingHero">
-    <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
-    <p class="subtitle">Site scouting for Ireland</p>
-    <p class="tagline">Enter an Eircode or address for a site. This pulls together geology &amp; subsoil, water table &amp; flood risk, archaeology &amp; heritage, protected structures, property boundary, planning applications, and utilities — from Ireland's public data sources.</p>
-    <div id="searchBar" class="search-bar">
-      <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
-      <button id="scoutBtn">Scout site</button>
+    <div class="hero-inner">
+      <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
+      <p class="subtitle">Site scouting for Ireland</p>
+      <p class="tagline">Enter an Eircode or address for a site — geology, water, heritage, environmental hazards, and planning context, compiled from Ireland's public data sources.</p>
+      <div id="searchBar" class="search-bar">
+        <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
+        <button id="scoutBtn">Scout site</button>
+      </div>
+      <div id="heroStatus" class="hero-status">
+        <span id="heroSpinner" class="spinner" style="display:none"></span>
+        <span id="heroStatusText"></span>
+      </div>
+      <div id="picker"></div>
+      <div class="scroll-hint" aria-hidden="true">&#8595;</div>
     </div>
-    <div id="heroStatus" class="hero-status">
-      <span id="heroSpinner" class="spinner" style="display:none"></span>
-      <span id="heroStatusText"></span>
-    </div>
-    <div id="picker"></div>
+
+    <section class="landing-section">
+      <h2>What InSite pulls together</h2>
+      <div class="brand-rule"></div>
+      <p class="section-lede">One search compiles the categories a planner, PM, or architect would otherwise gather by hand — each fetched live from its own public source, not a cached snapshot.</p>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8 6 4h9l5 3-2 10-8 3-6-2Z"/><path d="M12 10.4c-1.1 0-2 .9-2 2 0 1.6 2 3.7 2 3.7s2-2.1 2-3.7c0-1.1-.9-2-2-2Z"/><circle cx="12" cy="12.4" r=".55" fill="currentColor" stroke="none"/></svg>
+          <h3>Property boundary</h3>
+          <p>Tailte Éireann cadastral parcels — pick and merge whichever registered parcel(s) actually make up the site.</p>
+        </div>
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-2.4 1.7-4.3 3.8-4.8.5-1.9 2.2-3.3 4.1-2.9 1.9.5 3 2.5 2.6 4.4 1.6.3 2.9 1.7 2.9 3.3H4Z"/><path d="M7.5 8.5l6.5 6.5"/><path d="M13.3 6.8l1.9-1.9 1.7 1.7-1.9 1.9"/></svg>
+          <h3>Ground &amp; Terrain</h3>
+          <p>Bedrock &amp; subsoil geology, soil survey, real LIDAR elevation with a rotatable 3D model, and geohazards like landslide risk.</p>
+        </div>
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5S6 11 6 15c0 3.3 2.7 6 6 6s6-2.7 6-6c0-4-6-11.5-6-11.5Z"/></svg>
+          <h3>Water</h3>
+          <p>Groundwater vulnerability, flood risk (OPW), WFD water body status, and nearby wells with real recorded water-strike depths.</p>
+        </div>
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10V6h2.3v2H9V6h2.3v2H13V6h2.3v2H17V6h2v4"/><path d="M6 10v10h12V10"/><path d="M10 20v-4a2 2 0 014 0v4"/></svg>
+          <h3>Heritage &amp; Protected Areas</h3>
+          <p>Archaeology (SMR), protected structures (NIAH), and statutory conservation areas (RPS/ACA).</p>
+        </div>
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19c-1-7 3-13 12-14 1 8-3 13-12 14Z"/><path d="M6.5 18.5C9 15 11 11.5 12.5 7"/></svg>
+          <h3>Environment &amp; Hazards</h3>
+          <p>Ecological designations (SAC/SPA/NHA), radon risk, licensed industrial facilities, and nearby species records.</p>
+        </div>
+        <div class="feature-card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5h7l3 3v13H7Z"/><path d="M14 5v3h3"/><path d="M9.5 12h6"/><path d="M9.5 15h6"/><path d="M9.5 18h4"/></svg>
+          <h3>Planning &amp; Utilities</h3>
+          <p>Nearby planning applications, zoning links, and the local authority/utility providers to contact.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="landing-section landing-how">
+      <h2>How it works</h2>
+      <div class="brand-rule"></div>
+      <ol class="how-steps">
+        <li>
+          <span class="step-num">1</span>
+          <div><h3>Enter an address or Eircode</h3><p>InSite resolves it and shows every nearby registered cadastral parcel on the map.</p></div>
+        </li>
+        <li>
+          <span class="step-num">2</span>
+          <div><h3>Confirm the plot</h3><p>Select and merge whichever parcel(s) actually make up the site — many real properties span more than one.</p></div>
+        </li>
+        <li>
+          <span class="step-num">3</span>
+          <div><h3>Get the full picture</h3><p>Every category loads in the background while you confirm the plot — live data from Ireland's own public sources, not a guess.</p></div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="landing-section landing-about">
+      <h2>About InSite</h2>
+      <div class="brand-rule"></div>
+      <p>InSite pulls together the site-scouting categories a planner, PM, or architect would otherwise gather by hand — geology, water, heritage, environmental hazards, and planning context — from Ireland's public data sources, into one report.</p>
+      <p>This is a personal, non-commercial tool. Every data point is fetched live from its original public source (GSI, EPA, Tailte Éireann, the National Monuments Service, and others) — nothing is guessed or modelled beyond what's explicitly disclosed alongside each result.</p>
+    </section>
+
+    <footer class="landing-footer">
+      <p>Data from Ireland's public sources — see "Sources &amp; methodology" on any site report for the full list. Not a substitute for professional site investigation, a legal survey, or planning advice.</p>
+    </footer>
   </div>
 
   <header id="topbar">

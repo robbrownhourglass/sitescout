@@ -2782,6 +2782,44 @@ app, rather than the documented-but-dead endpoints:
       distinguishability across many simultaneous map overlays, not
       decorative brand chrome, and revisiting it wasn't asked for.
 
+51. **Follow-up to item 50: the landing page rebuilt as a real scrollable
+    page, asked for directly** ("a more normal web page... an About
+    section and more stuff underneath"). Previously `#landingHero` was a
+    single `position:absolute; inset:0` box with `justify-content:center`
+    — logo/tagline/search bar vertically centred and nothing else, no
+    scrolling possible at all.
+    - **`#app` itself stays `overflow:hidden`** (still required for the
+      fixed-viewport map view in results mode) — only `#landingHero` got
+      `overflow-y:auto`, so it scrolls independently within its own
+      absolutely-positioned box without touching the results-mode layout
+      at all. A new `.hero-inner` wrapper (search bar + logo, unchanged
+      content) got its own `min-height:min(680px,82vh)` — not a hard
+      100vh — so the next section peeks up from the bottom on a typical
+      screen as an invitation to scroll, plus an animated down-chevron.
+    - **Real content added below the fold**, all grounded in the app's
+      actual existing feature set (nothing invented): a 6-card feature
+      grid (Property boundary + the 5 THEMES from item 40's own
+      redesign, each with an icon COPIED from that same `TILE_ICONS` set
+      already used in the results sidebar — a deliberate small,
+      documented duplication, same class of tradeoff as `FLOW_DIR_OFFSETS`,
+      since these are static HTML here rather than JS-templated and
+      sharing would need real plumbing for one-time landing-page use); a
+      3-step "How it works" walkthrough; a short About paragraph; a
+      footer. A small two-colour (`--moss`→`--amber`) gradient rule under
+      each section heading ties back to the logo's own two-tone palette
+      without repainting every heading.
+    - **The riskiest part, verified rather than assumed**: `#searchBar`
+      is a single DOM node `enterResultsMode()` physically moves from the
+      hero into the topbar on first search (not cloned — see item 50/
+      earlier notes) — nesting it one level deeper inside the new
+      `.hero-inner` wrapper could have broken that `getElementById`-based
+      move. Verified via the same jsdom harness used throughout this
+      session (extracted script, mocked Leaflet, real DOM): the move
+      still succeeds, `#landingHero` still gets its `leaving` class,
+      `#topbar` still becomes visible, and `#addressInput` is still
+      reachable at the same ID after relocation — confirmed, not assumed
+      safe just because the ID itself didn't change.
+
 `Irish_Master_Data_Source_Register_Site_Scout_v2.xlsx` (repo root) is a
 working register of further candidate sources (data.gov.ie, local-authority
 RPS/ACA, funding schemes, historical records, etc.) — use it before
