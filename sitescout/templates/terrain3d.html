@@ -6,6 +6,7 @@
 <title>3D Terrain — InSite</title>
 <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/favicon-32.png') }}">
 <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='img/favicon-16.png') }}">
+<link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='img/favicon-180.png') }}">
 <style>
   :root {
     /* Same InSite brand palette as index.html — see its own :root comment. */
@@ -42,7 +43,7 @@
 
 <div id="topPanel" class="panel">
   <h1>3D terrain — this site's own shape</h1>
-  <div class="muted">Real LIDAR elevation over the site and its surroundings, with the plot boundary and nearby roads painted onto the surface (not separate objects) and nearby buildings shown as real 3D shapes for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
+  <div id="terrainIntroText" class="muted">Real elevation data over the site and its surroundings, with the plot boundary, nearby roads, and any nearby rivers/streams painted onto the surface (not separate objects) and nearby buildings shown as real 3D shapes for context. Vertical scale is exaggerated <span id="exaggerationLabel">3&times;</span> so the real (usually subtle) slope is actually visible — building heights are NOT exaggerated, so they stay true to scale. Drag to rotate, scroll to zoom.</div>
   <div id="coverageWarning" class="muted" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);color:#a4472d"></div>
   <label id="satelliteToggleRow" style="display:none;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
     <input type="checkbox" id="satelliteToggle" /> Show satellite imagery (inside boundary)
@@ -85,6 +86,21 @@ import * as THREE from 'three';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 
 const VERTICAL_EXAGGERATION = 3;
+
+// Must exactly match elevation.py's BUILDING_EMBED_M — applied HERE,
+// directly in real scene units after terrainY()'s own exaggeration has
+// already run (not baked into the elevation value the backend reports),
+// specifically so this small real-world safety margin stays small and
+// real regardless of VERTICAL_EXAGGERATION. Real user report, with a
+// screenshot: an earlier version applied it backend-side (subtracted from
+// ground_elevation_m before terrainY() ran), so it got exaggerated right
+// along with genuine elevation differences — invisible on a real LIDAR
+// site's typical tens-of-metres relief, but on a flat site with only a
+// few metres of real relief (exactly what Copernicus GLO-30's fallback
+// commonly covers), 0.75m x 3 = 2.25 scene units buried a real building
+// well over a third of its own height. See elevation.py's own
+// _extrude_building() docstring for the full writeup.
+const BUILDING_EMBED_M = 0.75;
 
 // Must exactly match elevation.py's FLOW_DIR_OFFSETS — code 1-8 = 1 +
 // this list's own index, code 0 = a sink/NoData cell. Used to decode the
@@ -150,7 +166,7 @@ async function main(){
     });
     const body = await resp.json().catch(() => ({}));
     if(!resp.ok || body.status !== 'ok'){
-      setStatus((body && body.message) || 'No precise LIDAR coverage for this plot — OPW\'s survey concentrates on rivers, floodplains, and coasts.', true);
+      setStatus((body && body.message) || 'No elevation data for this plot — no LIDAR survey here, and even the Copernicus GLO-30 global satellite fallback found nothing.', true);
       return;
     }
     mesh = body.data;
@@ -164,19 +180,45 @@ async function main(){
 }
 
 function buildScene(mesh, ringSets){
-  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, vertices, faces, buildings, road_count: roadCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat, boundary_lidar_coverage_fraction: boundaryCoverage, no_data_overlay: noDataOverlay } = mesh;
+  const { min_elevation_m: minEl, max_elevation_m: maxEl, source, elevation_kind: elevationKind, satellite_fill_fraction: satelliteFillFraction, vertices, faces, buildings, road_count: roadCount, river_count: riverCount, grid_extent: extent, overlay_texture_png_base64: overlayPng, origin_lon: originLon, origin_lat: originLat, boundary_lidar_coverage_fraction: boundaryCoverage, no_data_overlay: noDataOverlay } = mesh;
   const span = Math.max(maxEl - minEl, 0.01);
 
-  // Only warn about a coverage gap INSIDE the plot boundary itself — a gap
-  // in the wider padded context area around it is expected and normal
-  // (see elevation.get_terrain_mesh()'s own note on this) and not worth
-  // surfacing here; the black box/walls already crop back to match
-  // whatever real coverage exists regardless.
-  if(boundaryCoverage != null && boundaryCoverage < 0.999){
-    const pct = Math.round(boundaryCoverage * 100);
-    const warningEl = document.getElementById('coverageWarning');
-    warningEl.style.display = 'block';
-    warningEl.textContent = `⚠ Only ~${pct}% of your plot boundary has real LIDAR coverage in this view — the flat map area shows where no elevation data exists (see the "not full national coverage" note on the Terrain & elevation card).`;
+  // "satellite_dem" = Copernicus GLO-30, the global fallback used when no
+  // real LIDAR survey covers this plot at all (see elevation.py's
+  // _mosaic_dtm()) — real data, but a 30m global surface model, not the
+  // ~2m bare-ground LIDAR this page otherwise shows. Checked FIRST and
+  // separately from the coverage-fraction warning below: a satellite_dem
+  // mesh reads as ~100% "covered" (GLO-30 has near-total coverage), which
+  // would otherwise misleadingly look like full real LIDAR coverage.
+  const introEl = document.getElementById('terrainIntroText');
+  if(elevationKind === 'satellite_dem'){
+    introEl.innerHTML = `<strong style="color:#a4472d">⚠ No LIDAR survey covers this plot</strong> — showing ${source} instead, a free global 30m satellite-derived surface model (includes vegetation/building height, not bare ground), smoothly interpolated between its real points for this view rather than shown as blocky flat cells. Real data, but far coarser than the ~2m LIDAR this page otherwise shows. Vertical scale is exaggerated <span id="exaggerationLabel">${document.getElementById('exaggerationLabel') ? document.getElementById('exaggerationLabel').textContent : '3&times;'}</span> so the real (usually subtle) slope is actually visible. Drag to rotate, scroll to zoom.`;
+  } else {
+    // Only warn about a coverage gap INSIDE the plot boundary itself — a
+    // gap in the wider padded context area around it is expected and
+    // normal (see elevation.get_terrain_mesh()'s own note on this) and
+    // not worth surfacing here; the black box/walls already crop back to
+    // match whatever real coverage exists regardless.
+    if(boundaryCoverage != null && boundaryCoverage < 0.999){
+      const pct = Math.round(boundaryCoverage * 100);
+      const warningEl = document.getElementById('coverageWarning');
+      warningEl.style.display = 'block';
+      warningEl.textContent = `⚠ Only ~${pct}% of your plot boundary has real LIDAR coverage — the rest is filled in with Copernicus GLO-30 (coarser, 30m satellite, real data but far less precise) rather than left blank, or genuinely has no elevation data at all if GLO-30 doesn't cover it either (see the "not full national coverage" note on the Terrain & elevation card).`;
+    } else if(satelliteFillFraction > 0){
+      // Real LIDAR survey coverage doesn't always reach edge-to-edge
+      // within this view (a road-corridor survey, or a genuine tile
+      // boundary — see CLAUDE.md's R32 E4F8 writeup) — asked for
+      // directly: fill any real gap with Copernicus GLO-30 rather than
+      // the old flat placeholder patch, real LIDAR always taking priority
+      // where it exists. A plain informational note, not the red warning
+      // above — the plot boundary itself already has full coverage
+      // (real-or-filled), this is just disclosing WHAT filled the rest.
+      const pct = Math.round(satelliteFillFraction * 100);
+      const noteEl = document.getElementById('coverageWarning');
+      noteEl.style.display = 'block';
+      noteEl.style.color = 'var(--muted)';
+      noteEl.textContent = `${pct}% of this view is outside ${source.replace(' LIDAR', '')}'s own real survey coverage and has been filled in with Copernicus GLO-30 (coarser, 30m satellite) rather than left blank.`;
+    }
   }
 
   // Legend
@@ -189,7 +231,10 @@ function buildScene(mesh, ringSets){
   const roadNote = roadCount
     ? ` &middot; ${roadCount} nearby road/track${roadCount > 1 ? 's' : ''} (OpenStreetMap)`
     : '';
-  document.getElementById('legendMeta').innerHTML = `${source} &middot; boundary + roads painted on the surface${buildingNote}${roadNote}`;
+  const riverNote = riverCount
+    ? ` &middot; ${riverCount} nearby river/stream${riverCount > 1 ? 's' : ''} (OpenStreetMap)`
+    : '';
+  document.getElementById('legendMeta').innerHTML = `${source} &middot; boundary + roads${riverCount ? '/rivers' : ''} painted on the surface${buildingNote}${roadNote}${riverNote}`;
   document.getElementById('legendMin').textContent = minEl.toFixed(1) + 'm';
   document.getElementById('legendMax').textContent = maxEl.toFixed(1) + 'm';
 
@@ -313,19 +358,17 @@ function buildScene(mesh, ringSets){
   // way). Each building's OWN vertex z is HEIGHT ABOVE ITS OWN GROUND (0 =
   // base ring, height_m = roof ring), not an absolute elevation — see
   // elevation._extrude_building()'s comment for why: its base sits at
-  // terrainY(ground_elevation_m) (the exact same exaggerated surface
-  // height the terrain mesh itself has right under it), then the
-  // building's real, TRUE height is added on top UNexaggerated — so a
-  // real 6m building still looks like a real 6m building next to the
-  // deliberately-stretched slope, not 3x too tall along with it.
-  // Terrain's own lowest vertex is exactly Y=0 by construction (terrainY()
-  // is defined relative to minEl) — but a building's base can dip up to
-  // BUILDING_EMBED_M (0.75m, amplified by VERTICAL_EXAGGERATION since it's
-  // added to an already-exaggerated terrainY()) below that, if it happens
-  // to sit at the terrain's own lowest sampled point (see
-  // elevation._extrude_building()). Tracked here so the box below sits
-  // level with the true lowest point of everything actually rendered, not
-  // just the terrain's own minimum.
+  // terrainY(ground_elevation_m) MINUS BUILDING_EMBED_M (real, unexaggerated
+  // units, applied here rather than backend-side — see that constant's own
+  // comment above for the real bug this fixes), then the building's real,
+  // TRUE height is added on top UNexaggerated — so a real 6m building still
+  // looks like a real 6m building next to the deliberately-stretched slope,
+  // not 3x too tall along with it. Terrain's own lowest vertex is exactly
+  // Y=0 by construction (terrainY() is defined relative to minEl) — but a
+  // building's base can still dip up to BUILDING_EMBED_M below that if it
+  // happens to sit at the terrain's own lowest sampled point. Tracked here
+  // so the box below sits level with the true lowest point of everything
+  // actually rendered, not just the terrain's own minimum.
   let minSceneY = 0;
 
   if(buildings && buildings.length){
@@ -333,7 +376,7 @@ function buildScene(mesh, ringSets){
     const bIndices = [];
     let indexOffset = 0;
     for(const b of buildings){
-      const groundY = terrainY(b.ground_elevation_m);
+      const groundY = terrainY(b.ground_elevation_m) - BUILDING_EMBED_M;
       minSceneY = Math.min(minSceneY, groundY);
       for(const [x, y, zRel] of b.vertices){
         bPositions.push(x, groundY + zRel, -y);
@@ -371,6 +414,22 @@ function buildScene(mesh, ringSets){
   // (not touching its outer edge) would also get walled the same way — a
   // rare, accepted simplification for a typical confirmed plot's own
   // padded working area, not specially detected/excluded.
+  //
+  // The box floor sits a bit BELOW minSceneY, not exactly at it — real
+  // user report: the no_data_overlay placeholder (see above) is flush
+  // with the terrain's own lowest point (z = min_elevation_m, terrainY()
+  // of which is exactly 0) — the SAME level minSceneY normally is when no
+  // building dips lower. A base plate sitting exactly coplanar with that
+  // placeholder (or the terrain's own lowest vertices) is a textbook
+  // z-fighting setup: which surface wins the depth test can flip per
+  // pixel/frame, reading as the terrain "crossing over" the black box
+  // instead of sitting cleanly on top of it. `boxFloorY` gives the box its
+  // own genuinely lower level — at least 1 scene unit, or 10% of the
+  // exaggerated elevation span for a site with real relief, whichever is
+  // bigger — so there's always real, unambiguous separation regardless of
+  // how flat or tall the site is.
+  const boxFloorY = minSceneY - Math.max(1.0, span * VERTICAL_EXAGGERATION * 0.1);
+
   function findBoundaryEdges(idx){
     const count = new Map();
     const verts = new Map();
@@ -396,7 +455,7 @@ function buildScene(mesh, ringSets){
   for(const [i, j] of findBoundaryEdges(indices)){
     const x1 = positions[i * 3], y1 = positions[i * 3 + 1], z1 = positions[i * 3 + 2];
     const x2 = positions[j * 3], y2 = positions[j * 3 + 1], z2 = positions[j * 3 + 2];
-    skirtPositions.push(x1, y1, z1, x2, y2, z2, x1, minSceneY, z1, x2, minSceneY, z2);
+    skirtPositions.push(x1, y1, z1, x2, y2, z2, x1, boxFloorY, z1, x2, boxFloorY, z2);
     const t1 = skirtOffset, t2 = skirtOffset + 1, b1 = skirtOffset + 2, b2 = skirtOffset + 3;
     skirtIndices.push(t1, b1, b2, t1, b2, t2);
     skirtOffset += 4;
@@ -410,7 +469,7 @@ function buildScene(mesh, ringSets){
 
   // Base plane: reuses the terrain mesh's OWN vertex (x,z) positions and
   // face list — same shape as the real terrain footprint, just flattened
-  // to minSceneY — rather than a fixed rectangle spanning the padded
+  // to boxFloorY — rather than a fixed rectangle spanning the padded
   // area's full bounding box. A real site (like R32 E4F8 — see CLAUDE.md
   // item 18) can have genuine LIDAR coverage stopping partway through the
   // padded area; a rectangle would then stick out past where the skirt
@@ -421,7 +480,7 @@ function buildScene(mesh, ringSets){
   const basePositions = new Array(positions.length);
   for(let i = 0; i < positions.length; i += 3){
     basePositions[i] = positions[i];
-    basePositions[i + 1] = minSceneY;
+    basePositions[i + 1] = boxFloorY;
     basePositions[i + 2] = positions[i + 2];
   }
   const baseGeometry = new THREE.BufferGeometry();
@@ -795,7 +854,21 @@ function buildScene(mesh, ringSets){
     const exitNote = exitTotal
       ? `, ${exitTotal} point${exitTotal > 1 ? 's' : ''} (gray) where a channel runs off the edge of the analyzed area` + (exitTotal > exitShown ? ` (showing the ${exitShown} largest)` : '')
       : '';
-    flowMeta.textContent = `${basinNote}${exitNote} — shaded areas (~${floodedArea}m² total) show where each low point would flood once full; lines show the overflow cascading downstream, thicker where more area drains through. Click any point to see its total catchment area (click again to deselect, click more to combine).`;
+    // Asked for directly: flow analysis now runs on Copernicus GLO-30
+    // (see elevation.get_flow_analysis()'s own comment on why refusing to
+    // analyse at all was a worse trade than a clearly-disclosed coarser
+    // result) rather than refusing outright when no LIDAR covers this
+    // plot — so this needs its own warning, same spirit as the terrain
+    // mesh's own satellite_dem banner (introEl above), since the site
+    // still has a real surface to analyse, just a coarser and DSM-not-DTM
+    // one (real canopy/building noise can show up as fabricated-looking
+    // sinks/ridges that aren't real ground topography).
+    const flowKindWarning = flow.elevation_kind === 'satellite_dem'
+      ? `<strong style="color:#a4472d">⚠ No LIDAR survey covers this plot</strong> — this analysis uses ${flow.source}, a coarser 30m satellite-derived surface model (includes vegetation/building height, not bare ground), so results are less precise than real LIDAR and can reflect canopy/building noise rather than true ground shape. `
+      : flow.satellite_fill_fraction > 0
+        ? `${Math.round(flow.satellite_fill_fraction * 100)}% of this analysis area is filled with coarser Copernicus GLO-30 satellite data rather than real LIDAR. `
+        : '';
+    flowMeta.innerHTML = `${flowKindWarning}${basinNote}${exitNote} — shaded areas (~${floodedArea}m² total) show where each low point would flood once full; lines show the overflow cascading downstream, thicker where more area drains through. Click any point to see its total catchment area (click again to deselect, click more to combine).`;
   });
 
   (function animate(){

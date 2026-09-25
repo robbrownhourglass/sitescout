@@ -114,6 +114,48 @@ def api_scout_choose():
     return _handle_follow_result(query, result)
 
 
+@app.post("/api/scout/point")
+def api_scout_point():
+    """The web UI's "Choose on map" flow: the user has already picked an
+    exact point by clicking a full map of Ireland directly, so there's no
+    address text to resolve — this skips autoaddress/geocode entirely and
+    goes straight to the same nearby-parcels lookup `/api/scout` itself
+    does once a point is known, returning the identical response shape
+    (`status`/`location`/`parcels`/`section_names`) so the frontend's
+    existing `startPlotConfirmation()` handles it with no special-casing.
+    Reverse-geocodes for a human-readable label only (best-effort, see
+    `geocode.reverse_geocode`) — falls back to plain coordinates if that
+    fails, never blocking the actual result on it.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        lat = float(body.get("lat"))
+        lon = float(body.get("lon"))
+    except (TypeError, ValueError):
+        return _error("lat and lon are required", 400)
+
+    label = geocode.reverse_geocode(lat, lon) or f"Dropped pin at {lat:.5f}, {lon:.5f}"
+
+    try:
+        parcels = cadastral.get_nearby_parcels(lat, lon)
+    except Exception as exc:
+        log.error("Nearby parcels lookup failed: %s", exc)
+        parcels = []
+
+    return jsonify({
+        "status": "ok",
+        "query": label,
+        "resolved_address": label,
+        "eircode": None,
+        "location": {
+            "lat": lat, "lon": lon, "label": label, "source": "map",
+            "precise": True, "location_type": None, "warning": None,
+        },
+        "parcels": parcels,
+        "section_names": list(pipeline.SECTION_NAMES),
+    })
+
+
 def _handle_follow_result(query: str, result):
     """`autoaddress.follow()` returns either a finished `ResolvedAddress`
     or `{"options": [...]}` for another round of disambiguation.
@@ -256,7 +298,7 @@ def api_terrain_mesh():
         if features_future:
             try:
                 features = features_future.result()
-                elevation.attach_features(result, features.get("buildings"), features.get("roads"))
+                elevation.attach_features(result, features.get("buildings"), features.get("roads"), features.get("rivers"))
             except Exception as exc:
                 log.warning("OSM building/road lookup failed (continuing without them): %s", exc)
 

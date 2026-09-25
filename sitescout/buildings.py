@@ -59,9 +59,18 @@ building the frontend renders carries its own `height_is_estimated` flag
 so the 3D view (and CLAUDE.md) can be honest about which ones are a real
 OSM tag and which are a guess.
 
-Only queries `way["building"]`/`way["highway"]` — multipolygon `relation`
-buildings (used for buildings with courtyards/holes) are skipped. Rare
-enough for typical Irish rural/suburban sites, and this is a visual aid
+Also queries `way["waterway"]` — real rivers/streams, asked for directly
+after a real user report: a genuine deep valley in the LIDAR terrain (a
+real river channel, not a data artifact) was hard to identify as such
+just from the bare elevation surface. Painted onto the terrain exactly
+like roads (see elevation._draw_river_on_overlay()) — real OSM waterway
+geometry laid over real terrain shape, not a guess at where a river
+"should" be from the valley shape alone.
+
+Only queries `way["building"]`/`way["highway"]`/`way["waterway"]` —
+multipolygon `relation` buildings (used for buildings with
+courtyards/holes) are skipped. Rare enough for typical Irish rural/suburban
+sites, and this is a visual aid
 for a site-scouting report, not a survey-grade 3D city model, so the
 extra geometry-assembly complexity for that case isn't worth it here.
 
@@ -131,23 +140,26 @@ def _write_cache(path: Path, features: dict) -> None:
 
 
 def get_nearby_features(lat: float, lon: float, radius_m: float) -> dict:
-    """Every OSM building AND road/track way within `radius_m` of
-    (lat, lon), in one combined Overpass query. Returns
+    """Every OSM building, road/track, AND river/stream way within
+    `radius_m` of (lat, lon), in one combined Overpass query. Returns
     `{"buildings": [{"footprint_wgs84": [[lon, lat], ...] (closed ring),
     "height_m": float, "height_is_estimated": bool, "name": str | None}, ...],
     "roads": [{"path_wgs84": [[lon, lat], ...] (open path), "highway_type":
+    str, "name": str | None}, ...],
+    "rivers": [{"path_wgs84": [[lon, lat], ...] (open path), "waterway_type":
     str, "name": str | None}, ...]}` — ready for elevation.get_terrain_mesh()'s
-    `buildings`/`roads` params to ground and extrude. Both lists are empty
-    (not an exception) if Overpass is unreachable after retries — a 3D
-    terrain view with nothing extra drawn on it is a graceful degradation,
-    not a broken page. Cached on disk (CACHE_TTL_S) so only the first
-    lookup near a given site ever pays Overpass's latency.
+    `buildings`/`roads`/`rivers` params to ground, extrude, or paint. All
+    three lists are empty (not an exception) if Overpass is unreachable
+    after retries — a 3D terrain view with nothing extra drawn on it is a
+    graceful degradation, not a broken page. Cached on disk (CACHE_TTL_S)
+    so only the first lookup near a given site ever pays Overpass's
+    latency.
     """
     cache_path = _cache_path(lat, lon, radius_m)
     cached = _read_cache(cache_path)
     if cached is not None:
-        log.info("-> %d building(s), %d road(s) within %dm (cached)",
-                  len(cached.get("buildings", [])), len(cached.get("roads", [])), radius_m)
+        log.info("-> %d building(s), %d road(s), %d river/stream(s) within %dm (cached)",
+                  len(cached.get("buildings", [])), len(cached.get("roads", [])), len(cached.get("rivers", [])), radius_m)
         return cached
 
     query = f"""
@@ -155,6 +167,7 @@ def get_nearby_features(lat: float, lon: float, radius_m: float) -> dict:
 (
   way["building"](around:{radius_m},{lat},{lon});
   way["highway"](around:{radius_m},{lat},{lon});
+  way["waterway"](around:{radius_m},{lat},{lon});
 );
 out body geom;
 """
@@ -179,11 +192,11 @@ out body geom;
             time.sleep(OVERPASS_RETRY_DELAY_S)
 
     if data is None:
-        log.error("Overpass unreachable after %d attempt(s)%s — continuing without buildings/roads",
+        log.error("Overpass unreachable after %d attempt(s)%s — continuing without buildings/roads/rivers",
                    OVERPASS_RETRIES, f": {last_exc}" if last_exc else "")
-        return {"buildings": [], "roads": []}
+        return {"buildings": [], "roads": [], "rivers": []}
 
-    buildings, roads = [], []
+    buildings, roads, rivers = [], [], []
     for el in data.get("elements", []):
         geom = el.get("geometry")
         if not geom or len(geom) < 2:
@@ -199,6 +212,12 @@ out body geom;
                 "height_is_estimated": is_estimated,
                 "name": tags.get("name"),
             })
+        elif tags.get("waterway"):
+            rivers.append({
+                "path_wgs84": [[pt["lon"], pt["lat"]] for pt in geom],
+                "waterway_type": tags.get("waterway"),
+                "name": tags.get("name"),
+            })
         elif tags.get("highway"):
             roads.append({
                 "path_wgs84": [[pt["lon"], pt["lat"]] for pt in geom],
@@ -207,10 +226,10 @@ out body geom;
             })
 
     real_height_count = sum(1 for b in buildings if not b["height_is_estimated"])
-    log.info("-> %d building(s) within %dm (%d with a real height/levels tag, %d estimated at %.0fm), %d road(s)",
+    log.info("-> %d building(s) within %dm (%d with a real height/levels tag, %d estimated at %.0fm), %d road(s), %d river/stream(s)",
               len(buildings), radius_m, real_height_count, len(buildings) - real_height_count,
-              DEFAULT_BUILDING_HEIGHT_M, len(roads))
-    result = {"buildings": buildings, "roads": roads}
+              DEFAULT_BUILDING_HEIGHT_M, len(roads), len(rivers))
+    result = {"buildings": buildings, "roads": roads, "rivers": rivers}
     _write_cache(cache_path, result)
     return result
 
