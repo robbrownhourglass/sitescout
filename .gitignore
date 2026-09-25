@@ -6,3 +6,4 @@ venv/
 output/
 *.egg-info/
 .cache/
+.playwright-mcp/

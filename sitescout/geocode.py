@@ -33,6 +33,7 @@ log = logging.getLogger("sitescout.geocode")
 
 GOOGLE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
 
 
 @dataclass
@@ -85,6 +86,26 @@ def geocode_nominatim(query: str) -> GeocodeResult:
         lat=float(r["lat"]), lon=float(r["lon"]), label=r["display_name"],
         source="nominatim", precise=False,
     )
+
+
+def reverse_geocode(lat: float, lon: float) -> Optional[str]:
+    """Best-effort human-readable label for a point the user already knows
+    exactly (the web UI's "Choose on map" flow — a dropped pin, not a text
+    query to resolve) — Nominatim's own `/reverse` endpoint, same host and
+    User-Agent convention as geocode_nominatim() above. Returns None on any
+    failure so the caller can fall back to plain coordinates rather than
+    blocking the result on a label.
+    """
+    try:
+        resp = requests.get(
+            NOMINATIM_REVERSE_URL, params={"format": "json", "lat": lat, "lon": lon, "zoom": 18},
+            headers={"User-Agent": config.USER_AGENT}, timeout=config.HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json().get("display_name")
+    except Exception as exc:
+        log.warning("Reverse geocoding failed for (%s, %s): %s", lat, lon, exc)
+        return None
 
 
 def geocode(eircode: Optional[str], address_text: str) -> GeocodeResult:

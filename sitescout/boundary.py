@@ -33,7 +33,7 @@ import logging
 import math
 from typing import Optional
 
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
 log = logging.getLogger("sitescout.boundary")
@@ -122,6 +122,29 @@ def geojson_geometry_to_ring_sets(geometry: Optional[dict]) -> list:
     if geometry.get("type") == "Polygon":
         return [geometry.get("coordinates", [])]
     return []
+
+
+def points_within(boundary_ring_sets: Optional[list], points: list) -> Optional[set]:
+    """Like find_overlapping() but for POINT candidates rather than
+    polygons — `points` is a list of `(key, lon, lat)` triples (a planning
+    application's own site coordinate, say). Returns the set of keys whose
+    point genuinely falls within the boundary, or None if no usable
+    boundary was given at all (same "unknown, not confirmed-empty"
+    convention as find_overlapping — lets a caller tell "no boundary known
+    yet" apart from "boundary known, nothing's actually on it").
+    """
+    if not boundary_ring_sets:
+        return None
+    boundary_shape = ring_sets_to_shape(boundary_ring_sets)
+    if boundary_shape is None:
+        return None
+    within = set()
+    for key, lon, lat in points:
+        if lon is None or lat is None:
+            continue
+        if boundary_shape.intersects(Point(lon, lat)):
+            within.add(key)
+    return within
 
 
 def find_overlapping(boundary_ring_sets: Optional[list], candidates: list) -> Optional[set]:

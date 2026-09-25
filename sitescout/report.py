@@ -112,6 +112,10 @@ def print_report(report: dict) -> None:
 
     if "planning_applications" in s:
         p = s["planning_applications"]
+        if p.get("on_site_applications"):
+            print(f"\n-- Planning applications ON THIS SITE ({p['on_site_count']}, within the confirmed plot boundary) --")
+            for app in p["on_site_applications"][:6]:
+                print(f"  - {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
         if p.get("site_match") and p["site_match"]["application_count"]:
             sm = p["site_match"]
             print(f"\n-- Planning applications — this Eircode ({sm['application_count']} exact match) --")
@@ -401,6 +405,11 @@ def _to_markdown(report: dict) -> str:
 
     if "planning_applications" in s:
         p = s["planning_applications"]
+        if p.get("on_site_applications"):
+            lines.append(f"## Planning applications ON THIS SITE ({p['on_site_count']}, within the confirmed plot boundary)")
+            for app in p["on_site_applications"][:6]:
+                lines.append(f"- {app['application_number']}: {app['status']} / {app['decision']} — {(app['description'] or '')[:70]}")
+            lines.append("")
         if p.get("site_match") and p["site_match"]["application_count"]:
             sm = p["site_match"]
             lines.append(f"## Planning applications — this Eircode ({sm['application_count']} exact match)")

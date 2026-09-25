@@ -34,8 +34,8 @@ from . import biodiversity, cadastral, ecology, eirgrid, elevation, epa, geohaza
 log = logging.getLogger("sitescout.pipeline")
 
 
-def _planning_applications(lat: float, lon: float, eircode: str | None) -> dict:
-    data = planning.get_planning_applications(lat, lon, eircode)
+def _planning_applications(lat: float, lon: float, eircode: str | None, boundary_ring_sets: Optional[list]) -> dict:
+    data = planning.get_planning_applications(lat, lon, eircode, boundary_ring_sets)
     attach_boundaries(data)
     return data
 
@@ -96,7 +96,7 @@ SECTION_SPECS = {
     "archaeology": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_archaeology(lat, lon),
     "smr_zone": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_smr_zone(lat, lon, boundary_ring_sets),
     "niah": lambda lat, lon, eircode, label, boundary_ring_sets: heritage.get_niah(lat, lon),
-    "planning_applications": lambda lat, lon, eircode, label, boundary_ring_sets: _planning_applications(lat, lon, eircode),
+    "planning_applications": lambda lat, lon, eircode, label, boundary_ring_sets: _planning_applications(lat, lon, eircode, boundary_ring_sets),
     "flood_risk": lambda lat, lon, eircode, label, boundary_ring_sets: planning.get_flood_risk(lat, lon),
     "ecology": lambda lat, lon, eircode, label, boundary_ring_sets: ecology.get_protected_sites(lat, lon, boundary_ring_sets),
     "rps_aca": lambda lat, lon, eircode, label, boundary_ring_sets: rps.get_protected_structures(lat, lon, boundary_ring_sets),

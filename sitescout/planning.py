@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
-from . import wms
+from . import boundary, wms
 from .arcgis import attribute_query, point_query_full
 
 log = logging.getLogger("sitescout.planning")
@@ -154,13 +154,34 @@ def _extract_application(attrs: dict, geom: dict) -> dict:
     }
 
 
-def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = None) -> dict:
+def get_planning_applications(
+    lat: float, lon: float, eircode: Optional[str] = None,
+    boundary_ring_sets_wgs84: Optional[list] = None,
+) -> dict:
     """Two searches: an exact-Eircode match against this specific site
     (`site_match`, precise regardless of our coordinate imprecision — but
     only works when the application record has that field populated, see
     EIRCODE_PATTERN's docstring above), and a radius search around the
     geocoded point for everything nearby (the main, complete picture).
+
+    Real user report: this only ever surfaced planning history as "N
+    within 500m" — a previous application actually ON the site being
+    scouted (a live-in-progress permission, a past refusal, a site history
+    worth knowing before making an offer) was buried in that list with no
+    flag, easy to miss. When the confirmed plot boundary is known (see
+    boundary.py), every application here — both lists — is checked with a
+    real point-in-polygon test against it (an application's own coordinate
+    in this dataset is a real, independently-surveyed point, not derived
+    from this app's own imprecise geocoding — see CLAUDE.md's coordinate-
+    precision saga), and the ones that genuinely fall on the site are
+    pulled out into their own `on_site_applications` list. Also widens the
+    search radius to comfortably cover the whole confirmed boundary first
+    (boundary.radius_covering_m()) — a real plot can be bigger than the
+    default 500m radius, and an on-site application just outside that
+    fixed radius would otherwise never even be fetched to flag.
     """
+    search_radius_m = boundary.radius_covering_m(lat, lon, boundary_ring_sets_wgs84, PLANNING_APPLICATIONS_SEARCH_RADIUS_M)
+
     site_match = None
     where = _eircode_where_clause("DevelopmentPostcode", eircode) if eircode else None
     if where:
@@ -178,11 +199,11 @@ def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = N
         except Exception as exc:
             log.warning("-> exact Eircode match query failed: %s", exc)
 
-    log.info("Querying National Planning Application Database within %dm…", PLANNING_APPLICATIONS_SEARCH_RADIUS_M)
+    log.info("Querying National Planning Application Database within %dm…", search_radius_m)
     data = point_query_full(
         PLANNING_APPLICATIONS_URL, lon, lat,
         out_fields=PLANNING_APPLICATIONS_OUT_FIELDS,
-        distance_m=PLANNING_APPLICATIONS_SEARCH_RADIUS_M,
+        distance_m=search_radius_m,
         return_geometry=True,
         result_record_count=25,
         order_by="ReceivedDate DESC",
@@ -192,8 +213,31 @@ def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = N
     exceeded = bool(data.get("exceededTransferLimit"))
     log.info(
         "-> %d planning application(s) within %dm%s",
-        len(applications), PLANNING_APPLICATIONS_SEARCH_RADIUS_M, " (capped, more exist)" if exceeded else "",
+        len(applications), search_radius_m, " (capped, more exist)" if exceeded else "",
     )
+
+    # See the docstring above: flag every application (both lists) that's
+    # genuinely ON the confirmed plot, not just nearby. None (not an empty
+    # list) when no boundary is known yet — the initial speculative fetch,
+    # before the user's confirmed a parcel, and the CLI (no plot picker at
+    # all) — so callers/the frontend can tell "not checked yet" apart from
+    # "checked, nothing's actually on it".
+    on_site_applications = None
+    all_apps = list(applications) + (site_match["applications"] if site_match else [])
+    on_site_keys = boundary.points_within(
+        boundary_ring_sets_wgs84,
+        [(a.get("application_number") or i, a.get("lon"), a.get("lat")) for i, a in enumerate(all_apps)],
+    )
+    if on_site_keys is not None:
+        seen = set()
+        on_site_applications = []
+        for i, a in enumerate(all_apps):
+            key = a.get("application_number") or i
+            a["within_site_boundary"] = key in on_site_keys
+            if a["within_site_boundary"] and key not in seen:
+                seen.add(key)
+                on_site_applications.append(a)
+        log.info("-> %d of those application(s) fall within the confirmed plot boundary", len(on_site_applications))
 
     note = (
         "Zoning designation isn't in this dataset — check myplan.ie's zoning map directly "
@@ -211,8 +255,10 @@ def get_planning_applications(lat: float, lon: float, eircode: Optional[str] = N
         "application_count": len(applications),
         "more_exist": exceeded,
         "applications": applications,
-        "search_radius_m": PLANNING_APPLICATIONS_SEARCH_RADIUS_M,
+        "search_radius_m": search_radius_m,
         "site_match": site_match,
+        "on_site_applications": on_site_applications,
+        "on_site_count": len(on_site_applications) if on_site_applications is not None else None,
         "source": "National Planning Application Database (myplan.ie)",
         "note": note,
     }

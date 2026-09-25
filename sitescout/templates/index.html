@@ -41,71 +41,172 @@
 
   #landingHero{
     position:absolute; inset:0; z-index:50; overflow-y:auto; background:var(--paper);
-    transition: opacity .35s ease, transform .35s ease;
+    transition: opacity .35s ease, transform .35s ease; scroll-behavior:smooth;
   }
   #landingHero.leaving{ opacity:0; transform:translateY(-30px); pointer-events:none; }
+
+  /* ---- Sticky marketing nav across the top of the landing page (not the
+     post-search #topbar below, which stays hidden until a search happens).
+     Plain anchor links scroll #landingHero itself (the real scroll
+     container, see scroll-behavior above); the CTA button focuses/scrolls
+     to the same #searchBar the hero already centres, rather than
+     duplicating a second search input. */
+  .landing-nav{
+    position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:20px;
+    height:60px; padding:0 24px; background:rgba(246,244,238,.86); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .landing-nav-logo{ display:flex; align-items:center; line-height:0; flex:none; }
+  .landing-nav-logo img{ height:22px; width:auto; }
+  .landing-nav-links{ display:flex; gap:22px; margin:0 auto; }
+  .landing-nav-links a{ color:var(--muted); text-decoration:none; font-size:13.5px; font-weight:600; }
+  .landing-nav-links a:hover{ color:var(--moss-dark); }
+  .landing-nav-cta{
+    flex:none; padding:8px 16px; border:none; border-radius:7px; background:var(--moss);
+    color:#fff; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap;
+  }
+  .landing-nav-cta:hover{ background:var(--moss-dark); }
+  @media (max-width:640px){ .landing-nav-links{ display:none; } }
 
   /* Asked for directly: "front and center" search, like a normal page's
      hero, with real content below to scroll to — not a bare centered
      box filling the whole screen like before. min-height (not a hard
      100vh) leaves the next section peeking up from the bottom on a
-     typical screen, an invitation to scroll rather than a hard cutoff. */
+     typical screen, an invitation to scroll rather than a hard cutoff.
+     A soft two-colour gradient wash + faint dot-grid (both sampled from
+     the brand palette, no new image asset) give the hero real depth
+     instead of a flat paper-coloured box. */
   .hero-inner{
-    min-height:min(680px,82vh); display:flex; flex-direction:column; align-items:center;
+    position:relative; overflow:hidden;
+    min-height:min(620px,78vh); display:flex; flex-direction:column; align-items:center;
     justify-content:center; gap:18px; padding:48px 24px 12px; text-align:center;
   }
-  .hero-inner .logo{ height:64px; width:auto; }
+  .hero-inner::before{
+    content:""; position:absolute; inset:-15%; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(440px 440px at 14% 20%, rgba(49,88,160,.14), transparent 70%),
+      radial-gradient(400px 400px at 87% 80%, rgba(169,84,8,.12), transparent 70%);
+  }
+  .hero-inner::after{
+    content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background-image:radial-gradient(rgba(27,42,36,.07) 1px, transparent 1px);
+    background-size:24px 24px;
+    -webkit-mask-image:radial-gradient(ellipse 65% 55% at 50% 38%, #000 30%, transparent 85%);
+    mask-image:radial-gradient(ellipse 65% 55% at 50% 38%, #000 30%, transparent 85%);
+  }
+  .hero-inner > *{ position:relative; z-index:1; }
+  .hero-inner .logo{ height:104px; width:auto; }
   .hero-inner .subtitle{ margin:0; font-size:15px; color:var(--muted); letter-spacing:.02em; }
-  .hero-inner .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; }
+  .hero-inner .tagline{ margin:0; color:var(--muted); font-size:15px; max-width:560px; font-weight:400; }
   .scroll-hint{
     margin-top:10px; color:var(--muted); font-size:19px; line-height:1;
     animation: hero-bounce 2.2s ease-in-out infinite;
   }
   @keyframes hero-bounce{ 0%,100%{ transform:translateY(0); opacity:.6; } 50%{ transform:translateY(7px); opacity:1; } }
 
+  /* Thin strip naming the real public agencies InSite queries live —
+     grounded, verifiable text (see CLAUDE.md's verified-sources table),
+     not a fabricated "trusted by" logo bar. */
+  .source-strip{
+    background:var(--card); border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+    padding:16px 24px; display:flex; flex-wrap:wrap; align-items:baseline; justify-content:center;
+    gap:6px 10px; text-align:center;
+  }
+  .source-strip-label{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
+  .source-strip-items{ font-size:13px; color:var(--ink); font-weight:600; letter-spacing:.01em; }
+
   /* ---- Below-the-fold landing content: what it does, how it works,
      about — asked for directly ("a more normal web page... an About
-     section and more stuff underneath"). A plain centered column,
-     alternating background with the topbar/card colour so sections read
-     as distinct without needing heavy dividers. */
-  .landing-section{ max-width:920px; margin:0 auto; padding:44px 24px; text-align:left; }
-  .landing-section + .landing-section{ border-top:1px solid var(--line); }
-  .landing-section h2{ margin:0; font-size:21px; text-align:center; }
+     section and more stuff underneath"). Full-bleed sections with
+     alternating backgrounds read as distinct, real "website sections"
+     rather than one long scrolling column; an inner max-width column
+     keeps the actual content readable. */
+  .landing-section{ padding:0; }
+  .landing-section.bg-card{ background:var(--card); border-bottom:1px solid var(--line); }
+  .landing-section-inner{ max-width:960px; margin:0 auto; padding:60px 24px; }
+  .landing-section h2{ margin:0; font-size:26px; text-align:center; letter-spacing:-.01em; }
   .landing-section .section-lede{
-    margin:0 auto 32px; max-width:600px; text-align:center; color:var(--muted); font-size:14px;
+    margin:0 auto 36px; max-width:600px; text-align:center; color:var(--muted); font-size:14.5px;
+  }
+  .eyebrow{
+    display:block; text-align:center; font-size:11px; font-weight:700; letter-spacing:.09em;
+    text-transform:uppercase; color:var(--moss-dark); margin-bottom:8px;
   }
   /* Small two-colour accent under each section heading — the same navy
      and orange sampled from the logo, a deliberate small brand touch
      rather than repainting every heading. */
   .brand-rule{
-    height:3px; width:56px; margin:12px auto 24px; border-radius:2px;
+    height:3px; width:56px; margin:14px auto 24px; border-radius:2px;
     background:linear-gradient(90deg, var(--moss), var(--amber));
   }
 
-  .feature-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:18px; }
-  .feature-card{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
-  .feature-card svg{ width:24px; height:24px; color:var(--moss); }
-  .feature-card h3{ margin:12px 0 6px; font-size:14.5px; }
-  .feature-card p{ margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
-
-  .how-steps{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:22px; max-width:560px; margin-left:auto; margin-right:auto; }
-  .how-steps li{ display:flex; gap:16px; align-items:flex-start; }
-  .step-num{
-    flex:none; width:28px; height:28px; border-radius:50%; background:var(--moss); color:#fff;
-    display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px;
+  .feature-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:20px; }
+  .feature-card{
+    background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px;
+    transition:transform .15s ease, box-shadow .15s ease;
   }
-  .how-steps h3{ margin:0 0 4px; font-size:14.5px; }
-  .how-steps p{ margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
+  .feature-card:hover{ transform:translateY(-3px); box-shadow:0 10px 24px rgba(27,42,36,.08); }
+  .feature-card .icon-chip{
+    width:42px; height:42px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    background:var(--tint-ok);
+  }
+  .feature-card:nth-child(even) .icon-chip{ background:var(--tint-warn); }
+  .feature-card:nth-child(even) svg{ color:var(--amber); }
+  .feature-card svg{ width:22px; height:22px; color:var(--moss); }
+  .feature-card h3{ margin:14px 0 6px; font-size:15px; }
+  .feature-card p{ margin:0; font-size:13px; color:var(--muted); line-height:1.55; }
 
-  .landing-about{ max-width:680px; }
-  .landing-about p{ font-size:14px; color:var(--ink); line-height:1.6; text-align:left; }
+  /* Horizontal 3-step process with a connecting line behind the number
+     circles (a standard "how it works" stepper) — stacks vertically
+     with no connector on narrow screens rather than cramming it in. */
+  .how-steps{ position:relative; list-style:none; margin:0; padding:0; display:flex; gap:12px; justify-content:space-between; }
+  .how-steps::before{
+    content:""; position:absolute; top:19px; left:70px; right:70px; height:2px; background:var(--line); z-index:0;
+  }
+  .how-steps li{ position:relative; z-index:1; flex:1; max-width:230px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+  .step-num{
+    flex:none; width:38px; height:38px; border-radius:50%; background:var(--moss); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; margin-bottom:14px;
+    box-shadow:0 0 0 5px var(--paper);
+  }
+  .how-steps h3{ margin:0 0 6px; font-size:14.5px; }
+  .how-steps p{ margin:0; font-size:13px; color:var(--muted); line-height:1.55; }
+  @media (max-width:700px){
+    .how-steps{ flex-direction:column; gap:26px; align-items:stretch; }
+    .how-steps::before{ display:none; }
+    .how-steps li{ max-width:none; flex-direction:row; text-align:left; gap:16px; }
+    .step-num{ margin-bottom:0; }
+  }
+
+  .landing-about .landing-section-inner{ max-width:680px; }
+  .landing-about p{ font-size:14px; color:var(--ink); line-height:1.65; text-align:left; }
   .landing-about p + p{ margin-top:12px; }
 
-  .landing-footer{
-    max-width:920px; margin:0 auto; padding:20px 24px 44px; text-align:center;
-    color:var(--muted); font-size:12.5px; border-top:1px solid var(--line);
+  /* Closing CTA band — reiterates the same search, deliberately louder
+     (solid brand colour) as the page's last real prompt before the
+     footer, a normal pattern for a page whose whole job is one action. */
+  .landing-cta{ background:var(--moss-dark); color:#fff; text-align:center; }
+  .landing-cta .eyebrow{ color:rgba(255,255,255,.75); }
+  .landing-cta h2{ color:#fff; }
+  .landing-cta p{ margin:10px auto 0; max-width:480px; color:rgba(255,255,255,.78); font-size:14px; }
+  .landing-cta button{
+    margin-top:22px; padding:12px 24px; border:none; border-radius:8px; background:#fff; color:var(--moss-dark);
+    font-size:14px; font-weight:700; cursor:pointer;
   }
-  .landing-footer p{ margin:0; }
+  .landing-cta button:hover{ background:var(--tint-warn); color:var(--amber); }
+
+  .landing-footer{ background:var(--paper); }
+  .landing-footer-inner{ max-width:960px; margin:0 auto; padding:36px 24px 28px; }
+  .footer-top{ display:flex; flex-wrap:wrap; gap:24px; justify-content:space-between; align-items:flex-start; padding-bottom:24px; border-bottom:1px solid var(--line); }
+  .footer-brand{ display:flex; align-items:center; gap:10px; }
+  .footer-brand img{ height:20px; width:auto; }
+  .footer-brand span{ font-size:12.5px; color:var(--muted); }
+  .footer-links{ display:flex; gap:20px; }
+  .footer-links a{ font-size:13px; color:var(--muted); text-decoration:none; }
+  .footer-links a:hover{ color:var(--moss-dark); }
+  .footer-bottom{ padding-top:18px; color:var(--muted); font-size:12.5px; line-height:1.6; text-align:left; }
+  .footer-bottom p{ margin:0; }
+  .footer-bottom p + p{ margin-top:6px; }
 
   .spinner{
     width:15px; height:15px; border:2px solid rgba(0,0,0,.15); border-top-color:var(--moss);
@@ -145,6 +246,11 @@
     padding:8px 14px; font-size:13px; cursor:pointer;
   }
   button.ghost:hover{ background:var(--tint-ok); }
+  .link-btn{
+    background:none; border:none; padding:2px; margin-top:-6px; font-size:13px; color:var(--muted);
+    text-decoration:underline; text-underline-offset:2px; cursor:pointer;
+  }
+  .link-btn:hover{ color:var(--moss-dark); }
 
   #topbar{
     flex:none; height:64px; display:flex; align-items:center; gap:16px; padding:0 20px;
@@ -269,17 +375,22 @@
   #baseLayerPanel button:hover{ background:#f3f1ea; }
   #baseLayerPanel button.active{ background:var(--tint-ok); color:var(--moss-dark); font-weight:600; }
 
-  #plotPicker{
+  /* Shared by #plotPicker and #mapPickBanner — the two mutually-exclusive
+     instructional bars that sit above the map (plot-confirmation step vs.
+     the "Choose on map" drop-a-pin step). */
+  .info-banner{
     flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
     margin:10px 20px 0; padding:10px 16px; background:var(--tint-ok); border:1px solid var(--moss);
     border-radius:8px; font-size:12.5px; color:var(--moss-dark);
   }
-  #plotPicker .plot-picker-text strong{ color:var(--ink); }
-  #plotPicker button{
+  .info-banner strong{ color:var(--ink); }
+  .info-banner button{
     flex:none; padding:8px 16px; border:none; border-radius:8px; background:var(--moss); color:#fff;
     font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;
   }
-  #plotPicker button:hover{ background:var(--moss-dark); }
+  .info-banner button:hover{ background:var(--moss-dark); }
+  .info-banner button.secondary{ background:transparent; color:var(--moss-dark); border:1px solid var(--moss); }
+  .info-banner button.secondary:hover{ background:rgba(255,255,255,.5); }
 
   #detailPanel{
     position:absolute; top:0; right:300px; bottom:0; width:400px; max-width:88vw;
@@ -320,6 +431,23 @@
   .card .src{ padding-top:10px; border-top:1px dashed var(--line); font-size:12px; }
   .card .src a{ color:var(--moss); text-decoration:none; }
   .card .src a:hover{ text-decoration:underline; }
+
+  /* Expandable per-application rows (planning card) — the full record
+     (address, dates, appeal status) is already fetched but was previously
+     never shown, only a truncated one-line summary. <details> rather than
+     a bespoke JS toggle: standard, no extra wiring needed. */
+  .app-row{ border-bottom:1px dashed var(--line); padding:5px 0; }
+  .app-row:last-child{ border-bottom:none; }
+  .app-row summary{ cursor:pointer; font-size:13px; color:var(--ink); list-style:none; }
+  .app-row summary::-webkit-details-marker{ display:none; }
+  .app-row summary::before{ content:'▸'; display:inline-block; width:12px; color:var(--muted); }
+  .app-row[open] summary::before{ content:'▾'; }
+  .app-row summary:hover{ color:var(--moss-dark); }
+  .app-row .app-detail{ margin:4px 0 2px 16px; font-size:12.5px; color:var(--muted); line-height:1.6; }
+  .on-site-badge{
+    display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.02em;
+    padding:1px 6px; border-radius:999px; background:var(--tint-warn); color:var(--amber); margin-left:4px;
+  }
   .request-btn{
     display:inline-block; margin-top:4px; font-size:12.5px; padding:6px 10px; border-radius:6px;
     background:var(--paper); border:1px solid var(--line); color:var(--ink); text-decoration:none;
@@ -339,14 +467,25 @@
 <div id="app">
 
   <div id="landingHero">
+    <nav class="landing-nav">
+      <a href="/" class="landing-nav-logo"><img src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite"></a>
+      <div class="landing-nav-links">
+        <a href="#features">Features</a>
+        <a href="#how-it-works">How it works</a>
+        <a href="#about">About</a>
+      </div>
+      <button type="button" class="landing-nav-cta" id="navScoutBtn">Scout a site</button>
+    </nav>
+
     <div class="hero-inner">
       <img class="logo" src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
-      <p class="subtitle">Site scouting for Ireland</p>
+      <p class="subtitle">Everything about your site in one place.</p>
       <p class="tagline">Enter an Eircode or address for a site — geology, water, heritage, environmental hazards, and planning context, compiled from Ireland's public data sources.</p>
       <div id="searchBar" class="search-bar">
         <input type="text" id="addressInput" placeholder="e.g. R32 E4F8, or Trim Castle, Trim, Co. Meath" value="R32 E4F8">
         <button id="scoutBtn">Scout site</button>
       </div>
+      <button type="button" id="chooseOnMapBtn" class="link-btn">or choose a location on the map</button>
       <div id="heroStatus" class="hero-status">
         <span id="heroSpinner" class="spinner" style="display:none"></span>
         <span id="heroStatusText"></span>
@@ -355,72 +494,111 @@
       <div class="scroll-hint" aria-hidden="true">&#8595;</div>
     </div>
 
-    <section class="landing-section">
-      <h2>What InSite pulls together</h2>
-      <div class="brand-rule"></div>
-      <p class="section-lede">One search compiles the categories a planner, PM, or architect would otherwise gather by hand — each fetched live from its own public source, not a cached snapshot.</p>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8 6 4h9l5 3-2 10-8 3-6-2Z"/><path d="M12 10.4c-1.1 0-2 .9-2 2 0 1.6 2 3.7 2 3.7s2-2.1 2-3.7c0-1.1-.9-2-2-2Z"/><circle cx="12" cy="12.4" r=".55" fill="currentColor" stroke="none"/></svg>
-          <h3>Property boundary</h3>
-          <p>Tailte Éireann cadastral parcels — pick and merge whichever registered parcel(s) actually make up the site.</p>
-        </div>
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-2.4 1.7-4.3 3.8-4.8.5-1.9 2.2-3.3 4.1-2.9 1.9.5 3 2.5 2.6 4.4 1.6.3 2.9 1.7 2.9 3.3H4Z"/><path d="M7.5 8.5l6.5 6.5"/><path d="M13.3 6.8l1.9-1.9 1.7 1.7-1.9 1.9"/></svg>
-          <h3>Ground &amp; Terrain</h3>
-          <p>Bedrock &amp; subsoil geology, soil survey, real LIDAR elevation with a rotatable 3D model, and geohazards like landslide risk.</p>
-        </div>
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5S6 11 6 15c0 3.3 2.7 6 6 6s6-2.7 6-6c0-4-6-11.5-6-11.5Z"/></svg>
-          <h3>Water</h3>
-          <p>Groundwater vulnerability, flood risk (OPW), WFD water body status, and nearby wells with real recorded water-strike depths.</p>
-        </div>
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10V6h2.3v2H9V6h2.3v2H13V6h2.3v2H17V6h2v4"/><path d="M6 10v10h12V10"/><path d="M10 20v-4a2 2 0 014 0v4"/></svg>
-          <h3>Heritage &amp; Protected Areas</h3>
-          <p>Archaeology (SMR), protected structures (NIAH), and statutory conservation areas (RPS/ACA).</p>
-        </div>
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19c-1-7 3-13 12-14 1 8-3 13-12 14Z"/><path d="M6.5 18.5C9 15 11 11.5 12.5 7"/></svg>
-          <h3>Environment &amp; Hazards</h3>
-          <p>Ecological designations (SAC/SPA/NHA), radon risk, licensed industrial facilities, and nearby species records.</p>
-        </div>
-        <div class="feature-card">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5h7l3 3v13H7Z"/><path d="M14 5v3h3"/><path d="M9.5 12h6"/><path d="M9.5 15h6"/><path d="M9.5 18h4"/></svg>
-          <h3>Planning &amp; Utilities</h3>
-          <p>Nearby planning applications, zoning links, and the local authority/utility providers to contact.</p>
+    <section class="source-strip">
+      <span class="source-strip-label">Live, on every search, from</span>
+      <span class="source-strip-items">GSI &middot; EPA &middot; Tailte &Eacute;ireann &middot; National Monuments Service &middot; NPWS &middot; OPW &middot; EirGrid &middot; GBIF</span>
+    </section>
+
+    <section id="features" class="landing-section">
+      <div class="landing-section-inner">
+        <span class="eyebrow">Features</span>
+        <h2>What InSite pulls together</h2>
+        <div class="brand-rule"></div>
+        <p class="section-lede">One search compiles the categories a planner, PM, or architect would otherwise gather by hand — each fetched live from its own public source, not a cached snapshot.</p>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8 6 4h9l5 3-2 10-8 3-6-2Z"/><path d="M12 10.4c-1.1 0-2 .9-2 2 0 1.6 2 3.7 2 3.7s2-2.1 2-3.7c0-1.1-.9-2-2-2Z"/><circle cx="12" cy="12.4" r=".55" fill="currentColor" stroke="none"/></svg></div>
+            <h3>Property boundary</h3>
+            <p>Tailte Éireann cadastral parcels — pick and merge whichever registered parcel(s) actually make up the site.</p>
+          </div>
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-2.4 1.7-4.3 3.8-4.8.5-1.9 2.2-3.3 4.1-2.9 1.9.5 3 2.5 2.6 4.4 1.6.3 2.9 1.7 2.9 3.3H4Z"/><path d="M7.5 8.5l6.5 6.5"/><path d="M13.3 6.8l1.9-1.9 1.7 1.7-1.9 1.9"/></svg></div>
+            <h3>Ground &amp; Terrain</h3>
+            <p>Bedrock &amp; subsoil geology, soil survey, real LIDAR elevation with a rotatable 3D model, and geohazards like landslide risk.</p>
+          </div>
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5S6 11 6 15c0 3.3 2.7 6 6 6s6-2.7 6-6c0-4-6-11.5-6-11.5Z"/></svg></div>
+            <h3>Water</h3>
+            <p>Groundwater vulnerability, flood risk (OPW), WFD water body status, and nearby wells with real recorded water-strike depths.</p>
+          </div>
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10V6h2.3v2H9V6h2.3v2H13V6h2.3v2H17V6h2v4"/><path d="M6 10v10h12V10"/><path d="M10 20v-4a2 2 0 014 0v4"/></svg></div>
+            <h3>Heritage &amp; Protected Areas</h3>
+            <p>Archaeology (SMR), protected structures (NIAH), and statutory conservation areas (RPS/ACA).</p>
+          </div>
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19c-1-7 3-13 12-14 1 8-3 13-12 14Z"/><path d="M6.5 18.5C9 15 11 11.5 12.5 7"/></svg></div>
+            <h3>Environment &amp; Hazards</h3>
+            <p>Ecological designations (SAC/SPA/NHA), radon risk, licensed industrial facilities, and nearby species records.</p>
+          </div>
+          <div class="feature-card">
+            <div class="icon-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5h7l3 3v13H7Z"/><path d="M14 5v3h3"/><path d="M9.5 12h6"/><path d="M9.5 15h6"/><path d="M9.5 18h4"/></svg></div>
+            <h3>Planning &amp; Utilities</h3>
+            <p>Nearby planning applications, zoning links, and the local authority/utility providers to contact.</p>
+          </div>
         </div>
       </div>
     </section>
 
-    <section class="landing-section landing-how">
-      <h2>How it works</h2>
-      <div class="brand-rule"></div>
-      <ol class="how-steps">
-        <li>
-          <span class="step-num">1</span>
-          <div><h3>Enter an address or Eircode</h3><p>InSite resolves it and shows every nearby registered cadastral parcel on the map.</p></div>
-        </li>
-        <li>
-          <span class="step-num">2</span>
-          <div><h3>Confirm the plot</h3><p>Select and merge whichever parcel(s) actually make up the site — many real properties span more than one.</p></div>
-        </li>
-        <li>
-          <span class="step-num">3</span>
-          <div><h3>Get the full picture</h3><p>Every category loads in the background while you confirm the plot — live data from Ireland's own public sources, not a guess.</p></div>
-        </li>
-      </ol>
+    <section id="how-it-works" class="landing-section bg-card">
+      <div class="landing-section-inner">
+        <span class="eyebrow">Process</span>
+        <h2>How it works</h2>
+        <div class="brand-rule"></div>
+        <ol class="how-steps">
+          <li>
+            <span class="step-num">1</span>
+            <div><h3>Enter an address or Eircode</h3><p>InSite resolves it and shows every nearby registered cadastral parcel on the map.</p></div>
+          </li>
+          <li>
+            <span class="step-num">2</span>
+            <div><h3>Confirm the plot</h3><p>Select and merge whichever parcel(s) actually make up the site — many real properties span more than one.</p></div>
+          </li>
+          <li>
+            <span class="step-num">3</span>
+            <div><h3>Get the full picture</h3><p>Every category loads in the background while you confirm the plot — live data from Ireland's own public sources, not a guess.</p></div>
+          </li>
+        </ol>
+      </div>
     </section>
 
-    <section class="landing-section landing-about">
-      <h2>About InSite</h2>
-      <div class="brand-rule"></div>
-      <p>InSite pulls together the site-scouting categories a planner, PM, or architect would otherwise gather by hand — geology, water, heritage, environmental hazards, and planning context — from Ireland's public data sources, into one report.</p>
-      <p>This is a personal, non-commercial tool. Every data point is fetched live from its original public source (GSI, EPA, Tailte Éireann, the National Monuments Service, and others) — nothing is guessed or modelled beyond what's explicitly disclosed alongside each result.</p>
+    <section id="about" class="landing-section landing-about">
+      <div class="landing-section-inner">
+        <span class="eyebrow">About</span>
+        <h2>About InSite</h2>
+        <div class="brand-rule"></div>
+        <p>InSite pulls together the site-scouting categories a planner, PM, or architect would otherwise gather by hand — geology, water, heritage, environmental hazards, and planning context — from Ireland's public data sources, into one report.</p>
+        <p>This is a personal, non-commercial tool. Every data point is fetched live from its original public source (GSI, EPA, Tailte Éireann, the National Monuments Service, and others) — nothing is guessed or modelled beyond what's explicitly disclosed alongside each result.</p>
+      </div>
+    </section>
+
+    <section class="landing-section landing-cta">
+      <div class="landing-section-inner">
+        <span class="eyebrow">Get started</span>
+        <h2>Ready to scout a site?</h2>
+        <p>Drop in an Eircode or address and get the full picture in seconds.</p>
+        <button type="button" id="ctaScoutBtn">Jump to search ↑</button>
+      </div>
     </section>
 
     <footer class="landing-footer">
-      <p>Data from Ireland's public sources — see "Sources &amp; methodology" on any site report for the full list. Not a substitute for professional site investigation, a legal survey, or planning advice.</p>
+      <div class="landing-footer-inner">
+        <div class="footer-top">
+          <div class="footer-brand">
+            <img src="{{ url_for('static', filename='img/insite-logo.png') }}" alt="InSite">
+            <span>Site scouting for Ireland</span>
+          </div>
+          <div class="footer-links">
+            <a href="#features">Features</a>
+            <a href="#how-it-works">How it works</a>
+            <a href="#about">About</a>
+          </div>
+        </div>
+        <div class="footer-bottom">
+          <p>Data from Ireland's public sources — see "Sources &amp; methodology" on any site report for the full list. Not a substitute for professional site investigation, a legal survey, or planning advice.</p>
+          <p>&copy; <span id="footerYear"></span> InSite</p>
+        </div>
+      </div>
     </footer>
   </div>
 
@@ -430,8 +608,13 @@
     <div id="topbarStatus"></div>
   </header>
 
-  <div id="plotPicker" style="display:none">
-    <div class="plot-picker-text">Select every plot that makes up this site — click a plot on the map to add or remove it. <strong>The highlighted plot</strong> is where your search landed.</div>
+  <div id="mapPickBanner" class="info-banner" style="display:none">
+    <div>Click anywhere on the map to drop a pin for your site.</div>
+    <button id="cancelMapPickBtn" type="button" class="secondary">Cancel</button>
+  </div>
+
+  <div id="plotPicker" class="info-banner" style="display:none">
+    <div>Select every plot that makes up this site — click a plot on the map to add or remove it. <strong>The highlighted plot</strong> is where your search landed.</div>
     <button id="confirmPlotBtn" type="button">Confirm</button>
   </div>
 
@@ -489,6 +672,9 @@ const detailPanelEl = document.getElementById('detailPanel');
 const detailContentEl = document.getElementById('detailContent');
 const plotPickerEl = document.getElementById('plotPicker');
 const confirmPlotBtnEl = document.getElementById('confirmPlotBtn');
+const chooseOnMapBtnEl = document.getElementById('chooseOnMapBtn');
+const mapPickBannerEl = document.getElementById('mapPickBanner');
+const cancelMapPickBtnEl = document.getElementById('cancelMapPickBtn');
 
 let map, marker;
 let baseLayers = {};      // built once, on first map init — "Street" / "Satellite"
@@ -504,6 +690,7 @@ let activeThemeKey = null; // single-open accordion — see toggleTheme()
 let tileButtons = {};     // category key -> its row/button element (boundary row, layer row, or the info row), for highlighting the active one + patching its status dot
 let activeTileKey = null;
 let resultsModeEntered = false;
+let mapPickMode = false; // true while waiting for a click on the map to drop a pin — see enterMapPickMode()
 
 // ---- Plot-confirmation + progressive-loading state. One property is
 // often several registered cadastral parcels (a house plus a separate
@@ -712,10 +899,18 @@ function enterResultsMode(){
   setTimeout(() => { landingHeroEl.style.display = 'none'; }, 400);
 }
 
-// The map is created lazily (first successful search) but its container
-// has real dimensions from page load — #mapWrap is opacity:0 while on the
-// landing page, not display:none, so it's already laid out at full size
-// by the time Leaflet measures it. No invalidateSize() dance needed.
+// Whole-country view — the placeholder ensureMap() starts on (never
+// actually shown, since every normal search flyTo()s away immediately) and
+// the real starting view for "choose on map" (see enterMapPickMode()),
+// which needs the user to actually see all of Ireland to click on.
+const IRELAND_CENTER = [53.35, -8.0];
+const IRELAND_ZOOM = 7;
+
+// The map is created lazily (first successful search, or "choose on map")
+// but its container has real dimensions from page load — #mapWrap is
+// opacity:0 while on the landing page, not display:none, so it's already
+// laid out at full size by the time Leaflet measures it. No
+// invalidateSize() dance needed.
 function ensureMap(){
   if(map) return;
   // maxZoom:21 on the map itself — otherwise Leaflet caps the whole map at
@@ -725,7 +920,7 @@ function ensureMap(){
   // requests bounded to what each server actually serves; anything past
   // that just scales the last real tile up (a bit soft, but zoomable)
   // rather than requesting tiles that don't exist.
-  map = L.map('map', { maxZoom: 21 }).setView([53.35, -8.0], 7); // placeholder view, never actually shown (see above)
+  map = L.map('map', { maxZoom: 21 }).setView(IRELAND_CENTER, IRELAND_ZOOM); // placeholder view, never actually shown (see above)
   const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap contributors', maxZoom: 21, maxNativeZoom: 19,
   }).addTo(map);
@@ -835,6 +1030,11 @@ function ensureMap(){
   // ecology, etc.) have already loaded in the background.
   map.createPane('pickerPane');
   map.getPane('pickerPane').style.zIndex = 900;
+
+  // "Choose on map" (see enterMapPickMode()) — registered once here rather
+  // than per-entry, and a no-op whenever mapPickMode is false, i.e. for
+  // every ordinary click on an already-loaded report's map.
+  map.on('click', handleMapPickClick);
 }
 
 // Fixed preview tiles for the base-layer toggle thumbnail (#baseLayerToggle)
@@ -1194,6 +1394,18 @@ function buildPlanningLayer(p){
     const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
     L.circleMarker([app.lat, app.lon], { radius: 9, color: '#fff', weight: 3, fillColor: CATEGORY_COLORS.planning, fillOpacity: 0.9, pane: 'pointsPane' })
       .bindPopup(`<strong>${app.application_number}</strong> <span class="muted">(exact Eircode match)</span><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
+      .addTo(group);
+  });
+  // On the CONFIRMED plot boundary itself (a real point-in-polygon result,
+  // not a sparse postcode-field text match like the Eircode style above) —
+  // added last so it draws on top of the other two styles at the same
+  // spot, in the same warn/amber this section's card badge already uses.
+  const onSiteApps = (p && p.on_site_applications) || [];
+  onSiteApps.forEach(app => {
+    if(app.lat == null || app.lon == null) return;
+    const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+    L.circleMarker([app.lat, app.lon], { radius: 11, color: '#fff', weight: 3, fillColor: '#a95408', fillOpacity: 0.95, pane: 'pointsPane' })
+      .bindPopup(`<strong>${app.application_number}</strong> <span class="muted">(on this site)</span><br>${app.status || ''}${decision}<br>${(app.description || '').slice(0, 150)}`)
       .addTo(group);
   });
   return group;
@@ -2191,6 +2403,21 @@ function startPlotConfirmation(data){
   currentEircode = data.eircode;
   currentSectionNames = data.section_names || [];
 
+  // Real user report: searching again from the topbar while already
+  // looking at a site didn't reset properly — an open detail panel (e.g.
+  // "Terrain & elevation") just stayed open, frozen, still showing the
+  // PREVIOUS site's rendered content (including that site's own
+  // /terrain-3d link) forever. activeTileKey getting reset below stopped
+  // it from ever being refreshed once the new site's data arrived (see
+  // onSectionArrived's own `activeTileKey === spec.key` check), but
+  // nothing ever closed the panel itself or cleared its stale content —
+  // closeDetail() does both. Also cancels a still-active "choose on map"
+  // pin-drop (banner + click-to-drop-pin) left over from before the user
+  // switched to typing an address instead.
+  closeDetail();
+  mapPickMode = false;
+  mapPickBannerEl.style.display = 'none';
+
   ensureMap();
   clearOverlayLayers();
   // flyTo, not setView — smoothly animates in rather than jumping straight
@@ -2200,10 +2427,15 @@ function startPlotConfirmation(data){
   map.flyTo([loc.lat, loc.lon], 19, { duration: 1.2 });
   if(marker) map.removeLayer(marker);
   marker = L.marker([loc.lat, loc.lon]).addTo(map).bindPopup(loc.label).openPopup();
+  // A previous site's own parcel-picker polygons are only ever removed
+  // once THAT plot gets confirmed (see confirmPlotSelection) — searching
+  // again before doing so left them on the map, now-orphaned, underneath
+  // the new site's own picker. Same "nothing reset a leftover from the
+  // last unconfirmed session" root cause as the detail panel above.
+  if(pickerLayerGroup){ map.removeLayer(pickerLayerGroup); pickerLayerGroup = null; }
 
   sectionData = {};
   sectionErrored = {};
-  activeTileKey = null;
   plotConfirmed = false;
   allParcels = data.parcels || [];
   selectedParcelIds = new Set(allParcels.filter(p => p.contains_point).map(p => p.parcel_id));
@@ -2221,6 +2453,52 @@ function startPlotConfirmation(data){
 
   fetchSectionsInBackground(data.section_names, loc.lat, loc.lon, data.eircode, loc.label, myGeneration);
 }
+
+// ---- "Choose on map": an alternative to typing an address/Eircode — the
+// user drops a pin directly on a full map of Ireland instead. From that
+// point on it's the exact same flow as a normal search (/api/scout/point
+// returns the identical {location, parcels, section_names} shape /api/scout
+// does once a point is resolved), so startPlotConfirmation() handles it
+// with no special-casing.
+
+function enterMapPickMode(){
+  clearPicker();
+  ensureMap();
+  map.setView(IRELAND_CENTER, IRELAND_ZOOM);
+  mapPickMode = true;
+  map.getContainer().style.cursor = 'crosshair';
+  mapPickBannerEl.style.display = 'flex';
+  setStatus('');
+  enterResultsMode();
+}
+
+function handleMapPickClick(e){
+  if(!mapPickMode) return;
+  mapPickMode = false;
+  map.getContainer().style.cursor = '';
+  mapPickBannerEl.style.display = 'none';
+
+  const { lat, lng } = e.latlng;
+  if(marker) map.removeLayer(marker);
+  marker = L.marker([lat, lng]).addTo(map);
+
+  setLoading(true);
+  setStatus('Looking up this location…');
+
+  postJSON('/api/scout/point', { lat, lon: lng })
+    .then(data => startPlotConfirmation(data))
+    .catch(err => {
+      setLoading(false);
+      setStatus(err.message, true);
+      // Let the user try another spot rather than getting stuck.
+      mapPickMode = true;
+      map.getContainer().style.cursor = 'crosshair';
+      mapPickBannerEl.style.display = 'flex';
+    });
+}
+
+chooseOnMapBtnEl.addEventListener('click', enterMapPickMode);
+cancelMapPickBtnEl.addEventListener('click', () => { window.location.href = '/'; });
 
 // One-line plain-language summary at the top of each card's body — "report
 // card" style: not just the raw data, but a verdict ("not in a zone, but
@@ -2764,13 +3042,23 @@ function terrainCard(t){
   }
   const p = t.precise;
   const c = t.contours;
+  // "satellite_dem" = Copernicus GLO-30, the global fallback used wherever
+  // no real LIDAR survey covers this point — real data, but a 30m global
+  // DIGITAL SURFACE model (includes vegetation/building height), not the
+  // ~2m bare-ground LIDAR every other source here is. Distinguished from
+  // "lidar" throughout this card rather than presented with the same
+  // confidence — see elevation.py's _sample_copernicus_dem().
+  const isSatelliteDem = p.found && p.elevation_kind === 'satellite_dem';
 
   let verdictText, verdictCls;
-  if(p.found){
+  if(p.found && !isSatelliteDem){
     verdictText = `Ground elevation: ${p.ground_elevation_m}m (${p.source}, ${p.resolution_m}m resolution)`;
     verdictCls = 'ok';
+  } else if(isSatelliteDem){
+    verdictText = `No LIDAR survey here — nearest real figure is ${p.ground_elevation_m}m from ${p.source} (${p.resolution_m}m, satellite-derived, not bare ground)`;
+    verdictCls = 'warn';
   } else if(c.elevation_range_m){
-    verdictText = `No precise LIDAR data here — nearby contours suggest roughly ${c.elevation_range_m[0]}-${c.elevation_range_m[1]}m`;
+    verdictText = `No elevation data here at all — nearby contours suggest roughly ${c.elevation_range_m[0]}-${c.elevation_range_m[1]}m`;
     verdictCls = 'warn';
   } else {
     verdictText = 'No elevation data available at this point';
@@ -2781,13 +3069,16 @@ function terrainCard(t){
 
   html += `<div style="margin-top:10px"><strong>Precise elevation${p.found ? ' (' + p.source + ')' : ''}:</strong> `;
   if(p.found){
-    html += `${p.ground_elevation_m}m ground`;
+    html += `${p.ground_elevation_m}m ${isSatelliteDem ? 'surface' : 'ground'}`;
     if(p.surface_elevation_m != null){
       html += `, ${p.surface_elevation_m}m surface (+${p.canopy_or_building_height_m}m above ground)`;
     }
-    html += ` <span class="muted">(${p.resolution_m}m grid, surveyed ${p.survey_date})</span>`;
+    html += ` <span class="muted">(${p.resolution_m}m grid, ${isSatelliteDem ? p.survey_date : 'surveyed ' + p.survey_date})</span>`;
+    if(isSatelliteDem){
+      html += `<div class="muted" style="margin-top:4px">This is Copernicus GLO-30, a free global satellite DEM — no LIDAR survey (OPW, TII, or a county council) reaches this point. It's a real, disclosed number, but a coarser DIGITAL SURFACE reading (radar reflects off tree canopy/rooftops) rather than the bare-ground LIDAR figure shown elsewhere in this app.</div>`;
+    }
   } else {
-    html += `<span class="muted">not available — real LIDAR coverage here comes from several agencies (OPW's flood-risk survey, TII's road/rail corridors, one county council) and only covers about 30% of the country</span>`;
+    html += `<span class="muted">not available — no LIDAR survey here, and even the Copernicus GLO-30 global satellite fallback found nothing at this exact point</span>`;
   }
   html += '</div>';
 
@@ -2802,10 +3093,21 @@ function terrainCard(t){
     // hand (small, stable, no reason to fetch this from the backend) —
     // every pixel in the map image is colored by exactly this scale
     // against THIS tile's own real min/max, not a fixed national range.
-    html += `<div style="margin-top:10px"><strong>Precise elevation map layer</strong> <span class="muted">(${(p.image_radius_m / 1000).toFixed(1)}km radius, ${p.image_tile_count} tile(s) stitched: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
+    html += `<div style="margin-top:10px"><strong>${isSatelliteDem ? 'Satellite DEM' : 'Precise elevation'} map layer</strong> <span class="muted">(${(p.image_radius_m / 1000).toFixed(1)}km radius, ${p.image_tile_count} tile(s) stitched: ${p.image_min_elevation_m}m to ${p.image_max_elevation_m}m)</span></div>`;
     html += `<div style="margin-top:4px;height:14px;border-radius:3px;background:linear-gradient(to right, rgb(46,139,60) 0%, rgb(154,205,50) 35%, rgb(222,165,62) 65%, rgb(255,255,255) 100%)"></div>`;
     html += `<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px"><span>${p.image_min_elevation_m}m</span><span>${p.image_max_elevation_m}m</span></div>`;
-    html += `<div style="margin-top:6px" class="muted">Every pixel is a real LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;
+    html += isSatelliteDem
+      ? `<div style="margin-top:6px" class="muted">Every pixel is a real Copernicus GLO-30 value, colored by this scale — not a hillshade, but 30m satellite resolution, not a LIDAR survey. Toggle "Precise terrain (LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`
+      : `<div style="margin-top:6px" class="muted">Every pixel is a real LIDAR elevation value, colored by this scale — not a hillshade. Toggle "Precise terrain (LIDAR)" in the layer switcher (top-left) to see it on the map.</div>`;
+    // Real LIDAR survey coverage doesn't always reach edge-to-edge within
+    // this radius (a road-corridor survey, or a genuine tile boundary —
+    // see CLAUDE.md's R32 E4F8 writeup) — asked for directly: fill any
+    // real gap with Copernicus GLO-30 rather than leaving it blank, real
+    // LIDAR always taking priority where it exists. Disclosed here rather
+    // than silently blended in unmarked.
+    if(!isSatelliteDem && p.satellite_fill_fraction > 0){
+      html += `<div style="margin-top:6px" class="muted">${Math.round(p.satellite_fill_fraction * 100)}% of this image is outside ${p.source}'s own real coverage and has been filled in with Copernicus GLO-30 (coarser, 30m satellite) rather than left blank.</div>`;
+    }
   }
 
   html += `<div style="margin-top:10px" class="muted">Contour lines are also available as a map layer — "Elevation contours (EPA)" in the layer switcher, off by default.</div>`;
@@ -2824,8 +3126,8 @@ function terrainCard(t){
     html += `<div style="margin-top:10px" class="muted">Confirm a plot boundary above to unlock a rotatable 3D terrain model of this site.</div>`;
   }
 
-  return card('Terrain & elevation', verdictCls, p.found ? 'Live' : 'Live (approx.)', 'live', html,
-    'Sources: OPW / TII / Westmeath Co Co LIDAR (via GSI) &middot; EPA Hydrologically Corrected DTM contours');
+  return card('Terrain & elevation', verdictCls, p.found ? (isSatelliteDem ? 'Live (satellite fallback)' : 'Live') : 'Live (approx.)', 'live', html,
+    'Sources: OPW / TII / Westmeath Co Co LIDAR (via GSI) &middot; Copernicus GLO-30 (global satellite DEM, fallback only) &middot; EPA Hydrologically Corrected DTM contours');
 }
 
 function mailto(to, subject, body){
@@ -2874,21 +3176,49 @@ function utilitiesCard(u){
     (grid ? ' · <a href="https://www.eirgrid.ie" target="_blank">EirGrid</a> Transmission Development Plan' : ''));
 }
 
+// One expandable row per application — <details> rather than a plain <li>
+// so the FULL record (address, received/decision dates, appeal status) is
+// actually reachable in the UI, not just fetched and hidden; the summary
+// line stays the same short at-a-glance text as before. `within_site_boundary`
+// is only ever true/false once a boundary's been confirmed and this
+// section re-fetched with it (see planning.get_planning_applications()) —
+// undefined/null before that, so the badge just doesn't show yet.
+function appRow(app){
+  const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
+  const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
+  const onSiteBadge = app.within_site_boundary ? '<span class="on-site-badge">On site</span>' : '';
+  const appeal = app.appeal_status
+    ? `Appeal: ${app.appeal_status}${app.appeal_decision && app.appeal_decision !== 'N/A' ? ' — ' + app.appeal_decision : ''}`
+    : 'No appeal on record';
+  return `<details class="app-row">
+    <summary>${app.application_number || 'Unknown ref.'}: ${app.status || ''}${decision}${onSiteBadge} <span class="muted">— ${desc}</span></summary>
+    <div class="app-detail">
+      ${app.address ? `${app.address}<br>` : ''}
+      Received: ${app.received_date || 'n/a'} &middot; Decision: ${app.decision_date || 'n/a'}<br>
+      ${appeal}
+    </div>
+  </details>`;
+}
+
 function planningCard(p, apps){
   if(!p){
     return card('Planning context', 'bad', 'Error', 'manual', 'Lookup failed — see server logs.', '');
   }
   const siteMatch = apps && apps.site_match;
+  const onSiteCount = apps && apps.on_site_count; // null until a boundary's confirmed, 0+ after
   const radiusM = (apps && apps.search_radius_m) || 500;
   const nearbyCount = apps ? apps.application_count : 0;
   const nearbyLabel = nearbyCount + (apps && apps.more_exist ? '+' : '');
 
   let verdictText, verdictCls;
-  if(siteMatch && siteMatch.application_count){
+  if(onSiteCount){
+    verdictText = `${onSiteCount} planning application(s) found ON this site` + (nearbyCount > onSiteCount ? `; ${nearbyLabel} total within ${radiusM}m` : '');
+    verdictCls = 'warn';
+  } else if(siteMatch && siteMatch.application_count){
     verdictText = `${siteMatch.application_count} planning application(s) on this exact Eircode` + (nearbyCount ? `; ${nearbyLabel} more within ${radiusM}m` : '');
     verdictCls = 'warn';
   } else if(nearbyCount){
-    verdictText = `No planning history on this exact site, but ${nearbyLabel} application(s) within ${radiusM}m`;
+    verdictText = (onSiteCount === 0 ? 'None on the confirmed plot itself, but ' : 'No planning history on this exact site, but ') + `${nearbyLabel} application(s) within ${radiusM}m`;
     verdictCls = 'warn';
   } else if(apps){
     verdictText = `No planning applications found within ${radiusM}m`;
@@ -2899,21 +3229,21 @@ function planningCard(p, apps){
   }
   let html = verdict(verdictText, verdictCls);
 
+  // Its own callout, ahead of everything else — a previous application on
+  // THIS plot specifically, not just somewhere in the search radius (asked
+  // for directly: don't bury this inside "N within 500m").
+  if(apps && apps.on_site_applications && apps.on_site_applications.length){
+    html += `<div style="margin-top:10px"><strong>On this site (within the confirmed plot boundary)</strong></div>` +
+      apps.on_site_applications.map(appRow).join('');
+  }
+
   if(siteMatch && siteMatch.application_count){
-    html += `<div style="margin-top:10px"><strong>${siteMatch.application_count} application(s) — this Eircode (exact match)</strong></div><ul>` +
-      siteMatch.applications.slice(0, 5).map(app => {
-        const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
-        const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
-        return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
-      }).join('') + '</ul>';
+    html += `<div style="margin-top:10px"><strong>${siteMatch.application_count} application(s) — this Eircode (exact match)</strong></div>` +
+      siteMatch.applications.slice(0, 5).map(appRow).join('');
   }
   if(apps && apps.application_count){
-    html += `<div style="margin-top:10px"><strong>${nearbyLabel} planning application(s) within ${radiusM}m</strong></div><ul>` +
-      apps.applications.slice(0, 5).map(app => {
-        const decision = (app.decision && app.decision !== 'N/A') ? ' / ' + app.decision : '';
-        const desc = (app.description || '').slice(0, 60) + ((app.description || '').length > 60 ? '…' : '');
-        return `<li>${app.application_number}: ${app.status || ''}${decision} <span class="muted">— ${desc}</span></li>`;
-      }).join('') + '</ul>';
+    html += `<div style="margin-top:10px"><strong>${nearbyLabel} planning application(s) within ${radiusM}m</strong></div>` +
+      apps.applications.slice(0, 5).map(appRow).join('');
   }
   return card('Planning context', verdictCls, apps ? 'Live + links' : 'Links', 'live', html,
     `<a href="${p.myplan_zoning}" target="_blank">MyPlan.ie zoning</a> · <a href="${p.opw_flood_maps}" target="_blank">OPW flood maps</a>`);
@@ -2942,7 +3272,7 @@ function buildInfoCard(){
       <li>Species occurrence records — total biodiversity record density plus any IUCN Red List threatened species (Vulnerable/Endangered/Critically Endangered) recorded nearby, live via <a href="https://www.gbif.org" target="_blank">GBIF.org</a>, which includes National Biodiversity Data Centre (NBDC)-published Irish records</li>
       <li>Terrain &amp; elevation — precise ground/surface elevation (~2m grid) from OPW's own LIDAR survey tiles, downloaded and cached on demand per site (not a live queryable elevation API — GSI only publishes cosmetic shaded-relief renderings of this data via API, not the real elevation values); falls back to national 10m-interval contour lines where OPW hasn't surveyed (mainly away from rivers/floodplains/coasts). Contour lines are also drawn on the map itself as a toggleable "Elevation contours (EPA)" layer — server-rendered images (that layer's own vector shapes can't be queried directly, see the limitations below), off by default.</li>
       <li>Water &amp; wastewater infrastructure — Uisce Éireann asset data requests</li>
-      <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>: a 500m radius search plus a bonus exact-Eircode match (only works when an application's own record has that field populated — true for ~0.6% nationally); zoning itself stays a link-out</li>
+      <li>Planning applications — National Planning Application Database, live via the Esri app embedded in <a href="https://www.myplan.ie" target="_blank">MyPlan.ie</a>: a 500m radius search (widened automatically to cover a larger confirmed plot), each application checked against the confirmed plot boundary itself and flagged separately when it's genuinely on the site — not just nearby — plus a bonus exact-Eircode match (only works when an application's own record has that field populated — true for ~0.6% nationally); zoning itself stays a link-out</li>
       <li>Ecology &amp; nature conservation — <a href="https://www.npws.ie/protected-sites" target="_blank">NPWS Designated Areas</a> (SAC, SPA, NHA, proposed NHA), live via the National Parks &amp; Wildlife Service's own Designations Viewer</li>
       <li>RPS &amp; ACA (statutory protected structures / conservation areas) — live for South Dublin, Wicklow, Fingal (ACA only), and Cork City (RPS only) so far; each of Ireland's 31 local authorities publishes its own, most as plan text/PDF rather than a queryable service. Local authority resolved via Tailte Éireann's own administrative boundaries.</li>
       <li>Environmental hazards — radon risk, closed/historic landfills, licensed IPPC/IED industrial facilities, historic/abandoned mine sites, and major industrial facilities (active mines, quarries, power stations, chemical plants etc. — EPA's Pollutant Release and Transfer Register, searched at a much wider 10km radius since these can matter well beyond a site's immediate area), all live via the <a href="https://gis.epa.ie/EPAMaps/" target="_blank">EPA's own GeoServer</a> (gis.epa.ie). Radon was link-out only until this was found.</li>
@@ -2974,6 +3304,19 @@ document.getElementById('scoutBtn').addEventListener('click', () => {
   if(q) runScout(q);
 });
 addressInputEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') document.getElementById('scoutBtn').click(); });
+
+// Landing-page nav CTA + closing CTA band both just bring the user back to
+// the one real search input rather than duplicating it (see enterResultsMode
+// above for why #searchBar stays a single DOM node).
+function scrollToSearch(){
+  addressInputEl.focus({preventScroll:true});
+  searchBarEl.scrollIntoView({behavior:'smooth', block:'center'});
+}
+document.getElementById('navScoutBtn').addEventListener('click', scrollToSearch);
+document.getElementById('ctaScoutBtn').addEventListener('click', scrollToSearch);
+
+const footerYearEl = document.getElementById('footerYear');
+if(footerYearEl) footerYearEl.textContent = new Date().getFullYear();
 </script>
 
 </body>
